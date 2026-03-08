@@ -34,6 +34,8 @@ use talos_model::index::{BerthIndex, VesselIndex};
 // ----------------------------------------------------------------
 
 /// Strongly-typed instructions for the undo stack machine.
+///
+/// size = 40 (0x28), align = 0x8
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoInstruction {
     /// Reverts a swap between two vessels by swapping them again.
@@ -366,7 +368,26 @@ impl ScheduleGraphUndoLog {
     /// identical to its state prior to the first logged mutation.
     #[inline(always)]
     pub fn apply_rollback(&mut self, graph: &mut ScheduleGraph) {
-        while let Some(instruction) = self.stack.pop() {
+        // We explicitly avoid `self.stack.pop()` to drain the undo log.
+        // `pop()` performs bounds checking, dynamic branch evaluation for the `Option`,
+        // and updates the vector's length in memory on every single iteration.
+        // By using raw pointer arithmetic over the exact known length, we distill
+        // this loop down to pure memory reads and jump tables.
+        let ptr = self.stack.as_ptr();
+        for i in (0..self.stack.len()).rev() {
+            // Check to ensure we never read uninitialized memory or out of bounds.
+            // While the loop range makes this mathematically sound, this guards
+            // against unexpected memory corruption.
+            debug_assert!(
+                i < self.stack.len(),
+                "internal invariant violated in ScheduleGraphUndoLog::apply_rollback: index {} out of bounds for stack of length {}",
+                i,
+                self.stack.len()
+            );
+
+            // SAFETY: The loop bounds strictly guarantee `i < self.stack.len()`,
+            // ensuring this memory address is both allocated and initialized.
+            let instruction = unsafe { *ptr.add(i) };
             match instruction {
                 UndoInstruction::SwapVessels {
                     vessel_one: vessel1,
@@ -431,6 +452,8 @@ impl ScheduleGraphUndoLog {
                 },
             }
         }
+        // Important to clear the stack after applying all rollbacks, as the instructions are no longer valid.
+        self.stack.clear();
     }
 }
 

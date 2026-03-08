@@ -45,6 +45,29 @@ impl<'a> Iterator for TouchedIndicesIter<'a> {
 }
 
 // ----------------------------------------------------------------
+// UntouchedBerthsIter
+// ----------------------------------------------------------------
+
+pub struct UntouchedBerthsIter<'a> {
+    iter: std::iter::Enumerate<std::slice::Iter<'a, bool>>,
+}
+
+impl<'a> Iterator for UntouchedBerthsIter<'a> {
+    type Item = BerthIndex;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        // Fast-forward to the next `false` value and return its index
+        for (idx, &is_touched) in &mut self.iter {
+            if !is_touched {
+                return Some(BerthIndex::new(idx));
+            }
+        }
+        None
+    }
+}
+
+// ----------------------------------------------------------------
 // TouchedBerths
 // ----------------------------------------------------------------
 
@@ -55,6 +78,9 @@ impl<'a> Iterator for TouchedIndicesIter<'a> {
 #[repr(transparent)]
 #[derive(Clone, PartialEq, Eq)]
 pub struct TouchedBerths {
+    // Note
+    // We might use a bitset in the future
+    // but for now a Vec<bool> is simple and efficient enough for our needs.
     touched: Vec<bool>,
 }
 
@@ -139,9 +165,18 @@ impl TouchedBerths {
         self.touched.iter()
     }
 
+    /// Returns an iterator over the indices of touched berths.
     #[inline(always)]
-    pub fn touched_indices(&self) -> TouchedIndicesIter<'_> {
+    pub fn iter_touched_berths(&self) -> TouchedIndicesIter<'_> {
         TouchedIndicesIter {
+            iter: self.touched.iter().enumerate(),
+        }
+    }
+
+    /// Returns an iterator over the indices of untouched berths.
+    #[inline(always)]
+    pub fn iter_untouched_berths(&self) -> UntouchedBerthsIter<'_> {
+        UntouchedBerthsIter {
             iter: self.touched.iter().enumerate(),
         }
     }

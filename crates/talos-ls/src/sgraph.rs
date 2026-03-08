@@ -1525,8 +1525,99 @@ impl ScheduleGraph {
             self.num_vessels
         );
 
+        // Identity Case: If the segments are the same, there's nothing to swap.
+        // It will also not corrupt the graph structure, so we can just return early without doing any work.
         if segment_a_first == segment_b_first {
             return;
+        }
+
+        // Very complex validation logic to catch all possible ways the segments could be malformed or overlapping.
+        // This cannot be run in release builds due to the performance cost,
+        // but it's invaluable for catching bugs during development and testing.
+        #[cfg(debug_assertions)]
+        {
+            // Validate Segment A and check if it overlaps with B's boundaries
+            let mut current = segment_a_first;
+            let mut a_is_valid = false;
+            for _ in 0..self.num_vessels {
+                assert!(
+                    current != segment_b_first && current != segment_b_last,
+                    "called `ScheduleGraph::swap_segments` with overlapping segments: \
+                    a_first = {}, a_last = {}, b_first = {}, b_last = {}",
+                    segment_a_first.get(),
+                    segment_a_last.get(),
+                    segment_b_first.get(),
+                    segment_b_last.get()
+                );
+
+                if current == segment_a_last {
+                    a_is_valid = true;
+                    break;
+                }
+
+                current = self.next[current.get()];
+
+                assert!(
+                    current.get() < self.num_vessels,
+                    "called `ScheduleGraph::swap_segments` with invalid Segment A (hits a sentinel): \
+                    a_first = {}, a_last = {}, b_first = {}, b_last = {}",
+                    segment_a_first.get(),
+                    segment_a_last.get(),
+                    segment_b_first.get(),
+                    segment_b_last.get(),
+                );
+            }
+            assert!(
+                a_is_valid,
+                "called `ScheduleGraph::swap_segments` with invalid Segment A (a_last is not reachable from a_first): \
+                a_first = {}, a_last = {}, b_first = {}, b_last = {}",
+                segment_a_first.get(),
+                segment_a_last.get(),
+                segment_b_first.get(),
+                segment_b_last.get(),
+            );
+
+            // Validate Segment B and check if it overlaps with A's boundaries
+            // This catches the case where A is entirely contained inside B.
+            let mut current = segment_b_first;
+            let mut b_is_valid = false;
+            for _ in 0..self.num_vessels {
+                assert!(
+                    current != segment_a_first && current != segment_a_last,
+                    "called `ScheduleGraph::swap_segments` with overlapping segments: \
+                    a_first = {}, a_last = {}, b_first = {}, b_last = {}",
+                    segment_a_first.get(),
+                    segment_a_last.get(),
+                    segment_b_first.get(),
+                    segment_b_last.get()
+                );
+
+                if current == segment_b_last {
+                    b_is_valid = true;
+                    break;
+                }
+
+                current = self.next[current.get()];
+
+                assert!(
+                    current.get() < self.num_vessels,
+                    "called `ScheduleGraph::swap_segments` with invalid Segment B (hits a sentinel): \
+                    a_first = {}, a_last = {}, b_first = {}, b_last = {}",
+                    segment_a_first.get(),
+                    segment_a_last.get(),
+                    segment_b_first.get(),
+                    segment_b_last.get(),
+                );
+            }
+            assert!(
+                b_is_valid,
+                "called `ScheduleGraph::swap_segments` with invalid Segment B (b_last is not reachable from b_first): \
+                a_first = {}, a_last = {}, b_first = {}, b_last = {}",
+                segment_a_first.get(),
+                segment_a_last.get(),
+                segment_b_first.get(),
+                segment_b_last.get(),
+            );
         }
 
         let segment_a_predecessor = *unsafe { self.prev.get_unchecked(segment_a_first.get()) };
