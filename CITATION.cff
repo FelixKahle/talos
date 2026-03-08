@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Kahle"
+  given-names: "Felix"
+  orcid: "https://orcid.org/0009-0005-7719-9382"
+title: "Talos: A local search framework for the dynamic berth allocation problem"
+version: 0.1.0
+date-released: 2026-03-02
+url: "https://github.com/FelixKahle/talos"
