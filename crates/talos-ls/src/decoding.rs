@@ -19,6 +19,33 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+//! Schedule graph decoding routines.
+//!
+//! This module translates a ScheduleGraph — which encodes the assignment of
+//! vessels to berths and their relative ordering — into concrete start times,
+//! positions, and cost values stored in a ScheduleState.
+//!
+//! Two entry points are provided:
+//!
+//! - `decode_full_unchecked` decodes every berth in the graph from scratch,
+//!   producing a complete ScheduleState with all vessel assignments and a
+//!   total objective value.
+//!
+//! - `decode_unchecked` performs a delta decode, re-evaluating only the berths
+//!   marked in a TouchedBerths mask while carrying forward untouched berth
+//!   costs from a previously accepted ScheduleState.
+//!
+//! Both functions rely on `decode_berth` to iterate through the vessel sequence
+//! on a single berth, calling `find_earliest_start_unchecked` to place each
+//! vessel into the earliest feasible opening-time interval that satisfies the
+//! vessel's arrival time, processing duration, and the berth's free-time
+//! constraint. A caller-supplied evaluator closure computes the per-vessel cost
+//! contribution.
+//!
+//! All public functions in this module are marked `unsafe` because they bypass
+//! bounds checks on berth and vessel indices for performance. Callers must
+//! uphold the invariants documented on each function.
+
 use crate::{
     sgraph::{ScheduleGraph, VesselSequenceIter},
     state::ScheduleState,

@@ -21,7 +21,7 @@
 
 //! High-performance, allocation-free topological representation of closed rings.
 //!
-//! This module provides the [`RingArena`], which acts as the core state representation
+//! This module provides the `RingArena`, which acts as the core state representation
 //! (genotype) for Local Search algorithms evaluated on sequence-based problems.
 //!
 //! # Architecture
@@ -52,6 +52,8 @@ pub struct RingSequenceIter<'a> {
     current_node: usize,
     /// The node at which iteration should stop (exclusive).
     stop_node: usize,
+    /// Guards against infinite loops if the graph becomes disjoint.
+    remaining: usize,
 }
 
 impl<'a> Iterator for RingSequenceIter<'a> {
@@ -59,19 +61,20 @@ impl<'a> Iterator for RingSequenceIter<'a> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<usize> {
-        if self.current_node == self.stop_node {
+        if self.current_node == self.stop_node || self.remaining == 0 {
             return None;
         }
 
         let current = self.current_node;
-        // SAFETY: The graph invariant guarantees `current` is a valid index.
-        self.current_node = *unsafe { self.next_pointers.get_unchecked(current) };
-
-        debug_assert!(
-            self.current_node == self.stop_node || self.current_node < self.next_pointers.len()
-        );
+        self.current_node = self.next_pointers[current];
+        self.remaining -= 1;
 
         Some(current)
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.remaining))
     }
 }
 
@@ -90,6 +93,8 @@ pub struct RingSequenceRevIter<'a> {
     current_node: usize,
     /// The node at which iteration should stop (exclusive).
     stop_node: usize,
+    /// Guards against infinite loops if the graph becomes disjoint.
+    remaining: usize,
 }
 
 impl<'a> Iterator for RingSequenceRevIter<'a> {
@@ -97,19 +102,19 @@ impl<'a> Iterator for RingSequenceRevIter<'a> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<usize> {
-        if self.current_node == self.stop_node {
+        if self.current_node == self.stop_node || self.remaining == 0 {
             return None;
         }
 
         let current = self.current_node;
-        // SAFETY: The graph invariant guarantees `current` is a valid index.
-        self.current_node = *unsafe { self.prev_pointers.get_unchecked(current) };
-
-        debug_assert!(
-            self.current_node == self.stop_node || self.current_node < self.prev_pointers.len()
-        );
+        self.current_node = self.prev_pointers[current];
+        self.remaining -= 1;
 
         Some(current)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.remaining))
     }
 }
 
@@ -128,6 +133,8 @@ pub struct RingEdgeIter<'a> {
     current_node: usize,
     /// The node at which iteration should stop.
     stop_node: usize,
+    /// The remaining number of edges to yield before giving up to prevent infinite loops.
+    remaining: usize,
 }
 
 impl<'a> Iterator for RingEdgeIter<'a> {
@@ -135,22 +142,27 @@ impl<'a> Iterator for RingEdgeIter<'a> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_node == self.stop_node {
+        if self.current_node == self.stop_node || self.remaining == 0 {
             return None;
         }
 
         let from = self.current_node;
-        // SAFETY: The graph invariant guarantees `from` is a valid index.
-        let to = *unsafe { self.next_pointers.get_unchecked(from) };
+        let to = self.next_pointers[from];
 
         if to == self.stop_node {
-            // Stop without yielding an edge to the stop node itself
             self.current_node = self.stop_node;
             return None;
         }
 
         self.current_node = to;
+        self.remaining -= 1;
+
         Some((from, to))
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.remaining))
     }
 }
 
@@ -273,6 +285,8 @@ impl RingArena {
     /// Returns the internal `prev` pointer for the given node.
     #[inline]
     pub fn prev(&self, node: usize) -> usize {
+        debug_assert!(node < self.prev.len());
+
         self.prev[node]
     }
 
@@ -290,37 +304,115 @@ impl RingArena {
 
     /// Returns an iterator over a sequence of nodes starting from `start_node`
     /// and ending right before it reaches `stop_node`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either `start_node` or `stop_node` is out of bounds.
     #[inline]
     pub fn sequence_iter(&self, start_node: usize, stop_node: usize) -> RingSequenceIter<'_> {
+        assert!(start_node < self.next.len());
+        assert!(stop_node < self.next.len());
+
+        let remaining = self.next.len();
         RingSequenceIter {
             next_pointers: &self.next,
             current_node: start_node,
+            stop_node,
+            remaining,
+        }
+    }
+
+    /// Returns an iterator over a sequence of nodes starting from `start_node`
+    /// and ending right before it reaches `stop_node`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `start_node` and `stop_node` are valid indices within the arena.
+    /// No bounds checking is performed.
+    #[inline]
+    pub unsafe fn sequence_iter_unchecked(
+        &self,
+        start_node: usize,
+        stop_node: usize,
+    ) -> RingSequenceIter<'_> {
+        debug_assert!(start_node < self.next.len());
+        debug_assert!(stop_node < self.next.len());
+
+        let remaining = self.next.len();
+        RingSequenceIter {
+            next_pointers: &self.next,
+            current_node: start_node,
+            remaining,
             stop_node,
         }
     }
 
     /// Returns a reverse iterator over a sequence of nodes starting from `start_node`
     /// and ending right before it reaches `stop_node`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `start_node` and `stop_node` are valid indices within the arena.
+    /// No bounds checking is performed.
     #[inline]
-    pub fn sequence_rev_iter(
+    pub unsafe fn sequence_rev_iter_unchecked(
         &self,
         start_node: usize,
         stop_node: usize,
     ) -> RingSequenceRevIter<'_> {
+        debug_assert!(start_node < self.prev.len());
+        debug_assert!(stop_node < self.prev.len());
+
+        let remaining = self.prev.len();
         RingSequenceRevIter {
             prev_pointers: &self.prev,
             current_node: start_node,
+            remaining,
             stop_node,
         }
     }
 
-    /// Returns an iterator over all edges (adjacent node pairs) within a sequence.
+    /// Returns an iterator over a sequence of nodes starting from `start_node`
+    /// and ending right before it reaches `stop_node`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either `start_node` or `stop_node` is out of bounds.
     #[inline]
     pub fn edge_iter(&self, start_node: usize, stop_node: usize) -> RingEdgeIter<'_> {
+        assert!(start_node < self.next.len());
+        assert!(stop_node < self.next.len());
+
+        let remaining = self.next.len();
         RingEdgeIter {
             next_pointers: &self.next,
             current_node: start_node,
             stop_node,
+            remaining,
+        }
+    }
+
+    /// Returns an iterator over all edges (adjacent node pairs) within a sequence.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `start_node` and `stop_node` are valid indices within the arena.
+    /// No bounds checking is performed.
+    #[inline]
+    pub unsafe fn edge_iter_unchecked(
+        &self,
+        start_node: usize,
+        stop_node: usize,
+    ) -> RingEdgeIter<'_> {
+        debug_assert!(start_node < self.next.len());
+        debug_assert!(stop_node < self.next.len());
+
+        let remaining = self.next.len();
+        RingEdgeIter {
+            next_pointers: &self.next,
+            current_node: start_node,
+            stop_node,
+            remaining,
         }
     }
 
@@ -375,6 +467,9 @@ impl RingArena {
     /// Panics if either `first` or `second` is out of bounds.
     #[inline]
     pub fn swap_nodes(&mut self, first: usize, second: usize) {
+        debug_assert!(first < self.len());
+        debug_assert!(second < self.len());
+
         if first == second {
             return;
         }
@@ -452,7 +547,8 @@ impl RingArena {
     /// Both `first` and `second` must be valid node indices. No bounds checking is performed.
     #[inline]
     pub unsafe fn swap_nodes_unchecked(&mut self, first: usize, second: usize) {
-        debug_assert!(first < self.len() && second < self.len());
+        debug_assert!(first < self.len());
+        debug_assert!(second < self.len());
 
         if first == second {
             return;
@@ -535,6 +631,11 @@ impl RingArena {
     /// Panics if any of the indices are out of bounds.
     #[inline]
     pub fn swap_segments(&mut self, a_first: usize, a_last: usize, b_first: usize, b_last: usize) {
+        debug_assert!(a_first < self.len());
+        debug_assert!(a_last < self.len());
+        debug_assert!(b_first < self.len());
+        debug_assert!(b_last < self.len());
+
         if a_first == b_first {
             return;
         }
@@ -604,12 +705,10 @@ impl RingArena {
         b_first: usize,
         b_last: usize,
     ) {
-        debug_assert!(
-            a_first < self.len()
-                && a_last < self.len()
-                && b_first < self.len()
-                && b_last < self.len()
-        );
+        debug_assert!(a_first < self.len());
+        debug_assert!(a_last < self.len());
+        debug_assert!(b_first < self.len());
+        debug_assert!(b_last < self.len());
 
         if a_first == b_first {
             return;
@@ -688,6 +787,9 @@ impl RingArena {
     /// Panics if either `node` or `anchor` is out of bounds.
     #[inline]
     pub fn relocate_after(&mut self, node: usize, anchor: usize) {
+        debug_assert!(node < self.len());
+        debug_assert!(anchor < self.len());
+
         if node == anchor {
             return;
         }
@@ -726,6 +828,9 @@ impl RingArena {
     /// Valid bounds must be respected. No bounds checking is performed.
     #[inline]
     pub unsafe fn relocate_after_unchecked(&mut self, node: usize, anchor: usize) {
+        debug_assert!(node < self.len());
+        debug_assert!(anchor < self.len());
+
         if node == anchor {
             return;
         }
@@ -753,6 +858,10 @@ impl RingArena {
     /// Panics if any of the indices are out of bounds.
     #[inline]
     pub fn relocate_segment_after(&mut self, first: usize, last: usize, anchor: usize) {
+        debug_assert!(first < self.len());
+        debug_assert!(last < self.len());
+        debug_assert!(anchor < self.len());
+
         if self.prev[first] == anchor {
             return;
         }
@@ -793,6 +902,10 @@ impl RingArena {
         last: usize,
         anchor: usize,
     ) {
+        debug_assert!(first < self.len());
+        debug_assert!(last < self.len());
+        debug_assert!(anchor < self.len());
+
         if *unsafe { self.prev.get_unchecked(first) } == anchor {
             return;
         }
@@ -833,6 +946,9 @@ impl RingArena {
     /// Panics if either `node` or `anchor` is out of bounds.
     #[inline]
     pub fn relocate_before(&mut self, node: usize, anchor: usize) {
+        debug_assert!(node < self.len());
+        debug_assert!(anchor < self.len());
+
         let anchor_predecessor = self.prev[anchor];
         self.relocate_after(node, anchor_predecessor);
     }
@@ -854,6 +970,9 @@ impl RingArena {
     /// Valid bounds must be respected. No bounds checking is performed.
     #[inline]
     pub unsafe fn relocate_before_unchecked(&mut self, node: usize, anchor: usize) {
+        debug_assert!(node < self.len());
+        debug_assert!(anchor < self.len());
+
         let anchor_predecessor = *unsafe { self.prev.get_unchecked(anchor) };
         unsafe { self.relocate_after_unchecked(node, anchor_predecessor) };
     }
@@ -875,6 +994,10 @@ impl RingArena {
     /// Panics if any of the indices are out of bounds.
     #[inline]
     pub fn relocate_segment_before(&mut self, first: usize, last: usize, anchor: usize) {
+        debug_assert!(first < self.len());
+        debug_assert!(last < self.len());
+        debug_assert!(anchor < self.len());
+
         let anchor_predecessor = self.prev[anchor];
         self.relocate_segment_after(first, last, anchor_predecessor);
     }
@@ -901,6 +1024,10 @@ impl RingArena {
         last: usize,
         anchor: usize,
     ) {
+        debug_assert!(first < self.len());
+        debug_assert!(last < self.len());
+        debug_assert!(anchor < self.len());
+
         let anchor_predecessor = *unsafe { self.prev.get_unchecked(anchor) };
         unsafe { self.relocate_segment_after_unchecked(first, last, anchor_predecessor) };
     }
@@ -922,6 +1049,9 @@ impl RingArena {
     /// Panics if either `segment_first` or `segment_last` is out of bounds.
     #[inline]
     pub fn reverse_segment(&mut self, first: usize, last: usize) {
+        debug_assert!(first < self.len());
+        debug_assert!(last < self.len());
+
         if first == last {
             return;
         }
@@ -965,7 +1095,8 @@ impl RingArena {
     /// No bounds checking is performed.
     #[inline]
     pub unsafe fn reverse_segment_unchecked(&mut self, first: usize, last: usize) {
-        debug_assert!(first < self.len() && last < self.len());
+        debug_assert!(first < self.len());
+        debug_assert!(last < self.len());
 
         if first == last {
             return;
@@ -1265,11 +1396,11 @@ mod tests {
     fn test_sequence_iter() {
         let arena = complex_fixture();
         // Start at 1, stop at 0 (so it should yield 1, 2, 3)
-        let seq: Vec<usize> = arena.sequence_iter(1, 0).collect();
+        let seq: Vec<usize> = unsafe { arena.sequence_iter_unchecked(1, 0).collect() };
         assert_eq!(seq, vec![1, 2, 3]);
 
         // Start at 4, stop at 4 (empty)
-        let seq_empty: Vec<usize> = arena.sequence_iter(4, 4).collect();
+        let seq_empty: Vec<usize> = unsafe { arena.sequence_iter_unchecked(4, 4).collect() };
         assert!(seq_empty.is_empty());
     }
 
@@ -1277,7 +1408,7 @@ mod tests {
     fn test_sequence_rev_iter() {
         let arena = complex_fixture();
         // Start at 3, reverse stop at 0 (should yield 3, 2, 1)
-        let seq: Vec<usize> = arena.sequence_rev_iter(3, 0).collect();
+        let seq: Vec<usize> = unsafe { arena.sequence_rev_iter_unchecked(3, 0).collect() };
         assert_eq!(seq, vec![3, 2, 1]);
     }
 
@@ -1285,7 +1416,7 @@ mod tests {
     fn test_edge_iter() {
         let arena = complex_fixture();
         // Edges starting at 0, stopping at 3 (should yield (0,1), (1,2))
-        let edges: Vec<(usize, usize)> = arena.edge_iter(0, 3).collect();
+        let edges: Vec<(usize, usize)> = unsafe { arena.edge_iter_unchecked(0, 3).collect() };
         assert_eq!(edges, vec![(0, 1), (1, 2)]);
     }
 

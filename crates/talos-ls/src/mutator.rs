@@ -19,6 +19,36 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+//! High-level mutation engine for ScheduleGraph topology changes.
+//!
+//! This module provides Mutator, a transactional wrapper around a
+//! ScheduleGraph that intercepts every topological modification and
+//! automatically records two side-products:
+//!
+//! - An undo log (ScheduleGraphUndoLog) that captures the inverse of each
+//!   operation, enabling callers to roll back an arbitrary sequence of
+//!   mutations in reverse order.
+//!
+//! - A structural diff (ScheduleGraphDiff) that records which linked-list
+//!   edges were broken or created and which vessels were reallocated between
+//!   berths. Downstream consumers use this diff to determine which berths
+//!   need re-decoding after a mutation.
+//!
+//! Mutator exposes both bounds-checked and unchecked variants of every
+//! operation. The checked variants panic on out-of-bounds indices while the
+//! unchecked variants use only debug assertions and skip bounds checks in
+//! release builds. The supported operations are:
+//!
+//! - Single-vessel and segment swaps
+//! - Segment reversal
+//! - Relocation of a single vessel or contiguous segment to an arbitrary
+//!   position (after/before a reference vessel, or to the head/tail of a
+//!   berth)
+//!
+//! Edge diff tracking is handled by EdgeDeltaTracker, a stack-allocated
+//! micro-tracker that snapshots up to four nodes' next pointers before a
+//! mutation and emits the net edge changes into the diff afterward.
+
 use crate::{
     sgraph::ScheduleGraph, sgraphdiff::ScheduleGraphDiff, sgraphundo::ScheduleGraphUndoLog,
 };
@@ -241,7 +271,23 @@ impl<'a> Mutator<'a> {
         }
     }
 
-    /// Swaps the positions of two vessels.
+    /// Swaps the positions of two vessels in the schedule graph.
+    ///
+    /// ```text
+    /// Before:
+    ///   Berth X: ... <-> Prev_A <-> A <-> Next_A <-> ...
+    ///   Berth Y: ... <-> Prev_B <-> B <-> Next_B <-> ...
+    ///
+    /// After:
+    ///   Berth X: ... <-> Prev_A <-> B <-> Next_A <-> ...
+    ///   Berth Y: ... <-> Prev_B <-> A <-> Next_B <-> ...
+    /// ```
+    ///
+    /// Records the swap in the undo log, emits edge diffs for every
+    /// changed `next` pointer, and emits reallocation entries if the
+    /// two vessels belonged to different berths.
+    ///
+    /// No-op if `a == b`.
     ///
     /// # Panics
     ///
@@ -282,7 +328,23 @@ impl<'a> Mutator<'a> {
         }
     }
 
-    /// Swaps two contiguous segments.
+    /// Swaps two contiguous segments of vessels.
+    ///
+    /// ```text
+    /// Before:
+    ///   Berth X: ... <-> Prev_A <-> [ A_First ... A_Last ] <-> Next_A <-> ...
+    ///   Berth Y: ... <-> Prev_B <-> [ B_First ... B_Last ] <-> Next_B <-> ...
+    ///
+    /// After:
+    ///   Berth X: ... <-> Prev_A <-> [ B_First ... B_Last ] <-> Next_A <-> ...
+    ///   Berth Y: ... <-> Prev_B <-> [ A_First ... A_Last ] <-> Next_B <-> ...
+    /// ```
+    ///
+    /// Records the swap in the undo log, emits edge diffs, and emits
+    /// reallocation entries for every vessel in each segment if the
+    /// segments belonged to different berths.
+    ///
+    /// No-op if `a_first == b_first`.
     ///
     /// # Panics
     ///
@@ -322,7 +384,24 @@ impl<'a> Mutator<'a> {
         self.record_segment_reallocation(b_first, b_last, old_bb, old_ba);
     }
 
-    /// Reverses a contiguous segment.
+    /// Reverses the internal ordering of a contiguous segment of vessels.
+    ///
+    /// ```text
+    /// Before:
+    ///   ... <-> Prev <-> [ A <-> B <-> C <-> D ] <-> Next <-> ...
+    ///                      ^                 ^
+    ///                    first              last
+    ///
+    /// After:
+    ///   ... <-> Prev <-> [ D <-> C <-> B <-> A ] <-> Next <-> ...
+    /// ```
+    ///
+    /// Records the reversal in the undo log and emits edge diffs for
+    /// every internal link that was reversed, plus the two boundary
+    /// links. No reallocation entries are emitted because reversal
+    /// does not change berth assignments.
+    ///
+    /// No-op if `first == last`.
     ///
     /// # Panics
     ///
@@ -364,7 +443,22 @@ impl<'a> Mutator<'a> {
         self.graph.reverse_segment(first, last);
     }
 
-    /// Relocates a vessel to immediately follow another vessel.
+    /// Relocates a single vessel to immediately follow another vessel.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source: ... <-> Prev <-> Vessel <-> Next <-> ...
+    ///   Target: ... <-> Anchor <-> Anchor_Next <-> ...
+    ///
+    /// After:
+    ///   Source: ... <-> Prev <------------> Next <-> ...
+    ///   Target: ... <-> Anchor <-> Vessel <-> Anchor_Next <-> ...
+    /// ```
+    ///
+    /// Records the original position in the undo log, emits edge diffs,
+    /// and emits a reallocation entry if the vessel changed berths.
+    ///
+    /// No-op if `vessel == anchor` or `vessel` already follows `anchor`.
     ///
     /// # Panics
     ///
@@ -400,7 +494,22 @@ impl<'a> Mutator<'a> {
         }
     }
 
-    /// Relocates a vessel to immediately precede another vessel.
+    /// Relocates a single vessel to immediately precede another vessel.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source: ... <-> Prev <-> Vessel <-> Next <-> ...
+    ///   Target: ... <-> Ref_Prev <-> Reference <-> ...
+    ///
+    /// After:
+    ///   Source: ... <-> Prev <------------> Next <-> ...
+    ///   Target: ... <-> Ref_Prev <-> Vessel <-> Reference <-> ...
+    /// ```
+    ///
+    /// Records the original position in the undo log, emits edge diffs,
+    /// and emits a reallocation entry if the vessel changed berths.
+    ///
+    /// No-op if `vessel == reference` or `vessel` already precedes `reference`.
     ///
     /// # Panics
     ///
@@ -437,7 +546,20 @@ impl<'a> Mutator<'a> {
         }
     }
 
-    /// Relocates a vessel to the head of a berth.
+    /// Relocates a single vessel to the head (first position) of a berth.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source:  ... <-> Prev <-> Vessel <-> Next <-> ...
+    ///   Target:  Sentinel <-> Old_Head <-> ...
+    ///
+    /// After:
+    ///   Source:  ... <-> Prev <------------> Next <-> ...
+    ///   Target:  Sentinel <-> Vessel <-> Old_Head <-> ...
+    /// ```
+    ///
+    /// Records the original position in the undo log, emits edge diffs,
+    /// and emits a reallocation entry if the vessel changed berths.
     ///
     /// # Panics
     ///
@@ -468,7 +590,20 @@ impl<'a> Mutator<'a> {
         }
     }
 
-    /// Relocates a vessel to the tail of a berth.
+    /// Relocates a single vessel to the tail (last position) of a berth.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source:  ... <-> Prev <-> Vessel <-> Next <-> ...
+    ///   Target:  ... <-> Old_Tail <-> Sentinel
+    ///
+    /// After:
+    ///   Source:  ... <-> Prev <------------> Next <-> ...
+    ///   Target:  ... <-> Old_Tail <-> Vessel <-> Sentinel
+    /// ```
+    ///
+    /// Records the original position in the undo log, emits edge diffs,
+    /// and emits a reallocation entry if the vessel changed berths.
     ///
     /// # Panics
     ///
@@ -500,7 +635,24 @@ impl<'a> Mutator<'a> {
         }
     }
 
-    /// Relocates a segment to immediately follow another vessel.
+    /// Relocates a contiguous segment of vessels to immediately follow
+    /// another vessel.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source: ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
+    ///   Target: ... <-> Anchor <-> Anchor_Next <-> ...
+    ///
+    /// After:
+    ///   Source: ... <-> Prev <---------------------> Next <-> ...
+    ///   Target: ... <-> Anchor <-> [ First ... Last ] <-> Anchor_Next <-> ...
+    /// ```
+    ///
+    /// Records the original position in the undo log, emits edge diffs,
+    /// and emits reallocation entries for every vessel in the segment if
+    /// it changed berths.
+    ///
+    /// No-op if the segment already follows `anchor`.
     ///
     /// # Panics
     ///
@@ -541,7 +693,24 @@ impl<'a> Mutator<'a> {
         self.record_segment_reallocation(first, last, old_b, new_b);
     }
 
-    /// Relocates a segment to immediately precede another vessel.
+    /// Relocates a contiguous segment of vessels to immediately precede
+    /// another vessel.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source: ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
+    ///   Target: ... <-> Ref_Prev <-> Reference <-> ...
+    ///
+    /// After:
+    ///   Source: ... <-> Prev <---------------------> Next <-> ...
+    ///   Target: ... <-> Ref_Prev <-> [ First ... Last ] <-> Reference <-> ...
+    /// ```
+    ///
+    /// Records the original position in the undo log, emits edge diffs,
+    /// and emits reallocation entries for every vessel in the segment if
+    /// it changed berths.
+    ///
+    /// No-op if the segment already precedes `reference`.
     ///
     /// # Panics
     ///
@@ -583,7 +752,22 @@ impl<'a> Mutator<'a> {
         self.record_segment_reallocation(first, last, old_b, new_b);
     }
 
-    /// Relocates a segment to the head of a berth.
+    /// Relocates a contiguous segment of vessels to the head (first
+    /// position) of a berth.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source:  ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
+    ///   Target:  Sentinel <-> Old_Head <-> ...
+    ///
+    /// After:
+    ///   Source:  ... <-> Prev <---------------------> Next <-> ...
+    ///   Target:  Sentinel <-> [ First ... Last ] <-> Old_Head <-> ...
+    /// ```
+    ///
+    /// Records the original position in the undo log, emits edge diffs,
+    /// and emits reallocation entries for every vessel in the segment if
+    /// it changed berths.
     ///
     /// # Panics
     ///
@@ -619,7 +803,22 @@ impl<'a> Mutator<'a> {
         self.record_segment_reallocation(first, last, old_b, berth);
     }
 
-    /// Relocates a segment to the tail of a berth.
+    /// Relocates a contiguous segment of vessels to the tail (last
+    /// position) of a berth.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source:  ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
+    ///   Target:  ... <-> Old_Tail <-> Sentinel
+    ///
+    /// After:
+    ///   Source:  ... <-> Prev <---------------------> Next <-> ...
+    ///   Target:  ... <-> Old_Tail <-> [ First ... Last ] <-> Sentinel
+    /// ```
+    ///
+    /// Records the original position in the undo log, emits edge diffs,
+    /// and emits reallocation entries for every vessel in the segment if
+    /// it changed berths.
     ///
     /// # Panics
     ///
@@ -656,6 +855,20 @@ impl<'a> Mutator<'a> {
         self.record_segment_reallocation(first, last, old_b, berth);
     }
 
+    /// Swaps the positions of two vessels in the schedule graph.
+    ///
+    /// ```text
+    /// Before:
+    ///   Berth X: ... <-> Prev_A <-> A <-> Next_A <-> ...
+    ///   Berth Y: ... <-> Prev_B <-> B <-> Next_B <-> ...
+    ///
+    /// After:
+    ///   Berth X: ... <-> Prev_A <-> B <-> Next_A <-> ...
+    ///   Berth Y: ... <-> Prev_B <-> A <-> Next_B <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `swap_vessels`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// Both vessels must be in bounds.
@@ -701,6 +914,20 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    /// Swaps two contiguous segments of vessels.
+    ///
+    /// ```text
+    /// Before:
+    ///   Berth X: ... <-> Prev_A <-> [ A_First ... A_Last ] <-> Next_A <-> ...
+    ///   Berth Y: ... <-> Prev_B <-> [ B_First ... B_Last ] <-> Next_B <-> ...
+    ///
+    /// After:
+    ///   Berth X: ... <-> Prev_A <-> [ B_First ... B_Last ] <-> Next_A <-> ...
+    ///   Berth Y: ... <-> Prev_B <-> [ A_First ... A_Last ] <-> Next_B <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `swap_segments`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// All vessels must be in bounds. Segments must be valid and non-overlapping.
@@ -749,6 +976,20 @@ impl<'a> Mutator<'a> {
         unsafe { self.record_segment_reallocation_unchecked(b_first, b_last, old_bb, old_ba) };
     }
 
+    /// Reverses the internal ordering of a contiguous segment of vessels.
+    ///
+    /// ```text
+    /// Before:
+    ///   ... <-> Prev <-> [ A <-> B <-> C <-> D ] <-> Next <-> ...
+    ///                      ^                 ^
+    ///                    first              last
+    ///
+    /// After:
+    ///   ... <-> Prev <-> [ D <-> C <-> B <-> A ] <-> Next <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `reverse_segment`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// Both vessels must be in bounds and form a valid contiguous segment.
@@ -789,6 +1030,20 @@ impl<'a> Mutator<'a> {
         unsafe { self.graph.reverse_segment_unchecked(first, last) };
     }
 
+    /// Relocates a single vessel to immediately follow another vessel.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source: ... <-> Prev <-> Vessel <-> Next <-> ...
+    ///   Target: ... <-> Anchor <-> Anchor_Next <-> ...
+    ///
+    /// After:
+    ///   Source: ... <-> Prev <------------> Next <-> ...
+    ///   Target: ... <-> Anchor <-> Vessel <-> Anchor_Next <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `relocate_after`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// Both vessels must be in bounds.
@@ -823,6 +1078,20 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    /// Relocates a single vessel to immediately precede another vessel.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source: ... <-> Prev <-> Vessel <-> Next <-> ...
+    ///   Target: ... <-> Ref_Prev <-> Reference <-> ...
+    ///
+    /// After:
+    ///   Source: ... <-> Prev <------------> Next <-> ...
+    ///   Target: ... <-> Ref_Prev <-> Vessel <-> Reference <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `relocate_before`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// Both vessels must be in bounds.
@@ -862,6 +1131,20 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    /// Relocates a single vessel to the head (first position) of a berth.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source:  ... <-> Prev <-> Vessel <-> Next <-> ...
+    ///   Target:  Sentinel <-> Old_Head <-> ...
+    ///
+    /// After:
+    ///   Source:  ... <-> Prev <------------> Next <-> ...
+    ///   Target:  Sentinel <-> Vessel <-> Old_Head <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `relocate_to_head`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// Vessel and berth must be in bounds.
@@ -891,6 +1174,20 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    /// Relocates a single vessel to the tail (last position) of a berth.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source:  ... <-> Prev <-> Vessel <-> Next <-> ...
+    ///   Target:  ... <-> Old_Tail <-> Sentinel
+    ///
+    /// After:
+    ///   Source:  ... <-> Prev <------------> Next <-> ...
+    ///   Target:  ... <-> Old_Tail <-> Vessel <-> Sentinel
+    /// ```
+    ///
+    /// Unchecked version of `relocate_to_tail`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// Vessel and berth must be in bounds.
@@ -921,6 +1218,21 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    /// Relocates a contiguous segment of vessels to immediately follow
+    /// another vessel.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source: ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
+    ///   Target: ... <-> Anchor <-> Anchor_Next <-> ...
+    ///
+    /// After:
+    ///   Source: ... <-> Prev <---------------------> Next <-> ...
+    ///   Target: ... <-> Anchor <-> [ First ... Last ] <-> Anchor_Next <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `relocate_segment_after`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// All vessels must be in bounds.
@@ -963,6 +1275,21 @@ impl<'a> Mutator<'a> {
         unsafe { self.record_segment_reallocation_unchecked(first, last, old_b, new_b) };
     }
 
+    /// Relocates a contiguous segment of vessels to immediately precede
+    /// another vessel.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source: ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
+    ///   Target: ... <-> Ref_Prev <-> Reference <-> ...
+    ///
+    /// After:
+    ///   Source: ... <-> Prev <---------------------> Next <-> ...
+    ///   Target: ... <-> Ref_Prev <-> [ First ... Last ] <-> Reference <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `relocate_segment_before`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// All vessels must be in bounds.
@@ -1006,6 +1333,21 @@ impl<'a> Mutator<'a> {
         unsafe { self.record_segment_reallocation_unchecked(first, last, old_b, new_b) };
     }
 
+    /// Relocates a contiguous segment of vessels to the head (first
+    /// position) of a berth.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source:  ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
+    ///   Target:  Sentinel <-> Old_Head <-> ...
+    ///
+    /// After:
+    ///   Source:  ... <-> Prev <---------------------> Next <-> ...
+    ///   Target:  Sentinel <-> [ First ... Last ] <-> Old_Head <-> ...
+    /// ```
+    ///
+    /// Unchecked version of `relocate_segment_to_head`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// All vessels and berth must be in bounds.
@@ -1043,6 +1385,21 @@ impl<'a> Mutator<'a> {
         unsafe { self.record_segment_reallocation_unchecked(first, last, old_b, berth) };
     }
 
+    /// Relocates a contiguous segment of vessels to the tail (last
+    /// position) of a berth.
+    ///
+    /// ```text
+    /// Before:
+    ///   Source:  ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
+    ///   Target:  ... <-> Old_Tail <-> Sentinel
+    ///
+    /// After:
+    ///   Source:  ... <-> Prev <---------------------> Next <-> ...
+    ///   Target:  ... <-> Old_Tail <-> [ First ... Last ] <-> Sentinel
+    /// ```
+    ///
+    /// Unchecked version of `relocate_segment_to_tail`. Uses `debug_assert!` only.
+    ///
     /// # Safety
     ///
     /// All vessels and berth must be in bounds.

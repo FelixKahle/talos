@@ -21,14 +21,9 @@
 
 //! Undo support for `ScheduleGraph` mutations.
 //!
-//! `ScheduleGraphUndoLog` is a **reverse stack machine** designed for high-performance
-//! local search. It allows a sequence of topological mutations to be applied
-//! to a schedule and then perfectly reverted in LIFO order.
-//!
-//! # Public Types
-//!
-//! The undo log uses only [`VesselIndex`] and [`BerthIndex`] — no internal
-//! graph types leak into this API.
+//! Local-search heuristics repeatedly apply speculative moves to a schedule
+//! and revert them when they do not improve the objective. This module
+//! provides a lightweight, allocation-free mechanism for that revert step.
 
 use crate::sgraph::ScheduleGraph;
 use std::iter::FusedIterator;

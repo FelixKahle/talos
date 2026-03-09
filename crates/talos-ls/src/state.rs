@@ -19,6 +19,43 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+//! Phenotype representation for the local-search scheduling loop.
+//!
+//! While `ScheduleGraph` encodes the *topology* (genotype) — which vessel
+//! follows which on each berth — `ScheduleState` captures the *evaluated
+//! result* (phenotype): the concrete berth assignment, start time, sequence
+//! position, per-berth cost, and global objective for every vessel.
+//!
+//! # Layout
+//!
+//! `ScheduleState<T>` stores five parallel / per-dimension arrays:
+//!
+//! | Field | Length | Description |
+//! |-------|--------|-------------|
+//! | `berths` | `num_vessels` | Berth each vessel is assigned to |
+//! | `starts` | `num_vessels` | Computed start time of each vessel |
+//! | `positions` | `num_vessels` | 0-based position within its berth sequence |
+//! | `costs` | `num_berths` | Aggregated cost contribution of each berth |
+//! | `objective` | 1 | Global objective value (sum / max / etc.) |
+//!
+//! All arrays are dense `Vec`s indexed by `VesselIndex::get()` or
+//! `BerthIndex::get()`, giving $O(1)$ reads and writes with optimal
+//! cache locality.
+//!
+//! # Incremental patching
+//!
+//! After a neighborhood move, only the berths that were actually touched
+//! need to be re‑evaluated. `patch_from_delta_unchecked` accepts a
+//! candidate state and a `TouchedBerths` mask, then selectively copies
+//! only the affected vessels and berth costs — avoiding the full-array
+//! copy that would otherwise dominate the accept step.
+//!
+//! # Interop
+//!
+//! `ScheduleState` can be cheaply borrowed as a `SolutionView` (via
+//! `as_solution_view` or the `From` impl) for read-only downstream
+//! consumers that do not need mutation access.
+
 use crate::{sgraph::ScheduleGraph, tberth::TouchedBerths};
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{
@@ -191,6 +228,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
         self.objective = objective;
     }
 
+    /// Overwrites the current state with data from another `ScheduleState`, reusing existing heap allocations.
     #[inline]
     pub fn overwrite_from_state(&mut self, other: &Self) {
         self.overwrite_from_slices(

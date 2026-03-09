@@ -19,6 +19,28 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+//! Lightweight dirty-tracking for berths modified during a neighborhood move.
+//!
+//! After a topological mutation on the `ScheduleGraph`, only a small subset
+//! of berths need their schedules re-decoded and costs re-evaluated.
+//! `TouchedBerths` records exactly which berths were affected, so the
+//! evaluation engine can skip all clean berths entirely.
+//!
+//! # Implementation
+//!
+//! The tracker is a thin wrapper around a `Vec<bool>` indexed by
+//! `BerthIndex::get()`. Marking and querying are both $O(1)$; resetting
+//! the entire mask is $O(B)$ via `fill(false)`.
+//!
+//! # Iterators
+//!
+//! | Iterator | Yields |
+//! |----------|--------|
+//! | `TouchedIndicesIter` | `BerthIndex` of every touched berth |
+//! | `UntouchedBerthsIter` | `BerthIndex` of every clean berth |
+//!
+//! Both scan the boolean array linearly and skip non-matching entries.
+
 use talos_model::index::BerthIndex;
 
 // ----------------------------------------------------------------

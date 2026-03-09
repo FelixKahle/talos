@@ -21,13 +21,13 @@
 
 //! High-performance, allocation-free topological representation of vessel schedules.
 //!
-//! This module provides the [`ScheduleGraph`], which acts as the core state representation
+//! This module provides the `ScheduleGraph`, which acts as the core state representation
 //! (genotype) for Local Search algorithms (e.g., Simulated Annealing, Tabu Search, ALNS)
 //! applied to the Dynamic Berth Allocation Problem (DBAP) or Vehicle Routing Problem (VRP) variants.
 //!
 //! # Architecture
 //!
-//! `ScheduleGraph` layers domain semantics on top of a [`RingArena`]. The arena handles
+//! `ScheduleGraph` layers domain semantics on top of a `RingArena`. The arena handles
 //! all raw topology (O(1) swaps, relocations, reversals), while the graph manages:
 //!
 //! - **Sentinel convention**: The arena's index space is partitioned into real vessels
@@ -45,12 +45,6 @@
 //! Index Space: [ 0, 1, ..., N-1 | N, N+1, ..., N+B-1 ]
 //!              |__Real Vessels__|___Berth Sentinels__|
 //! ```
-//!
-//! # Public API
-//!
-//! The public API exclusively uses [`VesselIndex`] and [`BerthIndex`]. The sentinel
-//! convention and the underlying [`RingArena`] are implementation details that never
-//! leak to downstream consumers.
 
 use std::iter::FusedIterator;
 use talos_core::container::rarena::{
@@ -751,7 +745,7 @@ impl ScheduleGraph {
         let start = self.arena.next(sentinel);
 
         VesselSequenceIter {
-            inner: self.arena.sequence_iter(start, sentinel),
+            inner: unsafe { self.arena.sequence_iter_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
         }
     }
@@ -769,7 +763,7 @@ impl ScheduleGraph {
         let start = self.arena.prev(sentinel);
 
         VesselSequenceRevIter {
-            inner: self.arena.sequence_rev_iter(start, sentinel),
+            inner: unsafe { self.arena.sequence_rev_iter_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
         }
     }
@@ -788,7 +782,7 @@ impl ScheduleGraph {
         let start = unsafe { self.arena.next_unchecked(sentinel) };
 
         VesselSequenceIter {
-            inner: self.arena.sequence_iter(start, sentinel),
+            inner: unsafe { self.arena.sequence_iter_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
         }
     }
@@ -807,7 +801,7 @@ impl ScheduleGraph {
         let start = unsafe { self.arena.prev_unchecked(sentinel) };
 
         VesselSequenceRevIter {
-            inner: self.arena.sequence_rev_iter(start, sentinel),
+            inner: unsafe { self.arena.sequence_rev_iter_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
         }
     }
@@ -825,7 +819,7 @@ impl ScheduleGraph {
         let start = self.arena.next(sentinel);
 
         BerthEdgeIter {
-            inner: self.arena.edge_iter(start, sentinel),
+            inner: unsafe { self.arena.edge_iter_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
         }
     }

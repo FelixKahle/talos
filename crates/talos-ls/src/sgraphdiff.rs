@@ -19,6 +19,31 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+//! Structural diff between two `ScheduleGraph` states.
+//!
+//! When a local-search operator mutates a schedule, only a small number of
+//! topological links change. `ScheduleGraphDiff` captures exactly which links
+//! were broken, which were created, and which vessels moved between berths,
+//! so that incremental cost evaluation can focus on the affected region
+//! instead of rescanning the entire graph.
+//!
+//! # Contents
+//!
+//! | Type | Purpose |
+//! |------|---------|
+//! | `ScheduleGraphDiff` | Accumulates broken links, created links, and berth reallocations |
+//! | `ScheduleGraphEdge` | A single directed link, with `None` representing a sentinel boundary |
+//! | `LinkIter` | Iterator over broken or created `ScheduleGraphEdge`s |
+//! | `LinkContextIter` | Like `LinkIter`, but also yields the associated `BerthIndex` when one endpoint is a sentinel |
+//! | `ReallocationIter` | Iterator over `(VesselIndex, original BerthIndex, target BerthIndex)` triples |
+//!
+//! # Sentinel encoding
+//!
+//! Internally, sentinel nodes (berth boundaries) are encoded as
+//! `VesselIndex` values `>= num_vessels`. The iterators transparently
+//! convert these to `Option<VesselIndex>` (`None` for sentinels) or
+//! decode them into a `BerthIndex` via `index - num_vessels`.
+
 use std::iter::Zip;
 use std::slice::Iter;
 use talos_model::index::{BerthIndex, VesselIndex};
@@ -75,6 +100,8 @@ pub struct LinkContextIter<'a> {
 }
 
 impl<'a> LinkContextIter<'a> {
+    /// Converts a `VesselIndex` to an `Option<VesselIndex>`, treating indices
+    /// greater than or equal to `num_vessels` as `None` (sentinels).
     #[inline(always)]
     fn to_option(&self, index: VesselIndex) -> Option<VesselIndex> {
         if index.get() < self.num_vessels {
@@ -84,6 +111,8 @@ impl<'a> LinkContextIter<'a> {
         }
     }
 
+    /// Converts a `VesselIndex` to an `Option<BerthIndex>`, treating indices
+    /// greater than or equal to `num_vessels` as valid berth indices (after subtracting `num_vessels`).
     #[inline(always)]
     fn to_berth(&self, index: VesselIndex) -> Option<BerthIndex> {
         if index.get() >= self.num_vessels {
@@ -150,6 +179,7 @@ pub struct ScheduleGraphDiff {
 }
 
 impl ScheduleGraphDiff {
+    /// Creates a new, empty `ScheduleGraphDiff` with the specified number of vessels (used for sentinel encoding).
     #[inline(always)]
     pub fn new(num_vessels: usize) -> Self {
         Self {
@@ -164,6 +194,7 @@ impl ScheduleGraphDiff {
         }
     }
 
+    /// Clears all recorded changes, resetting the diff to an empty state.
     #[inline(always)]
     pub fn clear(&mut self) {
         self.broken_from.clear();
@@ -175,18 +206,21 @@ impl ScheduleGraphDiff {
         self.target_berths.clear();
     }
 
+    /// Records a broken link from `from` to `to`.
     #[inline(always)]
     pub fn push_link_broken(&mut self, from: VesselIndex, to: VesselIndex) {
         self.broken_from.push(from);
         self.broken_to.push(to);
     }
 
+    /// Records a created link from `from` to `to`.
     #[inline(always)]
     pub fn push_link_created(&mut self, from: VesselIndex, to: VesselIndex) {
         self.created_from.push(from);
         self.created_to.push(to);
     }
 
+    /// Records a vessel reallocation from `from` berth to `to` berth for vessel `v`.
     #[inline(always)]
     pub fn push_reallocation(&mut self, v: VesselIndex, from: BerthIndex, to: BerthIndex) {
         self.reallocated_vessels.push(v);
@@ -194,16 +228,19 @@ impl ScheduleGraphDiff {
         self.target_berths.push(to);
     }
 
+    /// Returns the number of broken links recorded in this diff.
     #[inline(always)]
     pub fn link_broken_count(&self) -> usize {
         self.broken_from.len()
     }
 
+    /// Returns the number of created links recorded in this diff.
     #[inline(always)]
     pub fn link_created_count(&self) -> usize {
         self.created_from.len()
     }
 
+    /// Returns the number of vessel reallocations recorded in this diff.
     #[inline(always)]
     pub fn broken_links(&self) -> LinkIter<'_> {
         LinkIter {
@@ -220,6 +257,7 @@ impl ScheduleGraphDiff {
         }
     }
 
+    /// Returns an iterator over created links along with their associated berth context.
     #[inline(always)]
     pub fn created_links_with_context(&self) -> LinkContextIter<'_> {
         LinkContextIter {
@@ -228,6 +266,7 @@ impl ScheduleGraphDiff {
         }
     }
 
+    /// Returns an iterator over vessel reallocations between berths.
     #[inline(always)]
     pub fn reallocations(&self) -> ReallocationIter<'_> {
         ReallocationIter {
