@@ -371,7 +371,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// # Safety
     ///
     /// The caller must ensure that the `berth` is in bounds,
-    /// meaning `berth.get() <= self.num_berths()`.
+    /// meaning `berth.get() < self.num_berths()`.
     #[inline]
     pub unsafe fn berth_cost_unchecked(&self, berth: BerthIndex) -> T {
         debug_assert!(
@@ -407,7 +407,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// # Safety
     ///
     /// The caller must ensure that the `berth` is in bounds,
-    /// meaning `berth.get() <= self.num_berths()`.
+    /// meaning `berth.get() < self.num_berths()`.
     #[inline]
     pub unsafe fn set_berth_cost_unchecked(&mut self, berth: BerthIndex, cost: T) {
         debug_assert!(

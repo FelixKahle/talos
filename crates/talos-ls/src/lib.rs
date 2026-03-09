@@ -20,7 +20,9 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 pub mod decoding;
+pub mod mutator;
 pub mod sgraph;
+pub mod sgraphdiff;
 pub mod sgraphundo;
 pub mod state;
 pub mod tberth;

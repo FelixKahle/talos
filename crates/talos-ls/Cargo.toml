@@ -37,8 +37,3 @@ num-traits = "0.2.19"
 
 [dev-dependencies]
 criterion = "0.8.2"
-
-[[bench]]
-name = "sgraph_bench"
-harness = false
-path = "benches/sgraph_bench.rs"
