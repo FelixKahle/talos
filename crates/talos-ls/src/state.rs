@@ -240,12 +240,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
         start: T,
         position: usize,
     ) {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `ScheduleState::set_vessel` with out-of-bounds vessel index: vessel.get() = {}, but expected < {}",
-            vessel.get(),
-            self.berths.len()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
 
         let v_idx = vessel.get();
         self.berths[v_idx] = berth;
@@ -267,12 +262,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
         start: T,
         position: usize,
     ) {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `ScheduleState::set_vessel_unchecked` with out-of-bounds vessel index: vessel.get() = {}, but expected < {}",
-            vessel.get(),
-            self.berths.len()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
 
         let v_idx = vessel.get();
         *unsafe { self.berths.get_unchecked_mut(v_idx) } = berth;
@@ -288,11 +278,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel.get() >= self.num_vessels()`.
     #[inline]
     pub fn vessel_berth(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `ScheduleState::vessel_berth` with out-of-bounds vessel index: {}",
-            vessel.get()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
 
         self.berths[vessel.get()]
     }
@@ -305,11 +291,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel.get() < self.num_vessels()`.
     #[inline]
     pub unsafe fn vessel_berth_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `ScheduleState::vessel_berth_unchecked` with out-of-bounds vessel index: {}",
-            vessel.get()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
 
         *unsafe { self.berths.get_unchecked(vessel.get()) }
     }
@@ -322,11 +304,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel.get() >= self.num_vessels()`.
     #[inline]
     pub fn vessel_start(&self, vessel: VesselIndex) -> T {
-        debug_assert!(
-            vessel.get() < self.starts.len(),
-            "called `ScheduleState::vessel_start` with out-of-bounds vessel index: {}",
-            vessel.get()
-        );
+        debug_assert!(vessel.get() < self.starts.len());
 
         self.starts[vessel.get()]
     }
@@ -339,11 +317,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel.get() < self.num_vessels()`.
     #[inline]
     pub unsafe fn vessel_start_unchecked(&self, vessel: VesselIndex) -> T {
-        debug_assert!(
-            vessel.get() < self.starts.len(),
-            "called `ScheduleState::vessel_start_unchecked` with out-of-bounds vessel index: {}",
-            vessel.get()
-        );
+        debug_assert!(vessel.get() < self.starts.len());
 
         *unsafe { self.starts.get_unchecked(vessel.get()) }
     }
@@ -356,12 +330,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `berth.get() >= self.num_berths()`.
     #[inline]
     pub fn berth_cost(&self, berth: BerthIndex) -> T {
-        debug_assert!(
-            berth.get() < self.costs.len(),
-            "called `ScheduleState::berth_cost` with out-of-bounds berth index: berth.get() = {}, but expected < {}",
-            berth.get(),
-            self.costs.len()
-        );
+        debug_assert!(berth.get() < self.costs.len());
 
         self.costs[berth.get()]
     }
@@ -374,12 +343,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `berth.get() < self.num_berths()`.
     #[inline]
     pub unsafe fn berth_cost_unchecked(&self, berth: BerthIndex) -> T {
-        debug_assert!(
-            berth.get() < self.costs.len(),
-            "called `ScheduleState::berth_cost_unchecked` with out-of-bounds berth index: berth.get() = {}, but expected < {}",
-            berth.get(),
-            self.costs.len()
-        );
+        debug_assert!(berth.get() < self.costs.len());
 
         *unsafe { self.costs.get_unchecked(berth.get()) }
     }
@@ -392,12 +356,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `berth.get() >= self.num_berths()`.
     #[inline]
     pub fn set_berth_cost(&mut self, berth: BerthIndex, cost: T) {
-        debug_assert!(
-            berth.get() < self.costs.len(),
-            "called `ScheduleState::set_berth_cost` with out-of-bounds berth index: berth.get() = {}, but expected < {}",
-            berth.get(),
-            self.costs.len()
-        );
+        debug_assert!(berth.get() < self.costs.len());
 
         self.costs[berth.get()] = cost;
     }
@@ -410,12 +369,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `berth.get() < self.num_berths()`.
     #[inline]
     pub unsafe fn set_berth_cost_unchecked(&mut self, berth: BerthIndex, cost: T) {
-        debug_assert!(
-            berth.get() < self.costs.len(),
-            "called `ScheduleState::set_berth_cost_unchecked` with out-of-bounds berth index: berth.get() = {}, but expected < {}",
-            berth.get(),
-            self.costs.len()
-        );
+        debug_assert!(berth.get() < self.costs.len());
 
         *unsafe { self.costs.get_unchecked_mut(berth.get()) } = cost;
     }
@@ -428,11 +382,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel.get() >= self.num_vessels()`.
     #[inline]
     pub fn vessel_position(&self, vessel: VesselIndex) -> usize {
-        debug_assert!(
-            vessel.get() < self.positions.len(),
-            "called `ScheduleState::vessel_position` with out-of-bounds vessel index: {}",
-            vessel.get()
-        );
+        debug_assert!(vessel.get() < self.positions.len());
 
         self.positions[vessel.get()]
     }
@@ -445,11 +395,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel.get() < self.num_vessels()`.
     #[inline]
     pub unsafe fn vessel_position_unchecked(&self, vessel: VesselIndex) -> usize {
-        debug_assert!(
-            vessel.get() < self.positions.len(),
-            "called `ScheduleState::vessel_position_unchecked` with out-of-bounds vessel index: {}",
-            vessel.get()
-        );
+        debug_assert!(vessel.get() < self.positions.len());
 
         *unsafe { self.positions.get_unchecked(vessel.get()) }
     }
@@ -461,11 +407,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel.get() >= self.num_vessels()`.
     #[inline]
     pub fn vessel_assignment(&self, vessel: VesselIndex) -> Assignment<T> {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `ScheduleState::vessel_assignment` with out-of-bounds vessel index: {}",
-            vessel.get()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
 
         Assignment::new(self.vessel_start(vessel), self.vessel_berth(vessel))
     }
@@ -478,11 +420,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel.get() < self.num_vessels()`.
     #[inline]
     pub unsafe fn vessel_assignment_unchecked(&self, vessel: VesselIndex) -> Assignment<T> {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `ScheduleState::vessel_assignment_unchecked` with out-of-bounds vessel index: {}",
-            vessel.get()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
 
         Assignment::new(unsafe { self.vessel_start_unchecked(vessel) }, unsafe {
             self.vessel_berth_unchecked(vessel)
@@ -524,26 +462,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
         touched: &TouchedBerths,
         graph: &ScheduleGraph,
     ) {
-        debug_assert_eq!(
-            self.costs.len(),
-            cand.costs.len(),
-            "called `ScheduleState::patch_from_delta_unchecked` with candidate state of different berth cost length: self.costs.len() = {}, cand.costs.len() = {}",
-            self.costs.len(),
-            cand.costs.len()
-        );
-        debug_assert_eq!(
-            self.costs.len(),
-            graph.num_berths(),
-            "called `ScheduleState::patch_from_delta_unchecked` with graph of different berth count than state capacity: self.costs.len() = {}, graph.num_berths() = {}",
-            self.costs.len(),
-            graph.num_berths()
-        );
-        debug_assert!(
-            graph.num_vessels() <= self.berths.len(),
-            "called `ScheduleState::patch_from_delta_unchecked` with graph containing more vessels than state capacity: graph.num_vessels() = {}, but expected <= {}",
-            graph.num_vessels(),
-            self.berths.len()
-        );
+        debug_assert_eq!(self.costs.len(), cand.costs.len());
+        debug_assert_eq!(self.costs.len(), graph.num_berths());
+        debug_assert!(graph.num_vessels() <= self.berths.len());
 
         for berth_idx in touched.iter_touched_berths() {
             let b = berth_idx.get();

@@ -78,10 +78,7 @@ pub fn lower_bound_start_linear<T>(intervals: &[ClosedOpenInterval<T>], key: T) 
 where
     T: PrimInt,
 {
-    debug_assert!(
-        are_disjoint_and_sorted(intervals),
-        "called `lower_bound_start_linear` with intervals that are not disjoint and sorted"
-    );
+    debug_assert!(are_disjoint_and_sorted(intervals));
 
     for i in 0..intervals.len() {
         // SAFETY: i is always in bounds because i < intervals.len()
@@ -108,20 +105,15 @@ pub fn lower_bound_start_binary<T>(intervals: &[ClosedOpenInterval<T>], key: T) 
 where
     T: PrimInt,
 {
-    debug_assert!(
-        are_disjoint_and_sorted(intervals),
-        "called `lower_bound_start_binary` with intervals that are not disjoint and sorted"
-    );
+    debug_assert!(are_disjoint_and_sorted(intervals));
 
     let mut lo: usize = 0;
     let mut hi: usize = intervals.len();
 
     while lo < hi {
         let mid = lo + ((hi - lo) >> 1);
-        debug_assert!(
-            mid < intervals.len(),
-            "`lower_bound_start_binary` computed mid index out of bounds"
-        );
+        debug_assert!(mid < intervals.len());
+
         // SAFETY: mid is always in bounds because lo < hi <= intervals.len(),
         // therefore mid < intervals.len()
         if unsafe { intervals.get_unchecked(mid).start() } < key {
@@ -198,10 +190,7 @@ pub fn lower_bound_start_with_threshold<T>(
 where
     T: PrimInt,
 {
-    debug_assert!(
-        are_disjoint_and_sorted(intervals),
-        "called `lower_bound_start` with intervals that are not disjoint and sorted"
-    );
+    debug_assert!(are_disjoint_and_sorted(intervals));
 
     if intervals.len() <= threshold {
         lower_bound_start_linear(intervals, key)

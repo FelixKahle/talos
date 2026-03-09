@@ -572,12 +572,7 @@ where
     #[inline]
     pub fn vessel_arrival_time(&self, vessel_index: VesselIndex) -> T {
         let index = vessel_index.get();
-        debug_assert!(
-            index < self.num_vessels(),
-            "called `Model::vessel_arrival_time` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            index,
-        );
+        debug_assert!(index < self.num_vessels());
 
         self.arrival_times[index]
     }
@@ -592,12 +587,7 @@ where
     #[inline]
     pub unsafe fn vessel_arrival_time_unchecked(&self, vessel_index: VesselIndex) -> T {
         let index = vessel_index.get();
-        debug_assert!(
-            index < self.num_vessels(),
-            "called `Model::vessel_arrival_time_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            index,
-        );
+        debug_assert!(index < self.num_vessels());
 
         unsafe { *self.arrival_times.get_unchecked(index) }
     }
@@ -610,12 +600,7 @@ where
     #[inline]
     pub fn vessel_latest_departure_time(&self, vessel_index: VesselIndex) -> T {
         let index = vessel_index.get();
-        debug_assert!(
-            index < self.num_vessels(),
-            "called `Model::vessel_latest_departure_time` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            index,
-        );
+        debug_assert!(index < self.num_vessels());
 
         self.latest_departure_times[index]
     }
@@ -630,12 +615,7 @@ where
     #[inline]
     pub unsafe fn vessel_latest_departure_time_unchecked(&self, vessel_index: VesselIndex) -> T {
         let index = vessel_index.get();
-        debug_assert!(
-            index < self.num_vessels(),
-            "called `Model::vessel_latest_departure_time_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            index,
-        );
+        debug_assert!(index < self.num_vessels());
 
         unsafe { *self.latest_departure_times.get_unchecked(index) }
     }
@@ -648,12 +628,7 @@ where
     #[inline]
     pub fn vessel_weight(&self, vessel_index: VesselIndex) -> T {
         let index = vessel_index.get();
-        debug_assert!(
-            index < self.num_vessels(),
-            "called `Model::vessel_weight` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            index,
-        );
+        debug_assert!(index < self.num_vessels());
 
         self.vessel_weights[index]
     }
@@ -668,12 +643,7 @@ where
     #[inline]
     pub unsafe fn vessel_weight_unchecked(&self, vessel_index: VesselIndex) -> T {
         let index = vessel_index.get();
-        debug_assert!(
-            index < self.num_vessels(),
-            "called `Model::vessel_weight_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            index,
-        );
+        debug_assert!(index < self.num_vessels());
 
         unsafe { *self.vessel_weights.get_unchecked(index) }
     }
@@ -690,27 +660,11 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> ProcessingTime<T> {
-        debug_assert!(
-            vessel_index.get() < self.num_vessels(),
-            "called `Model::vessel_processing_time` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            vessel_index.get()
-        );
-
-        debug_assert!(
-            berth_index.get() < self.num_berths(),
-            "called `Model::vessel_processing_time` with berth index out of bounds: the len is {} but the index is {}",
-            self.num_berths(),
-            berth_index.get()
-        );
+        debug_assert!(vessel_index.get() < self.num_vessels());
+        debug_assert!(berth_index.get() < self.num_berths());
 
         let flat_index = flatten_index(self.num_berths(), vessel_index, berth_index);
-        debug_assert!(
-            flat_index < self.processing_times.len(),
-            "called `Model::vessel_processing_time_unchecked` with flat index out of bounds: the len is {} but the index is {}",
-            self.processing_times.len(),
-            flat_index
-        );
+        debug_assert!(flat_index < self.processing_times.len());
 
         self.processing_times[flat_index]
     }
@@ -729,27 +683,11 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> ProcessingTime<T> {
-        debug_assert!(
-            vessel_index.get() < self.num_vessels(),
-            "called `Model::vessel_processing_time_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            vessel_index.get()
-        );
-
-        debug_assert!(
-            berth_index.get() < self.num_berths(),
-            "called `Model::vessel_processing_time_unchecked` with berth index out of bounds: the len is {} but the index is {}",
-            self.num_berths(),
-            berth_index.get()
-        );
+        debug_assert!(vessel_index.get() < self.num_vessels());
+        debug_assert!(berth_index.get() < self.num_berths());
 
         let flat_index = flatten_index(self.num_berths(), vessel_index, berth_index);
-        debug_assert!(
-            flat_index < self.processing_times.len(),
-            "called `Model::vessel_processing_time_unchecked` with flat index out of bounds: the len is {} but the index is {}",
-            self.processing_times.len(),
-            flat_index
-        );
+        debug_assert!(flat_index < self.processing_times.len());
 
         unsafe { *self.processing_times.get_unchecked(flat_index) }
     }
@@ -766,12 +704,7 @@ where
         berth_index: BerthIndex,
     ) -> bool {
         let index = vessel_index.get();
-        debug_assert!(
-            index < self.num_vessels(),
-            "called `Model::vessel_allowed_on_berth` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            index
-        );
+        debug_assert!(index < self.num_vessels());
 
         self.vessel_processing_time(vessel_index, berth_index)
             .is_some()
@@ -791,12 +724,7 @@ where
         berth_index: BerthIndex,
     ) -> bool {
         let index = vessel_index.get();
-        debug_assert!(
-            index < self.num_vessels(),
-            "called `Model::vessel_allowed_on_berth_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
-            self.num_vessels(),
-            index
-        );
+        debug_assert!(index < self.num_vessels());
 
         unsafe { self.vessel_processing_time_unchecked(vessel_index, berth_index) }.is_some()
     }
@@ -809,12 +737,7 @@ where
     #[inline]
     pub fn berth_opening_times(&self, berth_index: BerthIndex) -> &[ClosedOpenInterval<T>] {
         let index = berth_index.get();
-        debug_assert!(
-            index < self.num_berths(),
-            "called `Model::berth_opening_times` with berth index out of bounds: the len is {} but the index is {}",
-            self.num_berths(),
-            index
-        );
+        debug_assert!(index < self.num_berths());
 
         let start = self.opening_offsets[index];
         let end = self.opening_offsets[index + 1];
@@ -834,12 +757,7 @@ where
         berth_index: BerthIndex,
     ) -> &[ClosedOpenInterval<T>] {
         let index = berth_index.get();
-        debug_assert!(
-            index < self.num_berths(),
-            "called `Model::berth_opening_times_unchecked` with berth index out of bounds: the len is {} but the index is {}",
-            self.num_berths(),
-            index
-        );
+        debug_assert!(index < self.num_berths());
 
         let start = *unsafe { self.opening_offsets.get_unchecked(index) };
         let end = *unsafe { self.opening_offsets.get_unchecked(index + 1) };
@@ -984,9 +902,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "called `Model::new` with `latest_departure_times` length 1 but expected 2"
-    )]
+    #[should_panic]
     fn test_model_construction_invalid_departures_length() {
         Model::new(
             2,
@@ -1000,9 +916,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "called `Model::new` with `processing_times` length 3 but expected 4"
-    )]
+    #[should_panic]
     fn test_model_construction_invalid_processing_length() {
         Model::new(
             2,

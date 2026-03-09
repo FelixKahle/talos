@@ -134,15 +134,11 @@ impl<'a> Mutator<'a> {
         self.undo
     }
 
-    // ----------------------------------------------------------------
-    // Undo recording helpers
-    // ----------------------------------------------------------------
-
     /// Records the original position of a vessel before relocation.
     /// Uses `vessel_predecessor_unchecked` to determine if the vessel was
     /// after another vessel or at the head of its berth.
     #[inline(always)]
-    unsafe fn record_relocate(&mut self, vessel: VesselIndex) {
+    unsafe fn record_relocate_unchecked(&mut self, vessel: VesselIndex) {
         match unsafe { self.graph.vessel_predecessor_unchecked(vessel) } {
             Some(pred) => {
                 self.undo.push_relocate_after_vessel(vessel, pred);
@@ -154,9 +150,22 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    #[inline(always)]
+    fn record_relocate(&mut self, vessel: VesselIndex) {
+        match self.graph.vessel_predecessor(vessel) {
+            Some(pred) => {
+                self.undo.push_relocate_after_vessel(vessel, pred);
+            }
+            None => {
+                let berth = self.graph.vessel_berth(vessel);
+                self.undo.push_relocate_to_head(vessel, berth);
+            }
+        }
+    }
+
     /// Records the original position of a segment before relocation.
     #[inline(always)]
-    unsafe fn record_relocate_segment(&mut self, first: VesselIndex, last: VesselIndex) {
+    unsafe fn record_relocate_segment_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
         match unsafe { self.graph.vessel_predecessor_unchecked(first) } {
             Some(pred) => {
                 self.undo
@@ -169,9 +178,23 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    #[inline(always)]
+    fn record_relocate_segment(&mut self, first: VesselIndex, last: VesselIndex) {
+        match self.graph.vessel_predecessor(first) {
+            Some(pred) => {
+                self.undo
+                    .push_relocate_segment_after_vessel(first, last, pred);
+            }
+            None => {
+                let berth = self.graph.vessel_berth(first);
+                self.undo.push_relocate_segment_to_head(first, last, berth);
+            }
+        }
+    }
+
     /// Records reallocation diffs for every vessel in a segment that changed berths.
     #[inline(always)]
-    unsafe fn record_segment_reallocation(
+    unsafe fn record_segment_reallocation_unchecked(
         &mut self,
         first: VesselIndex,
         last: VesselIndex,
@@ -194,9 +217,29 @@ impl<'a> Mutator<'a> {
         }
     }
 
-    // ----------------------------------------------------------------
-    // Checked mutations
-    // ----------------------------------------------------------------
+    #[inline(always)]
+    fn record_segment_reallocation(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        old_berth: BerthIndex,
+        new_berth: BerthIndex,
+    ) {
+        if old_berth == new_berth {
+            return;
+        }
+
+        let mut curr = first.get();
+        let last_raw = last.get();
+        loop {
+            self.diff
+                .push_reallocation(VesselIndex::new(curr), old_berth, new_berth);
+            if curr == last_raw {
+                break;
+            }
+            curr = self.graph.arena().next(curr);
+        }
+    }
 
     /// Swaps the positions of two vessels.
     ///
@@ -205,14 +248,38 @@ impl<'a> Mutator<'a> {
     /// Panics if either vessel is out of bounds.
     #[inline]
     pub fn swap_vessels(&mut self, a: VesselIndex, b: VesselIndex) {
-        assert!(
-            a.get() < self.graph.num_vessels() && b.get() < self.graph.num_vessels(),
-            "Mutator::swap_vessels: a = {}, b = {}, num_vessels = {}",
-            a.get(),
-            b.get(),
-            self.graph.num_vessels()
-        );
-        unsafe { self.swap_vessels_unchecked(a, b) }
+        assert!(a.get() < self.graph.num_vessels());
+        assert!(b.get() < self.graph.num_vessels());
+
+        if a == b {
+            return;
+        }
+
+        let a_raw = a.get();
+        let b_raw = b.get();
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(self.graph.arena().prev(a_raw), self.graph);
+        tracker.track(self.graph.arena().prev(b_raw), self.graph);
+        tracker.track(a_raw, self.graph);
+        tracker.track(b_raw, self.graph);
+
+        let old_ba = self.graph.vessel_berth(a);
+        let old_bb = self.graph.vessel_berth(b);
+
+        self.undo.push_swap_vessels(a, b);
+        self.graph.swap_vessels(a, b);
+
+        tracker.commit(self.graph, self.diff);
+
+        let new_ba = self.graph.vessel_berth(a);
+        let new_bb = self.graph.vessel_berth(b);
+        if old_ba != new_ba {
+            self.diff.push_reallocation(a, old_ba, new_ba);
+        }
+        if old_bb != new_bb {
+            self.diff.push_reallocation(b, old_bb, new_bb);
+        }
     }
 
     /// Swaps two contiguous segments.
@@ -228,14 +295,31 @@ impl<'a> Mutator<'a> {
         b_first: VesselIndex,
         b_last: VesselIndex,
     ) {
-        assert!(
-            a_first.get() < self.graph.num_vessels()
-                && a_last.get() < self.graph.num_vessels()
-                && b_first.get() < self.graph.num_vessels()
-                && b_last.get() < self.graph.num_vessels(),
-            "Mutator::swap_segments out of bounds"
-        );
-        unsafe { self.swap_segments_unchecked(a_first, a_last, b_first, b_last) }
+        assert!(a_first.get() < self.graph.num_vessels());
+        assert!(a_last.get() < self.graph.num_vessels());
+        assert!(b_first.get() < self.graph.num_vessels());
+
+        if a_first == b_first {
+            return;
+        }
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(self.graph.arena().prev(a_first.get()), self.graph);
+        tracker.track(a_last.get(), self.graph);
+        tracker.track(self.graph.arena().prev(b_first.get()), self.graph);
+        tracker.track(b_last.get(), self.graph);
+
+        let old_ba = self.graph.vessel_berth(a_first);
+        let old_bb = self.graph.vessel_berth(b_first);
+
+        self.undo
+            .push_swap_segments(a_first, a_last, b_first, b_last);
+        self.graph.swap_segments(a_first, a_last, b_first, b_last);
+
+        tracker.commit(self.graph, self.diff);
+
+        self.record_segment_reallocation(a_first, a_last, old_ba, old_bb);
+        self.record_segment_reallocation(b_first, b_last, old_bb, old_ba);
     }
 
     /// Reverses a contiguous segment.
@@ -245,11 +329,39 @@ impl<'a> Mutator<'a> {
     /// Panics if either vessel is out of bounds.
     #[inline]
     pub fn reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
-        assert!(
-            first.get() < self.graph.num_vessels() && last.get() < self.graph.num_vessels(),
-            "Mutator::reverse_segment out of bounds"
-        );
-        unsafe { self.reverse_segment_unchecked(first, last) }
+        assert!(first.get() < self.graph.num_vessels());
+        assert!(last.get() < self.graph.num_vessels());
+
+        if first == last {
+            return;
+        }
+
+        let arena = self.graph.arena();
+        let prev_first = arena.prev(first.get());
+        let next_last = arena.next(last.get());
+
+        let prev_first_v = VesselIndex::new(prev_first);
+        let next_last_v = VesselIndex::new(next_last);
+
+        self.diff.push_link_broken(prev_first_v, first);
+        self.diff.push_link_broken(last, next_last_v);
+
+        let mut curr = first.get();
+        let last_raw = last.get();
+        while curr != last_raw {
+            let nxt = arena.next(curr);
+            let curr_v = VesselIndex::new(curr);
+            let nxt_v = VesselIndex::new(nxt);
+            self.diff.push_link_broken(curr_v, nxt_v);
+            self.diff.push_link_created(nxt_v, curr_v);
+            curr = nxt;
+        }
+
+        self.diff.push_link_created(prev_first_v, last);
+        self.diff.push_link_created(first, next_last_v);
+
+        self.undo.push_reverse_segment(first, last);
+        self.graph.reverse_segment(first, last);
     }
 
     /// Relocates a vessel to immediately follow another vessel.
@@ -259,11 +371,33 @@ impl<'a> Mutator<'a> {
     /// Panics if either vessel is out of bounds.
     #[inline]
     pub fn relocate_after(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
-        assert!(
-            vessel.get() < self.graph.num_vessels() && anchor.get() < self.graph.num_vessels(),
-            "Mutator::relocate_after out of bounds"
-        );
-        unsafe { self.relocate_after_unchecked(vessel, anchor) }
+        assert!(vessel.get() < self.graph.num_vessels());
+        assert!(anchor.get() < self.graph.num_vessels());
+
+        let v_raw = vessel.get();
+        let a_raw = anchor.get();
+        let prev = self.graph.arena().prev(v_raw);
+
+        if v_raw == a_raw || prev == a_raw {
+            return;
+        }
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(prev, self.graph);
+        tracker.track(v_raw, self.graph);
+        tracker.track(a_raw, self.graph);
+
+        let old_b = self.graph.vessel_berth(vessel);
+
+        self.record_relocate(vessel);
+        self.graph.relocate_after(vessel, anchor);
+
+        tracker.commit(self.graph, self.diff);
+
+        let new_b = self.graph.vessel_berth(vessel);
+        if old_b != new_b {
+            self.diff.push_reallocation(vessel, old_b, new_b);
+        }
     }
 
     /// Relocates a vessel to immediately precede another vessel.
@@ -273,11 +407,34 @@ impl<'a> Mutator<'a> {
     /// Panics if either vessel is out of bounds.
     #[inline]
     pub fn relocate_before(&mut self, vessel: VesselIndex, reference: VesselIndex) {
-        assert!(
-            vessel.get() < self.graph.num_vessels() && reference.get() < self.graph.num_vessels(),
-            "Mutator::relocate_before out of bounds"
-        );
-        unsafe { self.relocate_before_unchecked(vessel, reference) }
+        assert!(vessel.get() < self.graph.num_vessels());
+        assert!(reference.get() < self.graph.num_vessels());
+
+        let v_raw = vessel.get();
+        let ref_raw = reference.get();
+        let ref_prev = self.graph.arena().prev(ref_raw);
+        let v_prev = self.graph.arena().prev(v_raw);
+
+        if v_raw == ref_raw || v_prev == ref_prev {
+            return;
+        }
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(v_prev, self.graph);
+        tracker.track(v_raw, self.graph);
+        tracker.track(ref_prev, self.graph);
+
+        let old_b = self.graph.vessel_berth(vessel);
+
+        self.record_relocate(vessel);
+        self.graph.relocate_before(vessel, reference);
+
+        tracker.commit(self.graph, self.diff);
+
+        let new_b = self.graph.vessel_berth(vessel);
+        if old_b != new_b {
+            self.diff.push_reallocation(vessel, old_b, new_b);
+        }
     }
 
     /// Relocates a vessel to the head of a berth.
@@ -287,11 +444,28 @@ impl<'a> Mutator<'a> {
     /// Panics if vessel or berth is out of bounds.
     #[inline]
     pub fn relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        assert!(
-            vessel.get() < self.graph.num_vessels() && berth.get() < self.graph.num_berths(),
-            "Mutator::relocate_to_head out of bounds"
-        );
-        unsafe { self.relocate_to_head_unchecked(vessel, berth) }
+        assert!(vessel.get() < self.graph.num_vessels());
+        assert!(berth.get() < self.graph.num_berths());
+
+        let v_raw = vessel.get();
+        let sentinel = self.graph.sentinel(berth);
+        let prev = self.graph.arena().prev(v_raw);
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(prev, self.graph);
+        tracker.track(v_raw, self.graph);
+        tracker.track(sentinel, self.graph);
+
+        let old_b = self.graph.vessel_berth(vessel);
+
+        self.record_relocate(vessel);
+        self.graph.relocate_to_head(vessel, berth);
+
+        tracker.commit(self.graph, self.diff);
+
+        if old_b != berth {
+            self.diff.push_reallocation(vessel, old_b, berth);
+        }
     }
 
     /// Relocates a vessel to the tail of a berth.
@@ -301,11 +475,29 @@ impl<'a> Mutator<'a> {
     /// Panics if vessel or berth is out of bounds.
     #[inline]
     pub fn relocate_to_tail(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        assert!(
-            vessel.get() < self.graph.num_vessels() && berth.get() < self.graph.num_berths(),
-            "Mutator::relocate_to_tail out of bounds"
-        );
-        unsafe { self.relocate_to_tail_unchecked(vessel, berth) }
+        assert!(vessel.get() < self.graph.num_vessels());
+        assert!(berth.get() < self.graph.num_berths());
+
+        let v_raw = vessel.get();
+        let sentinel = self.graph.sentinel(berth);
+        let prev = self.graph.arena().prev(v_raw);
+        let old_tail = self.graph.arena().prev(sentinel);
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(prev, self.graph);
+        tracker.track(v_raw, self.graph);
+        tracker.track(old_tail, self.graph);
+
+        let old_b = self.graph.vessel_berth(vessel);
+
+        self.record_relocate(vessel);
+        self.graph.relocate_to_tail(vessel, berth);
+
+        tracker.commit(self.graph, self.diff);
+
+        if old_b != berth {
+            self.diff.push_reallocation(vessel, old_b, berth);
+        }
     }
 
     /// Relocates a segment to immediately follow another vessel.
@@ -320,13 +512,33 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         anchor: VesselIndex,
     ) {
-        assert!(
-            first.get() < self.graph.num_vessels()
-                && last.get() < self.graph.num_vessels()
-                && anchor.get() < self.graph.num_vessels(),
-            "Mutator::relocate_segment_after out of bounds"
-        );
-        unsafe { self.relocate_segment_after_unchecked(first, last, anchor) }
+        assert!(first.get() < self.graph.num_vessels());
+        assert!(last.get() < self.graph.num_vessels());
+        assert!(anchor.get() < self.graph.num_vessels());
+
+        let f_raw = first.get();
+        let l_raw = last.get();
+        let a_raw = anchor.get();
+        let prev = self.graph.arena().prev(f_raw);
+
+        if prev == a_raw {
+            return;
+        }
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(prev, self.graph);
+        tracker.track(l_raw, self.graph);
+        tracker.track(a_raw, self.graph);
+
+        let old_b = self.graph.vessel_berth(first);
+
+        self.record_relocate_segment(first, last);
+        self.graph.relocate_segment_after(first, last, anchor);
+
+        tracker.commit(self.graph, self.diff);
+
+        let new_b = self.graph.vessel_berth(first);
+        self.record_segment_reallocation(first, last, old_b, new_b);
     }
 
     /// Relocates a segment to immediately precede another vessel.
@@ -341,13 +553,34 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         reference: VesselIndex,
     ) {
-        assert!(
-            first.get() < self.graph.num_vessels()
-                && last.get() < self.graph.num_vessels()
-                && reference.get() < self.graph.num_vessels(),
-            "Mutator::relocate_segment_before out of bounds"
-        );
-        unsafe { self.relocate_segment_before_unchecked(first, last, reference) }
+        assert!(first.get() < self.graph.num_vessels());
+        assert!(last.get() < self.graph.num_vessels());
+        assert!(reference.get() < self.graph.num_vessels());
+
+        let f_raw = first.get();
+        let l_raw = last.get();
+        let ref_raw = reference.get();
+        let ref_prev = self.graph.arena().prev(ref_raw);
+        let prev = self.graph.arena().prev(f_raw);
+
+        if prev == ref_prev {
+            return;
+        }
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(prev, self.graph);
+        tracker.track(l_raw, self.graph);
+        tracker.track(ref_prev, self.graph);
+
+        let old_b = self.graph.vessel_berth(first);
+
+        self.record_relocate_segment(first, last);
+        self.graph.relocate_segment_before(first, last, reference);
+
+        tracker.commit(self.graph, self.diff);
+
+        let new_b = self.graph.vessel_berth(first);
+        self.record_segment_reallocation(first, last, old_b, new_b);
     }
 
     /// Relocates a segment to the head of a berth.
@@ -362,13 +595,28 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
-        assert!(
-            first.get() < self.graph.num_vessels()
-                && last.get() < self.graph.num_vessels()
-                && berth.get() < self.graph.num_berths(),
-            "Mutator::relocate_segment_to_head out of bounds"
-        );
-        unsafe { self.relocate_segment_to_head_unchecked(first, last, berth) }
+        assert!(first.get() < self.graph.num_vessels());
+        assert!(last.get() < self.graph.num_vessels());
+        assert!(berth.get() < self.graph.num_berths());
+
+        let f_raw = first.get();
+        let l_raw = last.get();
+        let sentinel = self.graph.sentinel(berth);
+        let prev = self.graph.arena().prev(f_raw);
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(prev, self.graph);
+        tracker.track(l_raw, self.graph);
+        tracker.track(sentinel, self.graph);
+
+        let old_b = self.graph.vessel_berth(first);
+
+        self.record_relocate_segment(first, last);
+        self.graph.relocate_segment_to_head(first, last, berth);
+
+        tracker.commit(self.graph, self.diff);
+
+        self.record_segment_reallocation(first, last, old_b, berth);
     }
 
     /// Relocates a segment to the tail of a berth.
@@ -383,24 +631,39 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
-        assert!(
-            first.get() < self.graph.num_vessels()
-                && last.get() < self.graph.num_vessels()
-                && berth.get() < self.graph.num_berths(),
-            "Mutator::relocate_segment_to_tail out of bounds"
-        );
-        unsafe { self.relocate_segment_to_tail_unchecked(first, last, berth) }
-    }
+        assert!(first.get() < self.graph.num_vessels());
+        assert!(last.get() < self.graph.num_vessels());
+        assert!(berth.get() < self.graph.num_berths());
 
-    // ----------------------------------------------------------------
-    // Unchecked mutations
-    // ----------------------------------------------------------------
+        let f_raw = first.get();
+        let l_raw = last.get();
+        let sentinel = self.graph.sentinel(berth);
+        let prev = self.graph.arena().prev(f_raw);
+        let old_tail = self.graph.arena().prev(sentinel);
+
+        let mut tracker = EdgeDeltaTracker::new();
+        tracker.track(prev, self.graph);
+        tracker.track(l_raw, self.graph);
+        tracker.track(old_tail, self.graph);
+
+        let old_b = self.graph.vessel_berth(first);
+
+        self.record_relocate_segment(first, last);
+        self.graph.relocate_segment_to_tail(first, last, berth);
+
+        tracker.commit(self.graph, self.diff);
+
+        self.record_segment_reallocation(first, last, old_b, berth);
+    }
 
     /// # Safety
     ///
     /// Both vessels must be in bounds.
     #[inline]
     pub unsafe fn swap_vessels_unchecked(&mut self, a: VesselIndex, b: VesselIndex) {
+        debug_assert!(a.get() < self.graph.num_vessels());
+        debug_assert!(b.get() < self.graph.num_vessels());
+
         if a == b {
             return;
         }
@@ -449,6 +712,11 @@ impl<'a> Mutator<'a> {
         b_first: VesselIndex,
         b_last: VesselIndex,
     ) {
+        debug_assert!(a_first.get() < self.graph.num_vessels());
+        debug_assert!(a_last.get() < self.graph.num_vessels());
+        debug_assert!(b_first.get() < self.graph.num_vessels());
+        debug_assert!(b_last.get() < self.graph.num_vessels());
+
         if a_first == b_first {
             return;
         }
@@ -477,8 +745,8 @@ impl<'a> Mutator<'a> {
 
         tracker.commit(self.graph, self.diff);
 
-        unsafe { self.record_segment_reallocation(a_first, a_last, old_ba, old_bb) };
-        unsafe { self.record_segment_reallocation(b_first, b_last, old_bb, old_ba) };
+        unsafe { self.record_segment_reallocation_unchecked(a_first, a_last, old_ba, old_bb) };
+        unsafe { self.record_segment_reallocation_unchecked(b_first, b_last, old_bb, old_ba) };
     }
 
     /// # Safety
@@ -486,6 +754,9 @@ impl<'a> Mutator<'a> {
     /// Both vessels must be in bounds and form a valid contiguous segment.
     #[inline]
     pub unsafe fn reverse_segment_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
+        debug_assert!(first.get() < self.graph.num_vessels());
+        debug_assert!(last.get() < self.graph.num_vessels());
+
         if first == last {
             return;
         }
@@ -523,6 +794,9 @@ impl<'a> Mutator<'a> {
     /// Both vessels must be in bounds.
     #[inline]
     pub unsafe fn relocate_after_unchecked(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
+        debug_assert!(vessel.get() < self.graph.num_vessels());
+        debug_assert!(anchor.get() < self.graph.num_vessels());
+
         let v_raw = vessel.get();
         let a_raw = anchor.get();
         let prev = unsafe { self.graph.arena().prev_unchecked(v_raw) };
@@ -538,7 +812,7 @@ impl<'a> Mutator<'a> {
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(vessel) };
 
-        unsafe { self.record_relocate(vessel) };
+        unsafe { self.record_relocate_unchecked(vessel) };
         unsafe { self.graph.relocate_after_unchecked(vessel, anchor) };
 
         tracker.commit(self.graph, self.diff);
@@ -558,6 +832,9 @@ impl<'a> Mutator<'a> {
         vessel: VesselIndex,
         reference: VesselIndex,
     ) {
+        debug_assert!(vessel.get() < self.graph.num_vessels());
+        debug_assert!(reference.get() < self.graph.num_vessels());
+
         let v_raw = vessel.get();
         let ref_raw = reference.get();
         let ref_prev = unsafe { self.graph.arena().prev_unchecked(ref_raw) };
@@ -574,7 +851,7 @@ impl<'a> Mutator<'a> {
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(vessel) };
 
-        unsafe { self.record_relocate(vessel) };
+        unsafe { self.record_relocate_unchecked(vessel) };
         unsafe { self.graph.relocate_before_unchecked(vessel, reference) };
 
         tracker.commit(self.graph, self.diff);
@@ -590,6 +867,9 @@ impl<'a> Mutator<'a> {
     /// Vessel and berth must be in bounds.
     #[inline]
     pub unsafe fn relocate_to_head_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
+        debug_assert!(vessel.get() < self.graph.num_vessels());
+        debug_assert!(berth.get() < self.graph.num_berths());
+
         let v_raw = vessel.get();
         let sentinel = self.graph.sentinel(berth);
         let prev = unsafe { self.graph.arena().prev_unchecked(v_raw) };
@@ -601,7 +881,7 @@ impl<'a> Mutator<'a> {
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(vessel) };
 
-        unsafe { self.record_relocate(vessel) };
+        unsafe { self.record_relocate_unchecked(vessel) };
         unsafe { self.graph.relocate_to_head_unchecked(vessel, berth) };
 
         tracker.commit(self.graph, self.diff);
@@ -616,6 +896,9 @@ impl<'a> Mutator<'a> {
     /// Vessel and berth must be in bounds.
     #[inline]
     pub unsafe fn relocate_to_tail_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
+        debug_assert!(vessel.get() < self.graph.num_vessels());
+        debug_assert!(berth.get() < self.graph.num_berths());
+
         let v_raw = vessel.get();
         let sentinel = self.graph.sentinel(berth);
         let prev = unsafe { self.graph.arena().prev_unchecked(v_raw) };
@@ -628,7 +911,7 @@ impl<'a> Mutator<'a> {
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(vessel) };
 
-        unsafe { self.record_relocate(vessel) };
+        unsafe { self.record_relocate_unchecked(vessel) };
         unsafe { self.graph.relocate_to_tail_unchecked(vessel, berth) };
 
         tracker.commit(self.graph, self.diff);
@@ -648,6 +931,10 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         anchor: VesselIndex,
     ) {
+        debug_assert!(first.get() < self.graph.num_vessels());
+        debug_assert!(last.get() < self.graph.num_vessels());
+        debug_assert!(anchor.get() < self.graph.num_vessels());
+
         let f_raw = first.get();
         let l_raw = last.get();
         let a_raw = anchor.get();
@@ -664,7 +951,7 @@ impl<'a> Mutator<'a> {
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(first) };
 
-        unsafe { self.record_relocate_segment(first, last) };
+        unsafe { self.record_relocate_segment_unchecked(first, last) };
         unsafe {
             self.graph
                 .relocate_segment_after_unchecked(first, last, anchor)
@@ -673,7 +960,7 @@ impl<'a> Mutator<'a> {
         tracker.commit(self.graph, self.diff);
 
         let new_b = unsafe { self.graph.vessel_berth_unchecked(first) };
-        unsafe { self.record_segment_reallocation(first, last, old_b, new_b) };
+        unsafe { self.record_segment_reallocation_unchecked(first, last, old_b, new_b) };
     }
 
     /// # Safety
@@ -686,6 +973,10 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         reference: VesselIndex,
     ) {
+        debug_assert!(first.get() < self.graph.num_vessels());
+        debug_assert!(last.get() < self.graph.num_vessels());
+        debug_assert!(reference.get() < self.graph.num_vessels());
+
         let f_raw = first.get();
         let l_raw = last.get();
         let ref_raw = reference.get();
@@ -703,7 +994,7 @@ impl<'a> Mutator<'a> {
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(first) };
 
-        unsafe { self.record_relocate_segment(first, last) };
+        unsafe { self.record_relocate_segment_unchecked(first, last) };
         unsafe {
             self.graph
                 .relocate_segment_before_unchecked(first, last, reference)
@@ -712,7 +1003,7 @@ impl<'a> Mutator<'a> {
         tracker.commit(self.graph, self.diff);
 
         let new_b = unsafe { self.graph.vessel_berth_unchecked(first) };
-        unsafe { self.record_segment_reallocation(first, last, old_b, new_b) };
+        unsafe { self.record_segment_reallocation_unchecked(first, last, old_b, new_b) };
     }
 
     /// # Safety
@@ -725,6 +1016,10 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
+        debug_assert!(first.get() < self.graph.num_vessels());
+        debug_assert!(last.get() < self.graph.num_vessels());
+        debug_assert!(berth.get() < self.graph.num_berths());
+
         let f_raw = first.get();
         let l_raw = last.get();
         let sentinel = self.graph.sentinel(berth);
@@ -737,7 +1032,7 @@ impl<'a> Mutator<'a> {
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(first) };
 
-        unsafe { self.record_relocate_segment(first, last) };
+        unsafe { self.record_relocate_segment_unchecked(first, last) };
         unsafe {
             self.graph
                 .relocate_segment_to_head_unchecked(first, last, berth)
@@ -745,7 +1040,7 @@ impl<'a> Mutator<'a> {
 
         tracker.commit(self.graph, self.diff);
 
-        unsafe { self.record_segment_reallocation(first, last, old_b, berth) };
+        unsafe { self.record_segment_reallocation_unchecked(first, last, old_b, berth) };
     }
 
     /// # Safety
@@ -758,6 +1053,10 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
+        debug_assert!(first.get() < self.graph.num_vessels());
+        debug_assert!(last.get() < self.graph.num_vessels());
+        debug_assert!(berth.get() < self.graph.num_berths());
+
         let f_raw = first.get();
         let l_raw = last.get();
         let sentinel = self.graph.sentinel(berth);
@@ -771,7 +1070,7 @@ impl<'a> Mutator<'a> {
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(first) };
 
-        unsafe { self.record_relocate_segment(first, last) };
+        unsafe { self.record_relocate_segment_unchecked(first, last) };
         unsafe {
             self.graph
                 .relocate_segment_to_tail_unchecked(first, last, berth)
@@ -779,7 +1078,7 @@ impl<'a> Mutator<'a> {
 
         tracker.commit(self.graph, self.diff);
 
-        unsafe { self.record_segment_reallocation(first, last, old_b, berth) };
+        unsafe { self.record_segment_reallocation_unchecked(first, last, old_b, berth) };
     }
 }
 

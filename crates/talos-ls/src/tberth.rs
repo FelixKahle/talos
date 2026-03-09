@@ -112,12 +112,7 @@ impl TouchedBerths {
     /// The caller must ensure that `berth.get()` is < `num_berths`.
     #[inline(always)]
     pub unsafe fn touch_unchecked(&mut self, berth: BerthIndex) {
-        debug_assert!(
-            berth.get() < self.touched.len(),
-            "called `TouchedBerths::touch_unchecked` with out-of-bounds berth: berth = {}, num_berths = {}",
-            berth.get(),
-            self.touched.len()
-        );
+        debug_assert!(berth.get() < self.touched.len());
 
         unsafe {
             *self.touched.get_unchecked_mut(berth.get()) = true;
@@ -137,12 +132,7 @@ impl TouchedBerths {
     /// The caller must ensure that `berth.get()` is < `num_berths`.
     #[inline(always)]
     pub unsafe fn is_touched_unchecked(&self, berth: BerthIndex) -> bool {
-        debug_assert!(
-            berth.get() < self.touched.len(),
-            "called `TouchedBerths::is_touched_unchecked` with out-of-bounds berth: berth = {}, num_berths = {}",
-            berth.get(),
-            self.touched.len()
-        );
+        debug_assert!(berth.get() < self.touched.len());
 
         unsafe { *self.touched.get_unchecked(berth.get()) }
     }

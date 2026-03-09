@@ -68,10 +68,7 @@ impl<'a> Iterator for RingSequenceIter<'a> {
         self.current_node = *unsafe { self.next_pointers.get_unchecked(current) };
 
         debug_assert!(
-            self.current_node == self.stop_node || self.current_node < self.next_pointers.len(),
-            "invariant violation: sequence iterator cursor out of bounds: current_node = {}, next_pointers_len = {}",
-            self.current_node,
-            self.next_pointers.len()
+            self.current_node == self.stop_node || self.current_node < self.next_pointers.len()
         );
 
         Some(current)
@@ -109,10 +106,7 @@ impl<'a> Iterator for RingSequenceRevIter<'a> {
         self.current_node = *unsafe { self.prev_pointers.get_unchecked(current) };
 
         debug_assert!(
-            self.current_node == self.stop_node || self.current_node < self.prev_pointers.len(),
-            "invariant violation: reverse sequence iterator cursor out of bounds: current_node = {}, prev_pointers_len = {}",
-            self.current_node,
-            self.prev_pointers.len()
+            self.current_node == self.stop_node || self.current_node < self.prev_pointers.len()
         );
 
         Some(current)
@@ -198,24 +192,16 @@ impl RingArena {
     /// Panics if `prev.len() != next.len()`.
     #[inline]
     pub fn new(prev: Vec<usize>, next: Vec<usize>) -> Self {
-        assert_eq!(
-            prev.len(),
-            next.len(),
-            "called `RingArena::new` with mismatched slice lengths: prev.len() = {}, next.len() = {}",
-            prev.len(),
-            next.len()
-        );
+        assert_eq!(prev.len(), next.len());
+
         Self { prev, next }
     }
 
     /// Overwrites the current arena with data from parallel slices to avoid reallocation.
     #[inline]
     pub fn overwrite_from_slices(&mut self, prev: &[usize], next: &[usize]) {
-        assert_eq!(
-            prev.len(),
-            next.len(),
-            "called `RingArena::overwrite_from_slices` with mismatched slice lengths"
-        );
+        assert_eq!(prev.len(), next.len());
+
         self.prev.clear();
         self.prev.extend_from_slice(prev);
         self.next.clear();
@@ -269,12 +255,6 @@ impl RingArena {
     /// Returns the internal `next` pointer for the given node.
     #[inline]
     pub fn next(&self, node: usize) -> usize {
-        assert!(
-            node < self.next.len(),
-            "called `RingArena::next` with out-of-bounds node index: node = {}, next_len = {}",
-            node,
-            self.next.len()
-        );
         self.next[node]
     }
 
@@ -285,22 +265,14 @@ impl RingArena {
     /// The caller must ensure that `node < self.next.len()`.
     #[inline(always)]
     pub unsafe fn next_unchecked(&self, node: usize) -> usize {
-        debug_assert!(
-            node < self.next.len(),
-            "called `RingArena::next_unchecked` with out-of-bounds node index"
-        );
+        debug_assert!(node < self.next.len());
+
         *unsafe { self.next.get_unchecked(node) }
     }
 
     /// Returns the internal `prev` pointer for the given node.
     #[inline]
     pub fn prev(&self, node: usize) -> usize {
-        assert!(
-            node < self.prev.len(),
-            "called `RingArena::prev` with out-of-bounds node index: node = {}, prev_len = {}",
-            node,
-            self.prev.len()
-        );
         self.prev[node]
     }
 
@@ -311,10 +283,8 @@ impl RingArena {
     /// The caller must ensure that `node < self.prev.len()`.
     #[inline(always)]
     pub unsafe fn prev_unchecked(&self, node: usize) -> usize {
-        debug_assert!(
-            node < self.prev.len(),
-            "called `RingArena::prev_unchecked` with out-of-bounds node index"
-        );
+        debug_assert!(node < self.prev.len());
+
         *unsafe { self.prev.get_unchecked(node) }
     }
 
@@ -360,7 +330,7 @@ impl RingArena {
     /// caller must reinsert it or otherwise fix them up before the graph is observed again.
     #[inline(always)]
     unsafe fn extract_node_unchecked(&mut self, node_to_extract: usize) {
-        debug_assert!(node_to_extract < self.prev.len(), "out-of-bounds node");
+        debug_assert!(node_to_extract < self.prev.len());
 
         let predecessor = *unsafe { self.prev.get_unchecked(node_to_extract) };
         let successor = *unsafe { self.next.get_unchecked(node_to_extract) };
@@ -376,11 +346,8 @@ impl RingArena {
         node_to_insert: usize,
         insertion_point: usize,
     ) {
-        debug_assert!(node_to_insert < self.prev.len(), "out-of-bounds node");
-        debug_assert!(
-            insertion_point < self.prev.len(),
-            "out-of-bounds insertion point"
-        );
+        debug_assert!(node_to_insert < self.prev.len());
+        debug_assert!(insertion_point < self.prev.len());
 
         let successor_of_insertion_point = *unsafe { self.next.get_unchecked(insertion_point) };
 
@@ -408,11 +375,64 @@ impl RingArena {
     /// Panics if either `first` or `second` is out of bounds.
     #[inline]
     pub fn swap_nodes(&mut self, first: usize, second: usize) {
-        assert!(
-            first < self.len() && second < self.len(),
-            "called `RingArena::swap_nodes` with out-of-bounds node"
-        );
-        unsafe { self.swap_nodes_unchecked(first, second) }
+        if first == second {
+            return;
+        }
+
+        let first_prev = self.prev[first];
+        let first_next = self.next[first];
+        let second_prev = self.prev[second];
+        let second_next = self.next[second];
+
+        let first_is_solo = first_prev == first;
+        let second_is_solo = second_prev == second;
+
+        if first_is_solo && second_is_solo {
+            // Both are self-loops — swapping is a no-op.
+        } else if first_is_solo {
+            self.next[second_prev] = first;
+            self.prev[first] = second_prev;
+            self.next[first] = second_next;
+            self.prev[second_next] = first;
+
+            self.next[second] = second;
+            self.prev[second] = second;
+        } else if second_is_solo {
+            self.next[first_prev] = second;
+            self.prev[second] = first_prev;
+            self.next[second] = first_next;
+            self.prev[first_next] = second;
+
+            self.next[first] = first;
+            self.prev[first] = first;
+        } else if first_next == second {
+            // Adjacent: first -> second
+            self.next[first_prev] = second;
+            self.prev[second] = first_prev;
+            self.next[second] = first;
+            self.prev[first] = second;
+            self.next[first] = second_next;
+            self.prev[second_next] = first;
+        } else if second_next == first {
+            // Adjacent: second -> first
+            self.next[second_prev] = first;
+            self.prev[first] = second_prev;
+            self.next[first] = second;
+            self.prev[second] = first;
+            self.next[second] = first_next;
+            self.prev[first_next] = second;
+        } else {
+            // Non-adjacent
+            self.next[first_prev] = second;
+            self.prev[second] = first_prev;
+            self.next[second] = first_next;
+            self.prev[first_next] = second;
+
+            self.next[second_prev] = first;
+            self.prev[first] = second_prev;
+            self.next[first] = second_next;
+            self.prev[second_next] = first;
+        }
     }
 
     /// Swaps the positions of two nodes in the arena.
@@ -432,10 +452,7 @@ impl RingArena {
     /// Both `first` and `second` must be valid node indices. No bounds checking is performed.
     #[inline]
     pub unsafe fn swap_nodes_unchecked(&mut self, first: usize, second: usize) {
-        debug_assert!(
-            first < self.len() && second < self.len(),
-            "called `RingArena::swap_nodes_unchecked` with out-of-bounds node"
-        );
+        debug_assert!(first < self.len() && second < self.len());
 
         if first == second {
             return;
@@ -517,28 +534,49 @@ impl RingArena {
     ///
     /// Panics if any of the indices are out of bounds.
     #[inline]
-    pub fn swap_segments(
-        &mut self,
-        segment_a_first: usize,
-        segment_a_last: usize,
-        segment_b_first: usize,
-        segment_b_last: usize,
-    ) {
-        assert!(
-            segment_a_first < self.len()
-                && segment_a_last < self.len()
-                && segment_b_first < self.len()
-                && segment_b_last < self.len(),
-            "called `RingArena::swap_segments` with out-of-bounds nodes"
-        );
+    pub fn swap_segments(&mut self, a_first: usize, a_last: usize, b_first: usize, b_last: usize) {
+        if a_first == b_first {
+            return;
+        }
 
-        unsafe {
-            self.swap_segments_unchecked(
-                segment_a_first,
-                segment_a_last,
-                segment_b_first,
-                segment_b_last,
-            )
+        let a_pred = self.prev[a_first];
+        let a_succ = self.next[a_last];
+        let b_pred = self.prev[b_first];
+        let b_succ = self.next[b_last];
+
+        if a_succ == b_first && b_succ == a_first {
+            // Full-ring case
+            self.next[b_last] = a_first;
+            self.prev[a_first] = b_last;
+            self.next[a_last] = b_first;
+            self.prev[b_first] = a_last;
+        } else if a_succ == b_first {
+            // Adjacent: A immediately before B
+            self.next[a_pred] = b_first;
+            self.prev[b_first] = a_pred;
+            self.next[b_last] = a_first;
+            self.prev[a_first] = b_last;
+            self.next[a_last] = b_succ;
+            self.prev[b_succ] = a_last;
+        } else if b_succ == a_first {
+            // Adjacent: B immediately before A
+            self.next[b_pred] = a_first;
+            self.prev[a_first] = b_pred;
+            self.next[a_last] = b_first;
+            self.prev[b_first] = a_last;
+            self.next[b_last] = a_succ;
+            self.prev[a_succ] = b_last;
+        } else {
+            // Non-adjacent
+            self.next[a_pred] = b_first;
+            self.prev[b_first] = a_pred;
+            self.next[b_last] = a_succ;
+            self.prev[a_succ] = b_last;
+
+            self.next[b_pred] = a_first;
+            self.prev[a_first] = b_pred;
+            self.next[a_last] = b_succ;
+            self.prev[b_succ] = a_last;
         }
     }
 
@@ -570,8 +608,7 @@ impl RingArena {
             a_first < self.len()
                 && a_last < self.len()
                 && b_first < self.len()
-                && b_last < self.len(),
-            "called `RingArena::swap_segments_unchecked` with out-of-bounds nodes"
+                && b_last < self.len()
         );
 
         if a_first == b_first {
@@ -651,11 +688,25 @@ impl RingArena {
     /// Panics if either `node` or `anchor` is out of bounds.
     #[inline]
     pub fn relocate_after(&mut self, node: usize, anchor: usize) {
-        assert!(
-            node < self.len() && anchor < self.len(),
-            "called `RingArena::relocate_after` with out-of-bounds nodes"
-        );
-        unsafe { self.relocate_after_unchecked(node, anchor) }
+        if node == anchor {
+            return;
+        }
+        if self.prev[node] == anchor {
+            return;
+        }
+
+        // Extract node
+        let predecessor = self.prev[node];
+        let successor = self.next[node];
+        self.next[predecessor] = successor;
+        self.prev[successor] = predecessor;
+
+        // Insert after anchor
+        let successor_of_anchor = self.next[anchor];
+        self.next[anchor] = node;
+        self.prev[node] = anchor;
+        self.next[node] = successor_of_anchor;
+        self.prev[successor_of_anchor] = node;
     }
 
     /// Relocates a single node to immediately follow the target anchor.
@@ -701,17 +752,23 @@ impl RingArena {
     ///
     /// Panics if any of the indices are out of bounds.
     #[inline]
-    pub fn relocate_segment_after(
-        &mut self,
-        segment_first: usize,
-        segment_last: usize,
-        anchor: usize,
-    ) {
-        assert!(
-            segment_first < self.len() && segment_last < self.len() && anchor < self.len(),
-            "called `RingArena::relocate_segment_after` with out-of-bounds indices"
-        );
-        unsafe { self.relocate_segment_after_unchecked(segment_first, segment_last, anchor) }
+    pub fn relocate_segment_after(&mut self, first: usize, last: usize, anchor: usize) {
+        if self.prev[first] == anchor {
+            return;
+        }
+
+        let before_segment = self.prev[first];
+        let after_segment = self.next[last];
+
+        self.next[before_segment] = after_segment;
+        self.prev[after_segment] = before_segment;
+
+        let successor_of_anchor = self.next[anchor];
+
+        self.next[anchor] = first;
+        self.prev[first] = anchor;
+        self.next[last] = successor_of_anchor;
+        self.prev[successor_of_anchor] = last;
     }
 
     /// Relocates a contiguous segment of nodes to immediately follow the target anchor.
@@ -776,11 +833,8 @@ impl RingArena {
     /// Panics if either `node` or `anchor` is out of bounds.
     #[inline]
     pub fn relocate_before(&mut self, node: usize, anchor: usize) {
-        assert!(
-            node < self.len() && anchor < self.len(),
-            "called `RingArena::relocate_before` with out-of-bounds nodes"
-        );
-        unsafe { self.relocate_before_unchecked(node, anchor) }
+        let anchor_predecessor = self.prev[anchor];
+        self.relocate_after(node, anchor_predecessor);
     }
 
     /// Relocates a single node to immediately precede the target anchor.
@@ -820,17 +874,9 @@ impl RingArena {
     ///
     /// Panics if any of the indices are out of bounds.
     #[inline]
-    pub fn relocate_segment_before(
-        &mut self,
-        segment_first: usize,
-        segment_last: usize,
-        anchor: usize,
-    ) {
-        assert!(
-            segment_first < self.len() && segment_last < self.len() && anchor < self.len(),
-            "called `RingArena::relocate_segment_before` with out-of-bounds indices"
-        );
-        unsafe { self.relocate_segment_before_unchecked(segment_first, segment_last, anchor) }
+    pub fn relocate_segment_before(&mut self, first: usize, last: usize, anchor: usize) {
+        let anchor_predecessor = self.prev[anchor];
+        self.relocate_segment_after(first, last, anchor_predecessor);
     }
 
     /// Relocates a contiguous segment of nodes to immediately precede the target anchor.
@@ -875,12 +921,30 @@ impl RingArena {
     ///
     /// Panics if either `segment_first` or `segment_last` is out of bounds.
     #[inline]
-    pub fn reverse_segment(&mut self, segment_first: usize, segment_last: usize) {
-        assert!(
-            segment_first < self.len() && segment_last < self.len(),
-            "called `RingArena::reverse_segment` with out-of-bounds nodes"
-        );
-        unsafe { self.reverse_segment_unchecked(segment_first, segment_last) }
+    pub fn reverse_segment(&mut self, first: usize, last: usize) {
+        if first == last {
+            return;
+        }
+
+        let predecessor_of_segment = self.prev[first];
+        let successor_of_segment = self.next[last];
+
+        let mut current_node = first;
+
+        loop {
+            let original_next = self.next[current_node];
+            std::mem::swap(&mut self.prev[current_node], &mut self.next[current_node]);
+            if current_node == last {
+                break;
+            }
+            current_node = original_next;
+        }
+
+        self.next[first] = successor_of_segment;
+        self.prev[last] = predecessor_of_segment;
+
+        self.next[predecessor_of_segment] = last;
+        self.prev[successor_of_segment] = first;
     }
 
     /// Reverses the order of a contiguous segment of nodes.
@@ -901,6 +965,8 @@ impl RingArena {
     /// No bounds checking is performed.
     #[inline]
     pub unsafe fn reverse_segment_unchecked(&mut self, first: usize, last: usize) {
+        debug_assert!(first < self.len() && last < self.len());
+
         if first == last {
             return;
         }
