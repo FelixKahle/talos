@@ -77,6 +77,60 @@ use crate::{
 };
 use std::{hash::Hash, iter::FusedIterator};
 
+// ----------------------------------------------------------------
+// SolutionIter
+// ----------------------------------------------------------------
+
+/// Iterator over all vessel assignments in a `Solution`.
+///
+/// Yields `Assignment<T>` values in order of increasing vessel index.
+#[derive(Debug, Clone)]
+pub struct SolutionIter<'a, T> {
+    berths: std::slice::Iter<'a, BerthIndex>,
+    start_times: std::slice::Iter<'a, T>,
+}
+
+impl<'a, T> SolutionIter<'a, T> {
+    #[inline]
+    fn new(solution: &'a Solution<T>) -> Self {
+        debug_assert_eq!(solution.berths.len(), solution.start_times.len());
+
+        SolutionIter {
+            berths: solution.berths.iter(),
+            start_times: solution.start_times.iter(),
+        }
+    }
+}
+
+impl<'a, T> Iterator for SolutionIter<'a, T>
+where
+    T: Copy,
+{
+    type Item = Assignment<T>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let berth = self.berths.next()?;
+        let start_time = self.start_times.next()?;
+
+        Some(Assignment::new(*start_time, *berth))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        debug_assert_eq!(self.berths.len(), self.start_times.len());
+
+        self.berths.size_hint()
+    }
+}
+
+impl<'a, T> ExactSizeIterator for SolutionIter<'a, T> where T: Copy {}
+impl<'a, T> FusedIterator for SolutionIter<'a, T> where T: Copy {}
+
+// ----------------------------------------------------------------
+// Solution
+// ----------------------------------------------------------------
+
 /// Represents a solution of the Dynamic Berth Allocation Problem (DBAP),
 /// i.e., a complete schedule of all vessels to berths and start times.
 ///
@@ -220,12 +274,7 @@ impl<T> Solution<T> {
     where
         T: Copy,
     {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `Solution::assignment_for_vessel` with out-of-bounds index: vessel = {}, num_vessels = {}",
-            vessel.get(),
-            self.berths.len()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
 
         Assignment::new(self.start_times[vessel.get()], self.berths[vessel.get()])
     }
@@ -270,12 +319,8 @@ impl<T> Solution<T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn berth_for_vessel(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `Solution::berth_for_vessel` with out-of-bounds index: vessel = {}, num_vessels = {}",
-            vessel.get(),
-            self.berths.len()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
+
         self.berths[vessel.get()]
     }
 
@@ -287,6 +332,7 @@ impl<T> Solution<T> {
     #[inline]
     pub unsafe fn berth_for_vessel_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
         debug_assert!(vessel.get() < self.berths.len());
+
         *unsafe { self.berths.get_unchecked(vessel.get()) }
     }
 
@@ -298,6 +344,7 @@ impl<T> Solution<T> {
     #[inline]
     pub fn start_time_for_vessel(&self, vessel: VesselIndex) -> &T {
         debug_assert!(vessel.get() < self.start_times.len());
+
         &self.start_times[vessel.get()]
     }
 
@@ -308,12 +355,8 @@ impl<T> Solution<T> {
     /// The caller must ensure `vessel.get() < self.num_vessels()`.
     #[inline]
     pub unsafe fn start_time_for_vessel_unchecked(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(
-            vessel.get() < self.start_times.len(),
-            "called `Solution::start_time_for_vessel_unchecked` with out-of-bounds index: vessel = {}, num_vessels = {}",
-            vessel.get(),
-            self.start_times.len()
-        );
+        debug_assert!(vessel.get() < self.start_times.len());
+
         unsafe { self.start_times.get_unchecked(vessel.get()) }
     }
 
@@ -372,64 +415,6 @@ impl<T> Solution<T> {
     }
 }
 
-/// Iterator over all vessel assignments in a `Solution`.
-///
-/// Yields `Assignment<T>` values in order of increasing vessel index.
-#[derive(Debug, Clone)]
-pub struct SolutionIter<'a, T> {
-    berths: std::slice::Iter<'a, BerthIndex>,
-    start_times: std::slice::Iter<'a, T>,
-}
-
-impl<'a, T> SolutionIter<'a, T> {
-    #[inline]
-    fn new(solution: &'a Solution<T>) -> Self {
-        debug_assert_eq!(
-            solution.berths.len(),
-            solution.start_times.len(),
-            "violated invariant of `SolutionIter`: berths and start_times must have the same length, but got berths.len() = {} and start_times.len() = {}",
-            solution.berths.len(),
-            solution.start_times.len()
-        );
-
-        SolutionIter {
-            berths: solution.berths.iter(),
-            start_times: solution.start_times.iter(),
-        }
-    }
-}
-
-impl<'a, T> Iterator for SolutionIter<'a, T>
-where
-    T: Copy,
-{
-    type Item = Assignment<T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let berth = self.berths.next()?;
-        let start_time = self.start_times.next()?;
-
-        Some(Assignment::new(*start_time, *berth))
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        debug_assert_eq!(
-            self.berths.len(),
-            self.start_times.len(),
-            "violated invariant of `SolutionIter`: berths and start_times iterators must have the same length, but got berths.len() = {} and start_times.len() = {}",
-            self.berths.len(),
-            self.start_times.len()
-        );
-
-        self.berths.size_hint()
-    }
-}
-
-impl<'a, T> ExactSizeIterator for SolutionIter<'a, T> where T: Copy {}
-impl<'a, T> FusedIterator for SolutionIter<'a, T> where T: Copy {}
-
 impl<'a, T> IntoIterator for &'a Solution<T>
 where
     T: Copy,
@@ -442,6 +427,67 @@ where
         self.iter()
     }
 }
+
+impl<'a, T> From<&'a Solution<T>> for SolutionView<'a, T>
+where
+    T: Copy,
+{
+    #[inline]
+    fn from(val: &'a Solution<T>) -> Self {
+        val.as_view()
+    }
+}
+
+// ----------------------------------------------------------------
+// SolutionViewIter
+// ----------------------------------------------------------------
+
+/// Iterator over assignments in a `SolutionView`.
+#[derive(Debug, Clone)]
+pub struct SolutionViewIter<'a, T> {
+    berths: std::slice::Iter<'a, BerthIndex>,
+    start_times: std::slice::Iter<'a, T>,
+}
+
+impl<'a, T> SolutionViewIter<'a, T> {
+    #[inline]
+    fn new(view: &'a SolutionView<T>) -> Self {
+        debug_assert_eq!(view.berths.len(), view.start_times.len());
+
+        SolutionViewIter {
+            berths: view.berths.iter(),
+            start_times: view.start_times.iter(),
+        }
+    }
+}
+
+impl<'a, T> Iterator for SolutionViewIter<'a, T>
+where
+    T: Copy,
+{
+    type Item = Assignment<T>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let berth = self.berths.next()?;
+        let start_time = self.start_times.next()?;
+        Some(Assignment::new(*start_time, *berth))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        debug_assert_eq!(self.berths.len(), self.start_times.len());
+
+        self.berths.size_hint()
+    }
+}
+
+impl<'a, T> ExactSizeIterator for SolutionViewIter<'a, T> where T: Copy {}
+impl<'a, T> FusedIterator for SolutionViewIter<'a, T> where T: Copy {}
+
+// ----------------------------------------------------------------
+// SolutionView
+// ----------------------------------------------------------------
 
 /// A borrowed view of a solution.
 ///
@@ -508,12 +554,8 @@ impl<'a, T> SolutionView<'a, T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn berth_for_vessel(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `SolutionView::berth_for_vessel` with out-of-bounds index: vessel = {}, num_vessels = {}",
-            vessel.get(),
-            self.berths.len()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
+
         self.berths[vessel.get()]
     }
 
@@ -524,12 +566,8 @@ impl<'a, T> SolutionView<'a, T> {
     /// The caller must ensure `vessel.get() < self.num_vessels()`.
     #[inline]
     pub unsafe fn berth_for_vessel_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(
-            vessel.get() < self.berths.len(),
-            "called `SolutionView::berth_for_vessel_unchecked` with out-of-bounds index: vessel = {}, num_vessels = {}",
-            vessel.get(),
-            self.berths.len()
-        );
+        debug_assert!(vessel.get() < self.berths.len());
+
         *unsafe { self.berths.get_unchecked(vessel.get()) }
     }
 
@@ -546,12 +584,8 @@ impl<'a, T> SolutionView<'a, T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn start_time_for_vessel(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(
-            vessel.get() < self.start_times.len(),
-            "called `SolutionView::start_time_for_vessel` with out-of-bounds index: vessel = {}, num_vessels = {}",
-            vessel.get(),
-            self.start_times.len()
-        );
+        debug_assert!(vessel.get() < self.start_times.len());
+
         &self.start_times[vessel.get()]
     }
 
@@ -562,12 +596,8 @@ impl<'a, T> SolutionView<'a, T> {
     /// The caller must ensure `vessel.get() < self.num_vessels()`.
     #[inline]
     pub unsafe fn start_time_for_vessel_unchecked(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(
-            vessel.get() < self.start_times.len(),
-            "called `SolutionView::start_time_for_vessel_unchecked` with out-of-bounds index: vessel = {}, num_vessels = {}",
-            vessel.get(),
-            self.start_times.len()
-        );
+        debug_assert!(vessel.get() < self.start_times.len());
+
         unsafe { self.start_times.get_unchecked(vessel.get()) }
     }
 
@@ -616,60 +646,25 @@ where
     }
 }
 
-/// Iterator over assignments in a `SolutionView`.
-#[derive(Debug, Clone)]
-pub struct SolutionViewIter<'a, T> {
-    berths: std::slice::Iter<'a, BerthIndex>,
-    start_times: std::slice::Iter<'a, T>,
-}
-
-impl<'a, T> SolutionViewIter<'a, T> {
-    #[inline]
-    fn new(view: &'a SolutionView<T>) -> Self {
-        debug_assert_eq!(
-            view.berths.len(),
-            view.start_times.len(),
-            "violated invariant of `SolutionViewIter`: berths and start_times must have the same length, but got berths.len() = {} and start_times.len() = {}",
-            view.berths.len(),
-            view.start_times.len()
-        );
-
-        SolutionViewIter {
-            berths: view.berths.iter(),
-            start_times: view.start_times.iter(),
-        }
-    }
-}
-
-impl<'a, T> Iterator for SolutionViewIter<'a, T>
+impl<'a, T> From<SolutionView<'a, T>> for Solution<T>
 where
     T: Copy,
 {
-    type Item = Assignment<T>;
-
     #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let berth = self.berths.next()?;
-        let start_time = self.start_times.next()?;
-        Some(Assignment::new(*start_time, *berth))
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        debug_assert_eq!(
-            self.berths.len(),
-            self.start_times.len(),
-            "violated invariant of `SolutionViewIter`: berths and start_times iterators must have the same length, but got berths.len() = {} and start_times.len() = {}",
-            self.berths.len(),
-            self.start_times.len()
-        );
-
-        self.berths.size_hint()
+    fn from(val: SolutionView<'a, T>) -> Self {
+        val.to_owned_solution()
     }
 }
 
-impl<'a, T> ExactSizeIterator for SolutionViewIter<'a, T> where T: Copy {}
-impl<'a, T> FusedIterator for SolutionViewIter<'a, T> where T: Copy {}
+impl<'a, T> From<&SolutionView<'a, T>> for Solution<T>
+where
+    T: Copy,
+{
+    #[inline]
+    fn from(val: &SolutionView<'a, T>) -> Self {
+        val.to_owned_solution()
+    }
+}
 
 #[cfg(test)]
 mod tests {

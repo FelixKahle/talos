@@ -227,6 +227,15 @@ impl RingArena {
         self.next.clone_from(&other.next);
     }
 
+    /// Resets the arena to a state where each node forms a self-loop (i.e., a ring of length 1).
+    #[inline]
+    pub fn reset_to_self_loops(&mut self, new_len: usize) {
+        self.prev.clear();
+        self.next.clear();
+        self.prev.extend(0..new_len);
+        self.next.extend(0..new_len);
+    }
+
     /// Resizes the arena to exactly `new_len` nodes.
     ///
     /// If growing, new slots are initialized to `0` (not valid rings —

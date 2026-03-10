@@ -23,7 +23,6 @@ pub mod decoding;
 pub mod engine;
 pub mod mutator;
 pub mod sgraph;
-pub mod sgraphdiff;
 pub mod sgraphundo;
 pub mod state;
 pub mod tberth;

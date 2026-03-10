@@ -50,7 +50,8 @@
 //! mutation and emits the net edge changes into the diff afterward.
 
 use crate::{
-    sgraph::ScheduleGraph, sgraphdiff::ScheduleGraphDiff, sgraphundo::ScheduleGraphUndoLog,
+    sgraph::{ScheduleGraph, ScheduleGraphDiff},
+    sgraphundo::ScheduleGraphUndoLog,
 };
 use talos_model::index::{BerthIndex, VesselIndex};
 
@@ -100,10 +101,12 @@ impl EdgeDeltaTracker {
         }
 
         unsafe {
+            debug_assert!(self.len < 4);
             *self.nodes.get_unchecked_mut(self.len) = node;
-            *self.old_nexts.get_unchecked_mut(self.len) = graph.arena().next_unchecked(node);
+            *self.old_nexts.get_unchecked_mut(self.len) = graph.next_node_unchecked(node);
         }
         self.len += 1;
+        debug_assert!(self.len <= 4);
     }
 
     /// Compares recorded state against current state and emits diffs.
@@ -112,17 +115,11 @@ impl EdgeDeltaTracker {
         for i in 0..self.len {
             let node = unsafe { *self.nodes.get_unchecked(i) };
             let old_nxt = unsafe { *self.old_nexts.get_unchecked(i) };
-            let new_nxt = unsafe { graph.arena().next_unchecked(node) };
+            let new_nxt = unsafe { graph.next_node_unchecked(node) };
 
             if old_nxt != new_nxt {
-                // Convert raw indices to VesselIndex. Indices >= num_vessels are
-                // sentinels — the diff treats them as None internally.
-                let from = VesselIndex::new(node);
-                let old_to = VesselIndex::new(old_nxt);
-                let new_to = VesselIndex::new(new_nxt);
-
-                diff.push_link_broken(from, old_to);
-                diff.push_link_created(from, new_to);
+                diff.push_link_broken(node, old_nxt);
+                diff.push_link_created(node, new_nxt);
             }
         }
     }
@@ -234,16 +231,15 @@ impl<'a> Mutator<'a> {
         if old_berth == new_berth {
             return;
         }
-        // Walk the segment via the arena's next pointers.
-        let mut curr = first.get();
-        let last_raw = last.get();
+        let mut curr = self.graph.vessel_node(first);
+        let last_raw = self.graph.vessel_node(last);
         loop {
             self.diff
                 .push_reallocation(VesselIndex::new(curr), old_berth, new_berth);
             if curr == last_raw {
                 break;
             }
-            curr = unsafe { self.graph.arena().next_unchecked(curr) };
+            curr = unsafe { self.graph.next_node_unchecked(curr) };
         }
     }
 
@@ -259,15 +255,15 @@ impl<'a> Mutator<'a> {
             return;
         }
 
-        let mut curr = first.get();
-        let last_raw = last.get();
+        let mut curr = self.graph.vessel_node(first);
+        let last_raw = self.graph.vessel_node(last);
         loop {
             self.diff
                 .push_reallocation(VesselIndex::new(curr), old_berth, new_berth);
             if curr == last_raw {
                 break;
             }
-            curr = self.graph.arena().next(curr);
+            curr = unsafe { self.graph.next_node_unchecked(curr) };
         }
     }
 
@@ -301,14 +297,20 @@ impl<'a> Mutator<'a> {
             return;
         }
 
-        let a_raw = a.get();
-        let b_raw = b.get();
+        let a_node = self.graph.vessel_node(a);
+        let b_node = self.graph.vessel_node(b);
 
         let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(self.graph.arena().prev(a_raw), self.graph);
-        tracker.track(self.graph.arena().prev(b_raw), self.graph);
-        tracker.track(a_raw, self.graph);
-        tracker.track(b_raw, self.graph);
+        tracker.track(
+            unsafe { self.graph.prev_node_unchecked(a_node) },
+            self.graph,
+        );
+        tracker.track(
+            unsafe { self.graph.prev_node_unchecked(b_node) },
+            self.graph,
+        );
+        tracker.track(a_node, self.graph);
+        tracker.track(b_node, self.graph);
 
         let old_ba = self.graph.vessel_berth(a);
         let old_bb = self.graph.vessel_berth(b);
@@ -365,11 +367,22 @@ impl<'a> Mutator<'a> {
             return;
         }
 
+        let a_f_node = self.graph.vessel_node(a_first);
+        let a_l_node = self.graph.vessel_node(a_last);
+        let b_f_node = self.graph.vessel_node(b_first);
+        let b_l_node = self.graph.vessel_node(b_last);
+
         let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(self.graph.arena().prev(a_first.get()), self.graph);
-        tracker.track(a_last.get(), self.graph);
-        tracker.track(self.graph.arena().prev(b_first.get()), self.graph);
-        tracker.track(b_last.get(), self.graph);
+        tracker.track(
+            unsafe { self.graph.prev_node_unchecked(a_f_node) },
+            self.graph,
+        );
+        tracker.track(a_l_node, self.graph);
+        tracker.track(
+            unsafe { self.graph.prev_node_unchecked(b_f_node) },
+            self.graph,
+        );
+        tracker.track(b_l_node, self.graph);
 
         let old_ba = self.graph.vessel_berth(a_first);
         let old_bb = self.graph.vessel_berth(b_first);
@@ -415,29 +428,25 @@ impl<'a> Mutator<'a> {
             return;
         }
 
-        let arena = self.graph.arena();
-        let prev_first = arena.prev(first.get());
-        let next_last = arena.next(last.get());
+        let first_node = self.graph.vessel_node(first);
+        let last_node = self.graph.vessel_node(last);
 
-        let prev_first_v = VesselIndex::new(prev_first);
-        let next_last_v = VesselIndex::new(next_last);
+        let prev_first = unsafe { self.graph.prev_node_unchecked(first_node) };
+        let next_last = unsafe { self.graph.next_node_unchecked(last_node) };
 
-        self.diff.push_link_broken(prev_first_v, first);
-        self.diff.push_link_broken(last, next_last_v);
+        self.diff.push_link_broken(prev_first, first_node);
+        self.diff.push_link_broken(last_node, next_last);
 
-        let mut curr = first.get();
-        let last_raw = last.get();
-        while curr != last_raw {
-            let nxt = arena.next(curr);
-            let curr_v = VesselIndex::new(curr);
-            let nxt_v = VesselIndex::new(nxt);
-            self.diff.push_link_broken(curr_v, nxt_v);
-            self.diff.push_link_created(nxt_v, curr_v);
+        let mut curr = first_node;
+        while curr != last_node {
+            let nxt = unsafe { self.graph.next_node_unchecked(curr) };
+            self.diff.push_link_broken(curr, nxt);
+            self.diff.push_link_created(nxt, curr);
             curr = nxt;
         }
 
-        self.diff.push_link_created(prev_first_v, last);
-        self.diff.push_link_created(first, next_last_v);
+        self.diff.push_link_created(prev_first, last_node);
+        self.diff.push_link_created(first_node, next_last);
 
         self.undo.push_reverse_segment(first, last);
         self.graph.reverse_segment(first, last);
@@ -468,18 +477,18 @@ impl<'a> Mutator<'a> {
         assert!(vessel.get() < self.graph.num_vessels());
         assert!(anchor.get() < self.graph.num_vessels());
 
-        let v_raw = vessel.get();
-        let a_raw = anchor.get();
-        let prev = self.graph.arena().prev(v_raw);
+        let v_node = self.graph.vessel_node(vessel);
+        let a_node = self.graph.vessel_node(anchor);
+        let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
 
-        if v_raw == a_raw || prev == a_raw {
+        if v_node == a_node || prev == a_node {
             return;
         }
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(v_raw, self.graph);
-        tracker.track(a_raw, self.graph);
+        tracker.track(v_node, self.graph);
+        tracker.track(a_node, self.graph);
 
         let old_b = self.graph.vessel_berth(vessel);
 
@@ -519,18 +528,18 @@ impl<'a> Mutator<'a> {
         assert!(vessel.get() < self.graph.num_vessels());
         assert!(reference.get() < self.graph.num_vessels());
 
-        let v_raw = vessel.get();
-        let ref_raw = reference.get();
-        let ref_prev = self.graph.arena().prev(ref_raw);
-        let v_prev = self.graph.arena().prev(v_raw);
+        let v_node = self.graph.vessel_node(vessel);
+        let ref_node = self.graph.vessel_node(reference);
+        let ref_prev = unsafe { self.graph.prev_node_unchecked(ref_node) };
+        let v_prev = unsafe { self.graph.prev_node_unchecked(v_node) };
 
-        if v_raw == ref_raw || v_prev == ref_prev {
+        if v_node == ref_node || v_prev == ref_prev {
             return;
         }
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(v_prev, self.graph);
-        tracker.track(v_raw, self.graph);
+        tracker.track(v_node, self.graph);
         tracker.track(ref_prev, self.graph);
 
         let old_b = self.graph.vessel_berth(vessel);
@@ -569,14 +578,14 @@ impl<'a> Mutator<'a> {
         assert!(vessel.get() < self.graph.num_vessels());
         assert!(berth.get() < self.graph.num_berths());
 
-        let v_raw = vessel.get();
-        let sentinel = self.graph.sentinel(berth);
-        let prev = self.graph.arena().prev(v_raw);
+        let v_node = self.graph.vessel_node(vessel);
+        let head_boundary = self.graph.head_boundary_node(berth);
+        let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(v_raw, self.graph);
-        tracker.track(sentinel, self.graph);
+        tracker.track(v_node, self.graph);
+        tracker.track(head_boundary, self.graph);
 
         let old_b = self.graph.vessel_berth(vessel);
 
@@ -613,14 +622,14 @@ impl<'a> Mutator<'a> {
         assert!(vessel.get() < self.graph.num_vessels());
         assert!(berth.get() < self.graph.num_berths());
 
-        let v_raw = vessel.get();
-        let sentinel = self.graph.sentinel(berth);
-        let prev = self.graph.arena().prev(v_raw);
-        let old_tail = self.graph.arena().prev(sentinel);
+        let v_node = self.graph.vessel_node(vessel);
+        let tail_boundary = self.graph.tail_boundary_node(berth);
+        let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
+        let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(v_raw, self.graph);
+        tracker.track(v_node, self.graph);
         tracker.track(old_tail, self.graph);
 
         let old_b = self.graph.vessel_berth(vessel);
@@ -668,19 +677,19 @@ impl<'a> Mutator<'a> {
         assert!(last.get() < self.graph.num_vessels());
         assert!(anchor.get() < self.graph.num_vessels());
 
-        let f_raw = first.get();
-        let l_raw = last.get();
-        let a_raw = anchor.get();
-        let prev = self.graph.arena().prev(f_raw);
+        let f_node = self.graph.vessel_node(first);
+        let l_node = self.graph.vessel_node(last);
+        let a_node = self.graph.vessel_node(anchor);
+        let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
 
-        if prev == a_raw {
+        if prev == a_node {
             return;
         }
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(l_raw, self.graph);
-        tracker.track(a_raw, self.graph);
+        tracker.track(l_node, self.graph);
+        tracker.track(a_node, self.graph);
 
         let old_b = self.graph.vessel_berth(first);
 
@@ -726,11 +735,11 @@ impl<'a> Mutator<'a> {
         assert!(last.get() < self.graph.num_vessels());
         assert!(reference.get() < self.graph.num_vessels());
 
-        let f_raw = first.get();
-        let l_raw = last.get();
-        let ref_raw = reference.get();
-        let ref_prev = self.graph.arena().prev(ref_raw);
-        let prev = self.graph.arena().prev(f_raw);
+        let f_node = self.graph.vessel_node(first);
+        let l_node = self.graph.vessel_node(last);
+        let ref_node = self.graph.vessel_node(reference);
+        let ref_prev = unsafe { self.graph.prev_node_unchecked(ref_node) };
+        let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
 
         if prev == ref_prev {
             return;
@@ -738,7 +747,7 @@ impl<'a> Mutator<'a> {
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(l_raw, self.graph);
+        tracker.track(l_node, self.graph);
         tracker.track(ref_prev, self.graph);
 
         let old_b = self.graph.vessel_berth(first);
@@ -783,15 +792,15 @@ impl<'a> Mutator<'a> {
         assert!(last.get() < self.graph.num_vessels());
         assert!(berth.get() < self.graph.num_berths());
 
-        let f_raw = first.get();
-        let l_raw = last.get();
-        let sentinel = self.graph.sentinel(berth);
-        let prev = self.graph.arena().prev(f_raw);
+        let f_node = self.graph.vessel_node(first);
+        let l_node = self.graph.vessel_node(last);
+        let head_boundary = self.graph.head_boundary_node(berth);
+        let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(l_raw, self.graph);
-        tracker.track(sentinel, self.graph);
+        tracker.track(l_node, self.graph);
+        tracker.track(head_boundary, self.graph);
 
         let old_b = self.graph.vessel_berth(first);
 
@@ -834,15 +843,15 @@ impl<'a> Mutator<'a> {
         assert!(last.get() < self.graph.num_vessels());
         assert!(berth.get() < self.graph.num_berths());
 
-        let f_raw = first.get();
-        let l_raw = last.get();
-        let sentinel = self.graph.sentinel(berth);
-        let prev = self.graph.arena().prev(f_raw);
-        let old_tail = self.graph.arena().prev(sentinel);
+        let f_node = self.graph.vessel_node(first);
+        let l_node = self.graph.vessel_node(last);
+        let tail_boundary = self.graph.tail_boundary_node(berth);
+        let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
+        let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(l_raw, self.graph);
+        tracker.track(l_node, self.graph);
         tracker.track(old_tail, self.graph);
 
         let old_b = self.graph.vessel_berth(first);
@@ -881,20 +890,20 @@ impl<'a> Mutator<'a> {
             return;
         }
 
-        let a_raw = a.get();
-        let b_raw = b.get();
+        let a_node = self.graph.vessel_node(a);
+        let b_node = self.graph.vessel_node(b);
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(
-            unsafe { self.graph.arena().prev_unchecked(a_raw) },
+            unsafe { self.graph.prev_node_unchecked(a_node) },
             self.graph,
         );
         tracker.track(
-            unsafe { self.graph.arena().prev_unchecked(b_raw) },
+            unsafe { self.graph.prev_node_unchecked(b_node) },
             self.graph,
         );
-        tracker.track(a_raw, self.graph);
-        tracker.track(b_raw, self.graph);
+        tracker.track(a_node, self.graph);
+        tracker.track(b_node, self.graph);
 
         let old_ba = unsafe { self.graph.vessel_berth_unchecked(a) };
         let old_bb = unsafe { self.graph.vessel_berth_unchecked(b) };
@@ -948,17 +957,22 @@ impl<'a> Mutator<'a> {
             return;
         }
 
+        let a_f_node = self.graph.vessel_node(a_first);
+        let a_l_node = self.graph.vessel_node(a_last);
+        let b_f_node = self.graph.vessel_node(b_first);
+        let b_l_node = self.graph.vessel_node(b_last);
+
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(
-            unsafe { self.graph.arena().prev_unchecked(a_first.get()) },
+            unsafe { self.graph.prev_node_unchecked(a_f_node) },
             self.graph,
         );
-        tracker.track(a_last.get(), self.graph);
+        tracker.track(a_l_node, self.graph);
         tracker.track(
-            unsafe { self.graph.arena().prev_unchecked(b_first.get()) },
+            unsafe { self.graph.prev_node_unchecked(b_f_node) },
             self.graph,
         );
-        tracker.track(b_last.get(), self.graph);
+        tracker.track(b_l_node, self.graph);
 
         let old_ba = unsafe { self.graph.vessel_berth_unchecked(a_first) };
         let old_bb = unsafe { self.graph.vessel_berth_unchecked(b_first) };
@@ -1002,29 +1016,25 @@ impl<'a> Mutator<'a> {
             return;
         }
 
-        let arena = self.graph.arena();
-        let prev_first = unsafe { arena.prev_unchecked(first.get()) };
-        let next_last = unsafe { arena.next_unchecked(last.get()) };
+        let first_node = self.graph.vessel_node(first);
+        let last_node = self.graph.vessel_node(last);
 
-        let prev_first_v = VesselIndex::new(prev_first);
-        let next_last_v = VesselIndex::new(next_last);
+        let prev_first = unsafe { self.graph.prev_node_unchecked(first_node) };
+        let next_last = unsafe { self.graph.next_node_unchecked(last_node) };
 
-        self.diff.push_link_broken(prev_first_v, first);
-        self.diff.push_link_broken(last, next_last_v);
+        self.diff.push_link_broken(prev_first, first_node);
+        self.diff.push_link_broken(last_node, next_last);
 
-        let mut curr = first.get();
-        let last_raw = last.get();
-        while curr != last_raw {
-            let nxt = unsafe { arena.next_unchecked(curr) };
-            let curr_v = VesselIndex::new(curr);
-            let nxt_v = VesselIndex::new(nxt);
-            self.diff.push_link_broken(curr_v, nxt_v);
-            self.diff.push_link_created(nxt_v, curr_v);
+        let mut curr = first_node;
+        while curr != last_node {
+            let nxt = unsafe { self.graph.next_node_unchecked(curr) };
+            self.diff.push_link_broken(curr, nxt);
+            self.diff.push_link_created(nxt, curr);
             curr = nxt;
         }
 
-        self.diff.push_link_created(prev_first_v, last);
-        self.diff.push_link_created(first, next_last_v);
+        self.diff.push_link_created(prev_first, last_node);
+        self.diff.push_link_created(first_node, next_last);
 
         self.undo.push_reverse_segment(first, last);
         unsafe { self.graph.reverse_segment_unchecked(first, last) };
@@ -1052,18 +1062,18 @@ impl<'a> Mutator<'a> {
         debug_assert!(vessel.get() < self.graph.num_vessels());
         debug_assert!(anchor.get() < self.graph.num_vessels());
 
-        let v_raw = vessel.get();
-        let a_raw = anchor.get();
-        let prev = unsafe { self.graph.arena().prev_unchecked(v_raw) };
+        let v_node = self.graph.vessel_node(vessel);
+        let a_node = self.graph.vessel_node(anchor);
+        let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
 
-        if v_raw == a_raw || prev == a_raw {
+        if v_node == a_node || prev == a_node {
             return;
         }
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(v_raw, self.graph);
-        tracker.track(a_raw, self.graph);
+        tracker.track(v_node, self.graph);
+        tracker.track(a_node, self.graph);
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(vessel) };
 
@@ -1104,18 +1114,18 @@ impl<'a> Mutator<'a> {
         debug_assert!(vessel.get() < self.graph.num_vessels());
         debug_assert!(reference.get() < self.graph.num_vessels());
 
-        let v_raw = vessel.get();
-        let ref_raw = reference.get();
-        let ref_prev = unsafe { self.graph.arena().prev_unchecked(ref_raw) };
-        let v_prev = unsafe { self.graph.arena().prev_unchecked(v_raw) };
+        let v_node = self.graph.vessel_node(vessel);
+        let ref_node = self.graph.vessel_node(reference);
+        let ref_prev = unsafe { self.graph.prev_node_unchecked(ref_node) };
+        let v_prev = unsafe { self.graph.prev_node_unchecked(v_node) };
 
-        if v_raw == ref_raw || v_prev == ref_prev {
+        if v_node == ref_node || v_prev == ref_prev {
             return;
         }
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(v_prev, self.graph);
-        tracker.track(v_raw, self.graph);
+        tracker.track(v_node, self.graph);
         tracker.track(ref_prev, self.graph);
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(vessel) };
@@ -1153,14 +1163,14 @@ impl<'a> Mutator<'a> {
         debug_assert!(vessel.get() < self.graph.num_vessels());
         debug_assert!(berth.get() < self.graph.num_berths());
 
-        let v_raw = vessel.get();
-        let sentinel = self.graph.sentinel(berth);
-        let prev = unsafe { self.graph.arena().prev_unchecked(v_raw) };
+        let v_node = self.graph.vessel_node(vessel);
+        let head_boundary = self.graph.head_boundary_node(berth);
+        let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(v_raw, self.graph);
-        tracker.track(sentinel, self.graph);
+        tracker.track(v_node, self.graph);
+        tracker.track(head_boundary, self.graph);
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(vessel) };
 
@@ -1196,14 +1206,14 @@ impl<'a> Mutator<'a> {
         debug_assert!(vessel.get() < self.graph.num_vessels());
         debug_assert!(berth.get() < self.graph.num_berths());
 
-        let v_raw = vessel.get();
-        let sentinel = self.graph.sentinel(berth);
-        let prev = unsafe { self.graph.arena().prev_unchecked(v_raw) };
-        let old_tail = unsafe { self.graph.arena().prev_unchecked(sentinel) };
+        let v_node = self.graph.vessel_node(vessel);
+        let tail_boundary = self.graph.tail_boundary_node(berth);
+        let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
+        let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(v_raw, self.graph);
+        tracker.track(v_node, self.graph);
         tracker.track(old_tail, self.graph);
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(vessel) };
@@ -1247,19 +1257,19 @@ impl<'a> Mutator<'a> {
         debug_assert!(last.get() < self.graph.num_vessels());
         debug_assert!(anchor.get() < self.graph.num_vessels());
 
-        let f_raw = first.get();
-        let l_raw = last.get();
-        let a_raw = anchor.get();
-        let prev = unsafe { self.graph.arena().prev_unchecked(f_raw) };
+        let f_node = self.graph.vessel_node(first);
+        let l_node = self.graph.vessel_node(last);
+        let a_node = self.graph.vessel_node(anchor);
+        let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
 
-        if prev == a_raw {
+        if prev == a_node {
             return;
         }
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(l_raw, self.graph);
-        tracker.track(a_raw, self.graph);
+        tracker.track(l_node, self.graph);
+        tracker.track(a_node, self.graph);
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(first) };
 
@@ -1304,11 +1314,11 @@ impl<'a> Mutator<'a> {
         debug_assert!(last.get() < self.graph.num_vessels());
         debug_assert!(reference.get() < self.graph.num_vessels());
 
-        let f_raw = first.get();
-        let l_raw = last.get();
-        let ref_raw = reference.get();
-        let ref_prev = unsafe { self.graph.arena().prev_unchecked(ref_raw) };
-        let prev = unsafe { self.graph.arena().prev_unchecked(f_raw) };
+        let f_node = self.graph.vessel_node(first);
+        let l_node = self.graph.vessel_node(last);
+        let ref_node = self.graph.vessel_node(reference);
+        let ref_prev = unsafe { self.graph.prev_node_unchecked(ref_node) };
+        let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
 
         if prev == ref_prev {
             return;
@@ -1316,7 +1326,7 @@ impl<'a> Mutator<'a> {
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(l_raw, self.graph);
+        tracker.track(l_node, self.graph);
         tracker.track(ref_prev, self.graph);
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(first) };
@@ -1362,15 +1372,15 @@ impl<'a> Mutator<'a> {
         debug_assert!(last.get() < self.graph.num_vessels());
         debug_assert!(berth.get() < self.graph.num_berths());
 
-        let f_raw = first.get();
-        let l_raw = last.get();
-        let sentinel = self.graph.sentinel(berth);
-        let prev = unsafe { self.graph.arena().prev_unchecked(f_raw) };
+        let f_node = self.graph.vessel_node(first);
+        let l_node = self.graph.vessel_node(last);
+        let head_boundary = self.graph.head_boundary_node(berth);
+        let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(l_raw, self.graph);
-        tracker.track(sentinel, self.graph);
+        tracker.track(l_node, self.graph);
+        tracker.track(head_boundary, self.graph);
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(first) };
 
@@ -1414,15 +1424,15 @@ impl<'a> Mutator<'a> {
         debug_assert!(last.get() < self.graph.num_vessels());
         debug_assert!(berth.get() < self.graph.num_berths());
 
-        let f_raw = first.get();
-        let l_raw = last.get();
-        let sentinel = self.graph.sentinel(berth);
-        let prev = unsafe { self.graph.arena().prev_unchecked(f_raw) };
-        let old_tail = unsafe { self.graph.arena().prev_unchecked(sentinel) };
+        let f_node = self.graph.vessel_node(first);
+        let l_node = self.graph.vessel_node(last);
+        let tail_boundary = self.graph.tail_boundary_node(berth);
+        let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
+        let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
 
         let mut tracker = EdgeDeltaTracker::new();
         tracker.track(prev, self.graph);
-        tracker.track(l_raw, self.graph);
+        tracker.track(l_node, self.graph);
         tracker.track(old_tail, self.graph);
 
         let old_b = unsafe { self.graph.vessel_berth_unchecked(first) };
