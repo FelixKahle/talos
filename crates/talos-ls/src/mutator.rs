@@ -236,7 +236,7 @@ impl<'a> Mutator<'a> {
         let last_node = self.graph.vessel_node(last);
         loop {
             self.diff
-                .push_reallocation(VesselIndex::new(curr.index()), old_berth, new_berth);
+                .push_reallocation(VesselIndex::new(curr.get()), old_berth, new_berth);
             if curr == last_node {
                 break;
             }
@@ -260,7 +260,7 @@ impl<'a> Mutator<'a> {
         let last_node = self.graph.vessel_node(last);
         loop {
             self.diff
-                .push_reallocation(VesselIndex::new(curr.index()), old_berth, new_berth);
+                .push_reallocation(VesselIndex::new(curr.get()), old_berth, new_berth);
             if curr == last_node {
                 break;
             }

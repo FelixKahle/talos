@@ -69,7 +69,7 @@ impl<'a> Iterator for VesselSequenceIter<'a> {
     #[inline(always)]
     fn next(&mut self) -> Option<VesselIndex> {
         let raw_node = self.inner.next()?;
-        let raw = raw_node.index();
+        let raw = raw_node.get();
         debug_assert!(
             raw < self.num_vessels,
             "VesselSequenceIter yielded a sentinel index: {} >= {}",
@@ -99,7 +99,7 @@ impl<'a> Iterator for VesselSequenceRevIter<'a> {
     #[inline(always)]
     fn next(&mut self) -> Option<VesselIndex> {
         let raw_node = self.inner.next()?;
-        let raw = raw_node.index();
+        let raw = raw_node.get();
         debug_assert!(raw < self.num_vessels);
 
         Some(VesselIndex::new(raw))
@@ -166,8 +166,8 @@ impl<'a> Iterator for BerthEdgeIter<'a> {
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         let (from_node, to_node) = self.inner.next()?;
-        let from_raw = from_node.index();
-        let to_raw = to_node.index();
+        let from_raw = from_node.get();
+        let to_raw = to_node.get();
         debug_assert!(from_raw < self.num_vessels && to_raw < self.num_vessels);
         Some(ScheduleGraphEdge {
             from: VesselIndex::new(from_raw),
@@ -202,11 +202,11 @@ impl<'a> Iterator for AllEdgeIter<'a> {
 
             let to = unsafe { self.arena.next_unchecked(Node::new(from)) };
 
-            if to.index() < self.num_vessels {
+            if to.get() < self.num_vessels {
                 let on_berth = *unsafe { self.vessel_berth.get_unchecked(from) };
                 return Some(ScheduleGraphFullEdge {
                     from: VesselIndex::new(from),
-                    to: VesselIndex::new(to.index()),
+                    to: VesselIndex::new(to.get()),
                     on_berth,
                 });
             }
@@ -479,13 +479,13 @@ impl ScheduleGraph {
     /// Returns the raw node of the given vessel.
     #[inline(always)]
     pub fn vessel_node(&self, vessel: VesselIndex) -> Node {
-        vessel.into()
+        vessel.map()
     }
 
     /// Returns the node following `node`.
     #[inline(always)]
     pub fn next_node(&self, node: Node) -> Node {
-        debug_assert!(node.index() < self.arena.len());
+        debug_assert!(node.get() < self.arena.len());
 
         self.arena.next(node)
     }
@@ -494,10 +494,10 @@ impl ScheduleGraph {
     ///
     /// # Safety
     ///
-    /// `node.index()` must be `< self.arena.len()`.
+    /// `node.get()` must be `< self.arena.len()`.
     #[inline(always)]
     pub unsafe fn next_node_unchecked(&self, node: Node) -> Node {
-        debug_assert!(node.index() < self.arena.len());
+        debug_assert!(node.get() < self.arena.len());
 
         unsafe { self.arena.next_unchecked(node) }
     }
@@ -506,10 +506,10 @@ impl ScheduleGraph {
     ///
     /// # Safety
     ///
-    /// `node.index()` must be `< self.arena.len()`.
+    /// `node.get()` must be `< self.arena.len()`.
     #[inline(always)]
     pub unsafe fn prev_node_unchecked(&self, node: Node) -> Node {
-        debug_assert!(node.index() < self.arena.len());
+        debug_assert!(node.get() < self.arena.len());
 
         unsafe { self.arena.prev_unchecked(node) }
     }
@@ -517,7 +517,7 @@ impl ScheduleGraph {
     /// Returns the node preceding `node`.
     #[inline(always)]
     pub fn prev_node(&self, node: Node) -> Node {
-        debug_assert!(node.index() < self.arena.len());
+        debug_assert!(node.get() < self.arena.len());
 
         self.arena.prev(node)
     }
@@ -611,8 +611,8 @@ impl ScheduleGraph {
         assert!(berth < self.num_berths);
 
         let next_of_sentinel = self.arena.next(self.sentinel(berth));
-        if next_of_sentinel.index() < self.num_vessels {
-            Some(VesselIndex::new(next_of_sentinel.index()))
+        if next_of_sentinel.get() < self.num_vessels {
+            Some(VesselIndex::new(next_of_sentinel.get()))
         } else {
             None
         }
@@ -628,8 +628,8 @@ impl ScheduleGraph {
         assert!(berth < self.num_berths);
 
         let prev_of_sentinel = self.arena.prev(self.sentinel(berth));
-        if prev_of_sentinel.index() < self.num_vessels {
-            Some(VesselIndex::new(prev_of_sentinel.index()))
+        if prev_of_sentinel.get() < self.num_vessels {
+            Some(VesselIndex::new(prev_of_sentinel.get()))
         } else {
             None
         }
@@ -644,9 +644,9 @@ impl ScheduleGraph {
     pub fn vessel_predecessor(&self, vessel: VesselIndex) -> Option<VesselIndex> {
         assert!(vessel < self.num_vessels);
 
-        let pred = self.arena.prev(vessel.into());
-        if pred.index() < self.num_vessels {
-            Some(VesselIndex::new(pred.index()))
+        let pred = self.arena.prev(vessel.map());
+        if pred.get() < self.num_vessels {
+            Some(VesselIndex::new(pred.get()))
         } else {
             None
         }
@@ -661,9 +661,9 @@ impl ScheduleGraph {
     pub unsafe fn vessel_predecessor_unchecked(&self, vessel: VesselIndex) -> Option<VesselIndex> {
         debug_assert!(vessel < self.num_vessels);
 
-        let pred = unsafe { self.arena.prev_unchecked(vessel.into()) };
-        if pred.index() < self.num_vessels {
-            Some(VesselIndex::new(pred.index()))
+        let pred = unsafe { self.arena.prev_unchecked(vessel.map()) };
+        if pred.get() < self.num_vessels {
+            Some(VesselIndex::new(pred.get()))
         } else {
             None
         }
@@ -678,9 +678,9 @@ impl ScheduleGraph {
     pub fn vessel_successor(&self, vessel: VesselIndex) -> Option<VesselIndex> {
         assert!(vessel < self.num_vessels);
 
-        let succ = self.arena.next(vessel.into());
-        if succ.index() < self.num_vessels {
-            Some(VesselIndex::new(succ.index()))
+        let succ = self.arena.next(vessel.map());
+        if succ.get() < self.num_vessels {
+            Some(VesselIndex::new(succ.get()))
         } else {
             None
         }
@@ -695,9 +695,9 @@ impl ScheduleGraph {
     pub unsafe fn vessel_successor_unchecked(&self, vessel: VesselIndex) -> Option<VesselIndex> {
         debug_assert!(vessel < self.num_vessels);
 
-        let succ = unsafe { self.arena.next_unchecked(vessel.into()) };
-        if succ.index() < self.num_vessels {
-            Some(VesselIndex::new(succ.index()))
+        let succ = unsafe { self.arena.next_unchecked(vessel.map()) };
+        if succ.get() < self.num_vessels {
+            Some(VesselIndex::new(succ.get()))
         } else {
             None
         }
@@ -824,7 +824,7 @@ impl ScheduleGraph {
             return;
         }
 
-        self.arena.swap_nodes(a.into(), b.into());
+        self.arena.swap_nodes(a.map(), b.map());
         self.vessel_berth.swap(a.get(), b.get());
     }
 
@@ -839,7 +839,7 @@ impl ScheduleGraph {
         if a == b {
             return;
         }
-        unsafe { self.arena.swap_nodes_unchecked(a.into(), b.into()) };
+        unsafe { self.arena.swap_nodes_unchecked(a.map(), b.map()) };
 
         unsafe {
             std::ptr::swap(
@@ -875,11 +875,11 @@ impl ScheduleGraph {
         let berth_b = self.vessel_berth[b_first.get()];
 
         self.arena
-            .swap_segments(a_first.into(), a_last.into(), b_first.into(), b_last.into());
+            .swap_segments(a_first.map(), a_last.map(), b_first.map(), b_last.map());
 
         if berth_a != berth_b {
-            self.update_segment_berth(a_first.into(), a_last.into(), berth_b);
-            self.update_segment_berth(b_first.into(), b_last.into(), berth_a);
+            self.update_segment_berth(a_first.map(), a_last.map(), berth_b);
+            self.update_segment_berth(b_first.map(), b_last.map(), berth_a);
         }
     }
 
@@ -908,16 +908,16 @@ impl ScheduleGraph {
 
         unsafe {
             self.arena.swap_segments_unchecked(
-                a_first.into(),
-                a_last.into(),
-                b_first.into(),
-                b_last.into(),
+                a_first.map(),
+                a_last.map(),
+                b_first.map(),
+                b_last.map(),
             )
         };
 
         if berth_a != berth_b {
-            unsafe { self.update_segment_berth_unchecked(a_first.into(), a_last.into(), berth_b) };
-            unsafe { self.update_segment_berth_unchecked(b_first.into(), b_last.into(), berth_a) };
+            unsafe { self.update_segment_berth_unchecked(a_first.map(), a_last.map(), berth_b) };
+            unsafe { self.update_segment_berth_unchecked(b_first.map(), b_last.map(), berth_a) };
         }
     }
 
@@ -931,7 +931,7 @@ impl ScheduleGraph {
         assert!(first < self.num_vessels);
         assert!(last < self.num_vessels);
 
-        self.arena.reverse_segment(first.into(), last.into());
+        self.arena.reverse_segment(first.map(), last.map());
     }
 
     /// # Safety
@@ -944,7 +944,7 @@ impl ScheduleGraph {
 
         unsafe {
             self.arena
-                .reverse_segment_unchecked(first.into(), last.into())
+                .reverse_segment_unchecked(first.map(), last.map())
         };
     }
 
@@ -961,10 +961,10 @@ impl ScheduleGraph {
         let old_berth = self.vessel_berth[vessel.get()];
         let new_berth = self.vessel_berth[anchor.get()];
 
-        self.arena.relocate_after(vessel.into(), anchor.into());
+        self.arena.relocate_after(vessel.map(), anchor.map());
 
         if old_berth != new_berth {
-            self.transfer_vessel_berth(vessel.into(), old_berth, new_berth);
+            self.transfer_vessel_berth(vessel.map(), old_berth, new_berth);
         }
     }
 
@@ -981,11 +981,11 @@ impl ScheduleGraph {
 
         unsafe {
             self.arena
-                .relocate_after_unchecked(vessel.into(), anchor.into())
+                .relocate_after_unchecked(vessel.map(), anchor.map())
         };
 
         if old_berth != new_berth {
-            unsafe { self.transfer_vessel_berth_unchecked(vessel.into(), old_berth, new_berth) };
+            unsafe { self.transfer_vessel_berth_unchecked(vessel.map(), old_berth, new_berth) };
         }
     }
 
@@ -1002,11 +1002,11 @@ impl ScheduleGraph {
         let old_berth = self.vessel_berth[vessel.get()];
         let new_berth = self.vessel_berth[reference.get()];
 
-        let anchor_predecessor = self.arena.prev(reference.into());
-        self.arena.relocate_after(vessel.into(), anchor_predecessor);
+        let anchor_predecessor = self.arena.prev(reference.map());
+        self.arena.relocate_after(vessel.map(), anchor_predecessor);
 
         if old_berth != new_berth {
-            self.transfer_vessel_berth(vessel.into(), old_berth, new_berth);
+            self.transfer_vessel_berth(vessel.map(), old_berth, new_berth);
         }
     }
 
@@ -1027,11 +1027,11 @@ impl ScheduleGraph {
 
         unsafe {
             self.arena
-                .relocate_before_unchecked(vessel.into(), reference.into())
+                .relocate_before_unchecked(vessel.map(), reference.map())
         };
 
         if old_berth != new_berth {
-            unsafe { self.transfer_vessel_berth_unchecked(vessel.into(), old_berth, new_berth) };
+            unsafe { self.transfer_vessel_berth_unchecked(vessel.map(), old_berth, new_berth) };
         }
     }
 
@@ -1048,10 +1048,10 @@ impl ScheduleGraph {
         let old_berth = self.vessel_berth[vessel.get()];
         let sentinel = self.sentinel(berth);
 
-        self.arena.relocate_after(vessel.into(), sentinel);
+        self.arena.relocate_after(vessel.map(), sentinel);
 
         if old_berth != berth {
-            self.transfer_vessel_berth(vessel.into(), old_berth, berth);
+            self.transfer_vessel_berth(vessel.map(), old_berth, berth);
         }
     }
 
@@ -1066,10 +1066,10 @@ impl ScheduleGraph {
         let old_berth = *unsafe { self.vessel_berth.get_unchecked(vessel.get()) };
         let sentinel = self.sentinel(berth);
 
-        unsafe { self.arena.relocate_after_unchecked(vessel.into(), sentinel) };
+        unsafe { self.arena.relocate_after_unchecked(vessel.map(), sentinel) };
 
         if old_berth != berth {
-            unsafe { self.transfer_vessel_berth_unchecked(vessel.into(), old_berth, berth) };
+            unsafe { self.transfer_vessel_berth_unchecked(vessel.map(), old_berth, berth) };
         }
     }
 
@@ -1087,10 +1087,10 @@ impl ScheduleGraph {
         let sentinel = self.sentinel(berth);
         let tail = self.arena.prev(sentinel);
 
-        self.arena.relocate_after(vessel.into(), tail);
+        self.arena.relocate_after(vessel.map(), tail);
 
         if old_berth != berth {
-            self.transfer_vessel_berth(vessel.into(), old_berth, berth);
+            self.transfer_vessel_berth(vessel.map(), old_berth, berth);
         }
     }
 
@@ -1106,10 +1106,10 @@ impl ScheduleGraph {
         let sentinel = self.sentinel(berth);
         let tail = unsafe { self.arena.prev_unchecked(sentinel) };
 
-        unsafe { self.arena.relocate_after_unchecked(vessel.into(), tail) };
+        unsafe { self.arena.relocate_after_unchecked(vessel.map(), tail) };
 
         if old_berth != berth {
-            unsafe { self.transfer_vessel_berth_unchecked(vessel.into(), old_berth, berth) };
+            unsafe { self.transfer_vessel_berth_unchecked(vessel.map(), old_berth, berth) };
         }
     }
 
@@ -1130,10 +1130,10 @@ impl ScheduleGraph {
         assert!(anchor < self.num_vessels);
 
         self.arena
-            .relocate_segment_after(first.into(), last.into(), anchor.into());
+            .relocate_segment_after(first.map(), last.map(), anchor.map());
 
         let new_berth = self.vessel_berth[anchor.get()];
-        self.update_segment_berth(first.into(), last.into(), new_berth);
+        self.update_segment_berth(first.map(), last.map(), new_berth);
     }
 
     /// # Safety
@@ -1152,11 +1152,11 @@ impl ScheduleGraph {
 
         unsafe {
             self.arena
-                .relocate_segment_after_unchecked(first.into(), last.into(), anchor.into())
+                .relocate_segment_after_unchecked(first.map(), last.map(), anchor.map())
         };
 
         let new_berth = *unsafe { self.vessel_berth.get_unchecked(anchor.get()) };
-        unsafe { self.update_segment_berth_unchecked(first.into(), last.into(), new_berth) };
+        unsafe { self.update_segment_berth_unchecked(first.map(), last.map(), new_berth) };
     }
 
     /// Relocates a segment to immediately precede another vessel.
@@ -1175,8 +1175,8 @@ impl ScheduleGraph {
         assert!(last < self.num_vessels);
         assert!(reference < self.num_vessels);
 
-        let anchor_predecessor = self.arena.prev(reference.into());
-        self.relocate_segment_after(first, last, VesselIndex::new(anchor_predecessor.index()));
+        let anchor_predecessor = self.arena.prev(reference.map());
+        self.relocate_segment_after(first, last, VesselIndex::new(anchor_predecessor.get()));
     }
 
     /// # Safety
@@ -1194,15 +1194,12 @@ impl ScheduleGraph {
         debug_assert!(reference < self.num_vessels);
 
         unsafe {
-            self.arena.relocate_segment_before_unchecked(
-                first.into(),
-                last.into(),
-                reference.into(),
-            )
+            self.arena
+                .relocate_segment_before_unchecked(first.map(), last.map(), reference.map())
         };
 
         let new_berth = *unsafe { self.vessel_berth.get_unchecked(reference.get()) };
-        unsafe { self.update_segment_berth_unchecked(first.into(), last.into(), new_berth) };
+        unsafe { self.update_segment_berth_unchecked(first.map(), last.map(), new_berth) };
     }
 
     /// Relocates a segment to the head of a berth.
@@ -1223,8 +1220,8 @@ impl ScheduleGraph {
 
         let sentinel = self.sentinel(berth);
         self.arena
-            .relocate_segment_after(first.into(), last.into(), sentinel);
-        self.update_segment_berth(first.into(), last.into(), berth);
+            .relocate_segment_after(first.map(), last.map(), sentinel);
+        self.update_segment_berth(first.map(), last.map(), berth);
     }
 
     /// # Safety
@@ -1244,9 +1241,9 @@ impl ScheduleGraph {
         let sentinel = self.sentinel(berth);
         unsafe {
             self.arena
-                .relocate_segment_after_unchecked(first.into(), last.into(), sentinel)
+                .relocate_segment_after_unchecked(first.map(), last.map(), sentinel)
         };
-        unsafe { self.update_segment_berth_unchecked(first.into(), last.into(), berth) };
+        unsafe { self.update_segment_berth_unchecked(first.map(), last.map(), berth) };
     }
 
     /// Relocates a segment to the tail of a berth.
@@ -1268,8 +1265,8 @@ impl ScheduleGraph {
         let sentinel = self.sentinel(berth);
         let tail = self.arena.prev(sentinel);
         self.arena
-            .relocate_segment_after(first.into(), last.into(), tail);
-        self.update_segment_berth(first.into(), last.into(), berth);
+            .relocate_segment_after(first.map(), last.map(), tail);
+        self.update_segment_berth(first.map(), last.map(), berth);
     }
 
     /// # Safety
@@ -1290,9 +1287,9 @@ impl ScheduleGraph {
         let tail = unsafe { self.arena.prev_unchecked(sentinel) };
         unsafe {
             self.arena
-                .relocate_segment_after_unchecked(first.into(), last.into(), tail)
+                .relocate_segment_after_unchecked(first.map(), last.map(), tail)
         };
-        unsafe { self.update_segment_berth_unchecked(first.into(), last.into(), berth) };
+        unsafe { self.update_segment_berth_unchecked(first.map(), last.map(), berth) };
     }
 
     // ----------------------------------------------------------------------------
@@ -1322,7 +1319,7 @@ impl ScheduleGraph {
         segment_last: Node,
         new_berth: BerthIndex,
     ) {
-        let old_berth = self.vessel_berth[segment_first.index()];
+        let old_berth = self.vessel_berth[segment_first.get()];
         if old_berth == new_berth {
             return;
         }
@@ -1330,7 +1327,7 @@ impl ScheduleGraph {
         let mut count = 0usize;
         let mut current = segment_first;
         loop {
-            self.vessel_berth[current.index()] = new_berth;
+            self.vessel_berth[current.get()] = new_berth;
             count += 1;
             if current == segment_last {
                 break;
@@ -1372,11 +1369,11 @@ impl ScheduleGraph {
         segment_last: Node,
         new_berth: BerthIndex,
     ) {
-        debug_assert!(segment_first.index() < self.num_vessels);
-        debug_assert!(segment_last.index() < self.num_vessels);
+        debug_assert!(segment_first.get() < self.num_vessels);
+        debug_assert!(segment_last.get() < self.num_vessels);
         debug_assert!(new_berth < self.num_berths);
 
-        let old_berth = *unsafe { self.vessel_berth.get_unchecked(segment_first.index()) };
+        let old_berth = *unsafe { self.vessel_berth.get_unchecked(segment_first.get()) };
         if old_berth == new_berth {
             return;
         }
@@ -1385,7 +1382,7 @@ impl ScheduleGraph {
         let mut current = segment_first;
         loop {
             let next_node = unsafe { self.arena.next_unchecked(current) };
-            *unsafe { self.vessel_berth.get_unchecked_mut(current.index()) } = new_berth;
+            *unsafe { self.vessel_berth.get_unchecked_mut(current.get()) } = new_berth;
             count += 1;
             if current == segment_last {
                 break;
@@ -1413,7 +1410,7 @@ impl ScheduleGraph {
         old_berth: BerthIndex,
         new_berth: BerthIndex,
     ) {
-        self.vessel_berth[vessel.index()] = new_berth;
+        self.vessel_berth[vessel.get()] = new_berth;
         self.berth_vessel_count[old_berth.get()] -= 1;
         self.berth_vessel_count[new_berth.get()] += 1;
     }
@@ -1442,12 +1439,12 @@ impl ScheduleGraph {
         old_berth: BerthIndex,
         new_berth: BerthIndex,
     ) {
-        debug_assert!(vessel.index() < self.num_vessels);
+        debug_assert!(vessel.get() < self.num_vessels);
         debug_assert!(old_berth < self.num_berths);
         debug_assert!(new_berth < self.num_berths);
 
         unsafe {
-            *self.vessel_berth.get_unchecked_mut(vessel.index()) = new_berth;
+            *self.vessel_berth.get_unchecked_mut(vessel.get()) = new_berth;
             *self.berth_vessel_count.get_unchecked_mut(old_berth.get()) -= 1;
             *self.berth_vessel_count.get_unchecked_mut(new_berth.get()) += 1;
         }
@@ -1494,7 +1491,7 @@ pub struct DiffEdgeIter<'a> {
 impl<'a> DiffEdgeIter<'a> {
     #[inline(always)]
     fn is_sentinel(&self, index: Node) -> bool {
-        index.index() >= self.num_vessels
+        index.get() >= self.num_vessels
     }
 
     #[inline(always)]
@@ -1502,7 +1499,7 @@ impl<'a> DiffEdgeIter<'a> {
         if self.is_sentinel(index) {
             None
         } else {
-            Some(VesselIndex::new(index.index()))
+            Some(VesselIndex::new(index.get()))
         }
     }
 }
@@ -1537,7 +1534,7 @@ pub struct DiffEdgeContextIter<'a> {
 impl<'a> DiffEdgeContextIter<'a> {
     #[inline(always)]
     fn is_sentinel(&self, index: Node) -> bool {
-        index.index() >= self.num_vessels
+        index.get() >= self.num_vessels
     }
 
     #[inline(always)]
@@ -1545,14 +1542,14 @@ impl<'a> DiffEdgeContextIter<'a> {
         if self.is_sentinel(index) {
             None
         } else {
-            Some(VesselIndex::new(index.index()))
+            Some(VesselIndex::new(index.get()))
         }
     }
 
     #[inline(always)]
     fn to_berth(&self, index: Node) -> Option<BerthIndex> {
         if self.is_sentinel(index) {
-            Some(BerthIndex::new(index.index() - self.num_vessels))
+            Some(BerthIndex::new(index.get() - self.num_vessels))
         } else {
             None
         }
