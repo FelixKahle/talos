@@ -465,14 +465,12 @@ impl ScheduleGraph {
     // ----------------------------------------------------------------
 
     /// Returns the raw node index representing the boundary before the first vessel of a berth.
-    /// (This is strictly for the Mutator's diff tracking).
     #[inline(always)]
     pub fn berth_head_boundary_node(&self, berth: BerthIndex) -> Node {
         self.sentinel(berth)
     }
 
     /// Returns the raw node index representing the boundary after the last vessel of a berth.
-    /// (This is strictly for the Mutator's diff tracking).
     #[inline(always)]
     pub fn berth_tail_boundary_node(&self, berth: BerthIndex) -> Node {
         self.sentinel(berth)

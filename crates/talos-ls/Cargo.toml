@@ -37,3 +37,8 @@ num-traits = "0.2.19"
 
 [dev-dependencies]
 criterion = "0.8.2"
+
+[[bench]]
+name = "mutation_cycle_bench"
+harness = false
+path = "benches/mutation_cycle_bench.rs"

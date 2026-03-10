@@ -226,7 +226,7 @@ where
 ///   the bounds of `candidate_buffer`, `accepted`, and `model`.
 #[inline]
 pub unsafe fn decode_unchecked<T, F>(
-    touched: TouchedBerths,
+    touched: &TouchedBerths,
     canditate_graph: &ScheduleGraph,
     candidate_buffer: &mut ScheduleState<T>,
     accepted: &ScheduleState<T>,
@@ -445,7 +445,7 @@ mod test_decoder {
         // Run partial decode!
         let res = unsafe {
             decode_unchecked(
-                touched,
+                &touched,
                 &candidate_graph,
                 &mut candidate_buffer,
                 &accepted,
@@ -500,7 +500,7 @@ mod test_decoder {
 
         let res = unsafe {
             decode_unchecked(
-                touched,
+                &touched,
                 &candidate_graph,
                 &mut candidate_buffer,
                 &accepted,
