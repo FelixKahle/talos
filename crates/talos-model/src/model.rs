@@ -660,8 +660,8 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> ProcessingTime<T> {
-        debug_assert!(vessel_index.get() < self.num_vessels());
-        debug_assert!(berth_index.get() < self.num_berths());
+        debug_assert!(vessel_index < self.num_vessels());
+        debug_assert!(berth_index < self.num_berths());
 
         let flat_index = flatten_index(self.num_berths(), vessel_index, berth_index);
         debug_assert!(flat_index < self.processing_times.len());
@@ -683,8 +683,8 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> ProcessingTime<T> {
-        debug_assert!(vessel_index.get() < self.num_vessels());
-        debug_assert!(berth_index.get() < self.num_berths());
+        debug_assert!(vessel_index < self.num_vessels());
+        debug_assert!(berth_index < self.num_berths());
 
         let flat_index = flatten_index(self.num_berths(), vessel_index, berth_index);
         debug_assert!(flat_index < self.processing_times.len());

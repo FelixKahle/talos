@@ -274,7 +274,7 @@ impl<T> Solution<T> {
     where
         T: Copy,
     {
-        debug_assert!(vessel.get() < self.berths.len());
+        debug_assert!(vessel < self.berths.len());
 
         Assignment::new(self.start_times[vessel.get()], self.berths[vessel.get()])
     }
@@ -283,13 +283,13 @@ impl<T> Solution<T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `vessel.get() < self.num_vessels()`.
+    /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn assignment_for_vessel_unchecked(&self, vessel: VesselIndex) -> Assignment<T>
     where
         T: Copy,
     {
-        debug_assert!(vessel.get() < self.berths.len());
+        debug_assert!(vessel < self.berths.len());
 
         unsafe {
             Assignment::new(
@@ -306,7 +306,7 @@ impl<T> Solution<T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn set_assignment_for_vessel(&mut self, vessel: VesselIndex, assignment: Assignment<T>) {
-        debug_assert!(vessel.get() < self.berths.len());
+        debug_assert!(vessel < self.berths.len());
 
         self.start_times[vessel.get()] = assignment.start_time;
         self.berths[vessel.get()] = assignment.berth;
@@ -319,7 +319,7 @@ impl<T> Solution<T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn berth_for_vessel(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.get() < self.berths.len());
+        debug_assert!(vessel < self.berths.len());
 
         self.berths[vessel.get()]
     }
@@ -328,10 +328,10 @@ impl<T> Solution<T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `vessel.get() < self.num_vessels()`.
+    /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn berth_for_vessel_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.get() < self.berths.len());
+        debug_assert!(vessel < self.berths.len());
 
         *unsafe { self.berths.get_unchecked(vessel.get()) }
     }
@@ -343,7 +343,7 @@ impl<T> Solution<T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn start_time_for_vessel(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel.get() < self.start_times.len());
+        debug_assert!(vessel < self.start_times.len());
 
         &self.start_times[vessel.get()]
     }
@@ -352,10 +352,10 @@ impl<T> Solution<T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `vessel.get() < self.num_vessels()`.
+    /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn start_time_for_vessel_unchecked(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel.get() < self.start_times.len());
+        debug_assert!(vessel < self.start_times.len());
 
         unsafe { self.start_times.get_unchecked(vessel.get()) }
     }
@@ -554,7 +554,7 @@ impl<'a, T> SolutionView<'a, T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn berth_for_vessel(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.get() < self.berths.len());
+        debug_assert!(vessel < self.berths.len());
 
         self.berths[vessel.get()]
     }
@@ -563,10 +563,10 @@ impl<'a, T> SolutionView<'a, T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `vessel.get() < self.num_vessels()`.
+    /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn berth_for_vessel_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.get() < self.berths.len());
+        debug_assert!(vessel < self.berths.len());
 
         *unsafe { self.berths.get_unchecked(vessel.get()) }
     }
@@ -584,7 +584,7 @@ impl<'a, T> SolutionView<'a, T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn start_time_for_vessel(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel.get() < self.start_times.len());
+        debug_assert!(vessel < self.start_times.len());
 
         &self.start_times[vessel.get()]
     }
@@ -593,10 +593,10 @@ impl<'a, T> SolutionView<'a, T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `vessel.get() < self.num_vessels()`.
+    /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn start_time_for_vessel_unchecked(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel.get() < self.start_times.len());
+        debug_assert!(vessel < self.start_times.len());
 
         unsafe { self.start_times.get_unchecked(vessel.get()) }
     }

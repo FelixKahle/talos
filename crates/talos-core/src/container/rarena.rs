@@ -29,6 +29,8 @@
 
 use std::iter::FusedIterator;
 
+use crate::utils::index::{TypedIndex, TypedIndexTag};
+
 // ----------------------------------------------------------------
 // Node
 // ----------------------------------------------------------------
@@ -68,6 +70,16 @@ impl From<Node> for usize {
     #[inline(always)]
     fn from(val: Node) -> Self {
         val.0
+    }
+}
+
+impl<U> From<TypedIndex<U>> for Node
+where
+    U: TypedIndexTag,
+{
+    #[inline(always)]
+    fn from(value: TypedIndex<U>) -> Self {
+        Self(value.get())
     }
 }
 
