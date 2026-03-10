@@ -53,6 +53,7 @@ use crate::{
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
     sgraphundo::ScheduleGraphUndoLog,
 };
+use talos_core::container::rarena::Node;
 use talos_model::index::{BerthIndex, VesselIndex};
 
 // ----------------------------------------------------------------
@@ -67,8 +68,8 @@ use talos_model::index::{BerthIndex, VesselIndex};
 /// This is the one place that reaches through `graph.arena()` for raw
 /// topology access — justified by the hot-loop performance requirement.
 struct EdgeDeltaTracker {
-    nodes: [usize; 4],
-    old_nexts: [usize; 4],
+    nodes: [Node; 4],
+    old_nexts: [Node; 4],
     len: usize,
 }
 
@@ -76,8 +77,8 @@ impl EdgeDeltaTracker {
     #[inline(always)]
     fn new() -> Self {
         Self {
-            nodes: [0; 4],
-            old_nexts: [0; 4],
+            nodes: [Node::new(0); 4],
+            old_nexts: [Node::new(0); 4],
             len: 0,
         }
     }
@@ -85,7 +86,7 @@ impl EdgeDeltaTracker {
     /// Records a node's `next` pointer before mutation.
     /// Uses raw arena access for zero-overhead reads.
     #[inline(always)]
-    fn track(&mut self, node: usize, graph: &ScheduleGraph) {
+    fn track(&mut self, node: Node, graph: &ScheduleGraph) {
         // Unrolled dedup for len <= 4
         if self.len > 0 && unsafe { *self.nodes.get_unchecked(0) } == node {
             return;
@@ -232,11 +233,11 @@ impl<'a> Mutator<'a> {
             return;
         }
         let mut curr = self.graph.vessel_node(first);
-        let last_raw = self.graph.vessel_node(last);
+        let last_node = self.graph.vessel_node(last);
         loop {
             self.diff
-                .push_reallocation(VesselIndex::new(curr), old_berth, new_berth);
-            if curr == last_raw {
+                .push_reallocation(VesselIndex::new(curr.index()), old_berth, new_berth);
+            if curr == last_node {
                 break;
             }
             curr = unsafe { self.graph.next_node_unchecked(curr) };
@@ -256,11 +257,11 @@ impl<'a> Mutator<'a> {
         }
 
         let mut curr = self.graph.vessel_node(first);
-        let last_raw = self.graph.vessel_node(last);
+        let last_node = self.graph.vessel_node(last);
         loop {
             self.diff
-                .push_reallocation(VesselIndex::new(curr), old_berth, new_berth);
-            if curr == last_raw {
+                .push_reallocation(VesselIndex::new(curr.index()), old_berth, new_berth);
+            if curr == last_node {
                 break;
             }
             curr = unsafe { self.graph.next_node_unchecked(curr) };
@@ -579,7 +580,7 @@ impl<'a> Mutator<'a> {
         assert!(berth.get() < self.graph.num_berths());
 
         let v_node = self.graph.vessel_node(vessel);
-        let head_boundary = self.graph.head_boundary_node(berth);
+        let head_boundary = self.graph.berth_head_boundary_node(berth);
         let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
 
         let mut tracker = EdgeDeltaTracker::new();
@@ -623,7 +624,7 @@ impl<'a> Mutator<'a> {
         assert!(berth.get() < self.graph.num_berths());
 
         let v_node = self.graph.vessel_node(vessel);
-        let tail_boundary = self.graph.tail_boundary_node(berth);
+        let tail_boundary = self.graph.berth_tail_boundary_node(berth);
         let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
         let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
 
@@ -794,7 +795,7 @@ impl<'a> Mutator<'a> {
 
         let f_node = self.graph.vessel_node(first);
         let l_node = self.graph.vessel_node(last);
-        let head_boundary = self.graph.head_boundary_node(berth);
+        let head_boundary = self.graph.berth_head_boundary_node(berth);
         let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
 
         let mut tracker = EdgeDeltaTracker::new();
@@ -845,7 +846,7 @@ impl<'a> Mutator<'a> {
 
         let f_node = self.graph.vessel_node(first);
         let l_node = self.graph.vessel_node(last);
-        let tail_boundary = self.graph.tail_boundary_node(berth);
+        let tail_boundary = self.graph.berth_tail_boundary_node(berth);
         let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
         let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
 
@@ -1164,7 +1165,7 @@ impl<'a> Mutator<'a> {
         debug_assert!(berth.get() < self.graph.num_berths());
 
         let v_node = self.graph.vessel_node(vessel);
-        let head_boundary = self.graph.head_boundary_node(berth);
+        let head_boundary = self.graph.berth_head_boundary_node(berth);
         let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
 
         let mut tracker = EdgeDeltaTracker::new();
@@ -1207,7 +1208,7 @@ impl<'a> Mutator<'a> {
         debug_assert!(berth.get() < self.graph.num_berths());
 
         let v_node = self.graph.vessel_node(vessel);
-        let tail_boundary = self.graph.tail_boundary_node(berth);
+        let tail_boundary = self.graph.berth_tail_boundary_node(berth);
         let prev = unsafe { self.graph.prev_node_unchecked(v_node) };
         let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
 
@@ -1374,7 +1375,7 @@ impl<'a> Mutator<'a> {
 
         let f_node = self.graph.vessel_node(first);
         let l_node = self.graph.vessel_node(last);
-        let head_boundary = self.graph.head_boundary_node(berth);
+        let head_boundary = self.graph.berth_head_boundary_node(berth);
         let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
 
         let mut tracker = EdgeDeltaTracker::new();
@@ -1426,7 +1427,7 @@ impl<'a> Mutator<'a> {
 
         let f_node = self.graph.vessel_node(first);
         let l_node = self.graph.vessel_node(last);
-        let tail_boundary = self.graph.tail_boundary_node(berth);
+        let tail_boundary = self.graph.berth_tail_boundary_node(berth);
         let prev = unsafe { self.graph.prev_node_unchecked(f_node) };
         let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
 

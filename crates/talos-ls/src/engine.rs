@@ -26,6 +26,7 @@ use crate::{
     tberth::TouchedBerths,
 };
 use talos_core::utils::num::SolverNumeric;
+use talos_model::solution::SolutionView;
 
 /// The core orchestration unit for the local search metaheuristic.
 ///
@@ -74,6 +75,13 @@ pub struct Engine<T> {
 }
 
 impl<T> Engine<T> {
+    #[allow(unused_variables)]
+    pub fn run<C>(&mut self, callback: C)
+    where
+        C: FnMut(SolutionView<'_, T>),
+    {
+    }
+
     #[inline(always)]
     pub fn update_best(&mut self)
     where
