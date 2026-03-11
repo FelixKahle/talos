@@ -137,6 +137,30 @@ impl NoImprovementMonitor {
         self.clock_check_mask = mask;
         self
     }
+
+    /// Returns the configured clock check mask.
+    #[inline(always)]
+    pub fn clock_check_mask(&self) -> u64 {
+        self.clock_check_mask
+    }
+
+    /// Returns the configured iteration patience.
+    #[inline(always)]
+    pub fn iteration_patience(&self) -> Option<u64> {
+        self.iteration_patience
+    }
+
+    /// Returns the configured cycle patience.
+    #[inline(always)]
+    pub fn cycle_patience(&self) -> Option<u64> {
+        self.cycle_patience
+    }
+
+    /// Returns the configured duration patience.
+    #[inline(always)]
+    pub fn duration_patience(&self) -> Option<Duration> {
+        self.duration_patience
+    }
 }
 
 impl<T> LocalSearchMonitor<T> for NoImprovementMonitor
@@ -262,6 +286,8 @@ where
         {
             return SearchCommand::Terminate(TerminationReason::MaxNonImprovingIterations);
         }
+        // only check clock when masked iteration is zero to reduce overhead
+        // to system api calls for time queries
         if let Some(patience) = self.duration_patience
             && (statistics.iterations & self.clock_check_mask) == 0
             && self.last_improved_time.elapsed() >= patience
