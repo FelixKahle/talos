@@ -435,6 +435,91 @@ impl std::fmt::Display for ScheduleGraphUndoLog {
 }
 
 // ----------------------------------------------------------------
+// UndoTracker
+// ----------------------------------------------------------------
+
+/// A helper wrapper around `ScheduleGraphUndoLog` for recording mutations in real time.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct UndoTracker<'a> {
+    log: &'a mut ScheduleGraphUndoLog,
+}
+
+impl<'a> UndoTracker<'a> {
+    #[inline(always)]
+    pub fn new(log: &'a mut ScheduleGraphUndoLog) -> Self {
+        Self { log }
+    }
+
+    /// Records a vessel swap. Must be called *before* the swap.
+    #[inline(always)]
+    pub fn push_swap_vessels(&mut self, a: VesselIndex, b: VesselIndex) {
+        self.log.push_swap_vessels(a, b);
+    }
+
+    /// Records a segment swap. Must be called *before* the swap.
+    #[inline(always)]
+    pub fn push_swap_segments(
+        &mut self,
+        a_first: VesselIndex,
+        a_last: VesselIndex,
+        b_first: VesselIndex,
+        b_last: VesselIndex,
+    ) {
+        self.log
+            .push_swap_segments(a_first, a_last, b_first, b_last);
+    }
+
+    /// Records a segment reversal. Must be called *before* the reversal.
+    #[inline(always)]
+    pub fn push_reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
+        self.log.push_reverse_segment(first, last);
+    }
+
+    /// Records a relocation where the vessel was after another vessel.
+    #[inline(always)]
+    pub fn push_relocate_after_vessel(&mut self, vessel: VesselIndex, predecessor: VesselIndex) {
+        self.log.push_relocate_after_vessel(vessel, predecessor);
+    }
+
+    /// Records a relocation where the vessel was at the head of a berth.
+    #[inline(always)]
+    pub fn push_relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
+        self.log.push_relocate_to_head(vessel, berth);
+    }
+
+    /// Records a segment relocation where the segment was after another vessel.
+    #[inline(always)]
+    pub fn push_relocate_segment_after_vessel(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        predecessor: VesselIndex,
+    ) {
+        self.log
+            .push_relocate_segment_after_vessel(first, last, predecessor);
+    }
+
+    /// Records a segment relocation where the segment was at the head of a berth.
+    #[inline(always)]
+    pub fn push_relocate_segment_to_head(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        berth: BerthIndex,
+    ) {
+        self.log.push_relocate_segment_to_head(first, last, berth);
+    }
+}
+
+impl<'a> From<&'a mut ScheduleGraphUndoLog> for UndoTracker<'a> {
+    #[inline(always)]
+    fn from(log: &'a mut ScheduleGraphUndoLog) -> Self {
+        Self::new(log)
+    }
+}
+
+// ----------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------
 

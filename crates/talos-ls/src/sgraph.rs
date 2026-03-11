@@ -70,12 +70,7 @@ impl<'a> Iterator for VesselSequenceIter<'a> {
     fn next(&mut self) -> Option<VesselIndex> {
         let raw_node = self.inner.next()?;
         let raw = raw_node.get();
-        debug_assert!(
-            raw < self.num_vessels,
-            "VesselSequenceIter yielded a sentinel index: {} >= {}",
-            raw,
-            self.num_vessels
-        );
+        debug_assert!(raw < self.num_vessels);
         Some(VesselIndex::new(raw))
     }
 }
@@ -1609,13 +1604,11 @@ impl<'a> Iterator for DiffReallocationIter<'a> {
 /// states, including broken and created links as well as vessel reallocations between berths.
 #[derive(Debug, Clone)]
 pub struct ScheduleGraphDiff {
-    // Links now store strongly typed topology indices (Node) internally
     broken_from: Vec<Node>,
     broken_to: Vec<Node>,
     created_from: Vec<Node>,
     created_to: Vec<Node>,
 
-    // Reallocations only apply to real vessels, so these stay strongly typed!
     reallocated_vessels: Vec<VesselIndex>,
     original_berths: Vec<BerthIndex>,
     target_berths: Vec<BerthIndex>,
@@ -1708,6 +1701,45 @@ impl ScheduleGraphDiff {
             originals: self.original_berths.iter(),
             targets: self.target_berths.iter(),
         }
+    }
+}
+
+// ----------------------------------------------------------------
+// ScheduleGraphDiffTracker
+// ----------------------------------------------------------------
+
+#[repr(transparent)]
+#[derive(Debug)]
+pub struct ScheduleGraphDiffTracker<'a> {
+    diff: &'a mut ScheduleGraphDiff,
+}
+
+impl<'a> ScheduleGraphDiffTracker<'a> {
+    #[inline(always)]
+    pub fn new(diff: &'a mut ScheduleGraphDiff) -> Self {
+        Self { diff }
+    }
+
+    #[inline(always)]
+    pub fn push_link_broken(&mut self, from: Node, to: Node) {
+        self.diff.push_link_broken(from, to);
+    }
+
+    #[inline(always)]
+    pub fn push_link_created(&mut self, from: Node, to: Node) {
+        self.diff.push_link_created(from, to);
+    }
+
+    #[inline(always)]
+    pub fn push_reallocation(&mut self, v: VesselIndex, from: BerthIndex, to: BerthIndex) {
+        self.diff.push_reallocation(v, from, to);
+    }
+}
+
+impl<'a> From<&'a mut ScheduleGraphDiff> for ScheduleGraphDiffTracker<'a> {
+    #[inline(always)]
+    fn from(diff: &'a mut ScheduleGraphDiff) -> Self {
+        Self::new(diff)
     }
 }
 

@@ -47,6 +47,10 @@ use talos_model::index::BerthIndex;
 // TouchedIndicesIter
 // ----------------------------------------------------------------
 
+/// An iterator that yields the [`BerthIndex`] of every touched berth.
+///
+/// Created by [`TouchedBerths::iter_touched_berths`]. Scans the boolean
+/// array linearly, skipping untouched entries.
 pub struct TouchedIndicesIter<'a> {
     iter: std::iter::Enumerate<std::slice::Iter<'a, bool>>,
 }
@@ -70,6 +74,10 @@ impl<'a> Iterator for TouchedIndicesIter<'a> {
 // UntouchedBerthsIter
 // ----------------------------------------------------------------
 
+/// An iterator that yields the [`BerthIndex`] of every untouched (clean) berth.
+///
+/// Created by [`TouchedBerths::iter_untouched_berths`]. Scans the boolean
+/// array linearly, skipping touched entries.
 pub struct UntouchedBerthsIter<'a> {
     iter: std::iter::Enumerate<std::slice::Iter<'a, bool>>,
 }
@@ -253,5 +261,53 @@ impl std::fmt::Display for TouchedBerths {
         }
 
         write!(f, "]")
+    }
+}
+
+// ----------------------------------------------------------------
+// TouchedBerthsTracker
+// ----------------------------------------------------------------
+
+/// A borrowed wrapper around [`TouchedBerths`] used by [`Mutator`](crate::mutator::Mutator)
+/// to mark berths as dirty during mutations.
+///
+/// This is a thin `&mut` handle that forwards `touch` / `touch_unchecked`
+/// calls to the underlying [`TouchedBerths`]. It exists so that the
+/// `Mutator` can accept any type that converts into a tracker via
+/// `Into<TouchedBerthsTracker>`.
+#[repr(transparent)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct TouchedBerthsTracker<'a> {
+    touched: &'a mut TouchedBerths,
+}
+
+impl<'a> TouchedBerthsTracker<'a> {
+    /// Creates a new tracker that writes through to `touched`.
+    #[inline(always)]
+    pub fn new(touched: &'a mut TouchedBerths) -> Self {
+        Self { touched }
+    }
+
+    /// Marks `berth` as touched (dirty).
+    #[inline(always)]
+    pub fn touch(&mut self, berth: BerthIndex) {
+        self.touched.touch(berth);
+    }
+
+    /// Marks `berth` as touched without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `berth.get()` is within bounds.
+    #[inline(always)]
+    pub unsafe fn touch_unchecked(&mut self, berth: BerthIndex) {
+        unsafe { self.touched.touch_unchecked(berth) };
+    }
+}
+
+impl<'a> From<&'a mut TouchedBerths> for TouchedBerthsTracker<'a> {
+    #[inline(always)]
+    fn from(touched: &'a mut TouchedBerths) -> Self {
+        Self::new(touched)
     }
 }

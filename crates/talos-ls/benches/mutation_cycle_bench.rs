@@ -35,21 +35,6 @@ use talos_model::{
     model::{Model, ProcessingTime},
 };
 
-#[inline(always)]
-fn populate_touched(diff: &ScheduleGraphDiff, graph: &ScheduleGraph, touched: &mut TouchedBerths) {
-    for (_, old_b, new_b) in diff.reallocations() {
-        touched.touch(old_b);
-        touched.touch(new_b);
-    }
-    for link in diff.created_links() {
-        if let Some(v) = link.from {
-            touched.touch(graph.vessel_berth(v));
-        } else if let Some(v) = link.to {
-            touched.touch(graph.vessel_berth(v));
-        }
-    }
-}
-
 fn build_mock_model(num_vessels: usize, num_berths: usize) -> Model<i64> {
     let mut arrivals = Vec::with_capacity(num_vessels);
     let mut departures = Vec::with_capacity(num_vessels);
@@ -144,10 +129,8 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                     diff.clear();
                     touched.reset();
 
-                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff);
+                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
                     m.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
-
-                    populate_touched(&diff, &graph, &mut touched);
 
                     unsafe {
                         decode_unchecked(
@@ -175,10 +158,9 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                         diff.clear();
                         touched.reset();
 
-                        let mut m = Mutator::new(&mut graph, &mut undo, &mut diff);
+                        let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
                         m.swap_vessels(VesselIndex::new(10), VesselIndex::new(60));
 
-                        populate_touched(&diff, &graph, &mut touched);
                         unsafe {
                             decode_unchecked(
                                 &touched,
@@ -204,10 +186,9 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                     diff.clear();
                     touched.reset();
 
-                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff);
+                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
                     m.relocate_after(VesselIndex::new(10), VesselIndex::new(40));
 
-                    populate_touched(&diff, &graph, &mut touched);
                     unsafe {
                         decode_unchecked(
                             &touched,
@@ -233,10 +214,9 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                         diff.clear();
                         touched.reset();
 
-                        let mut m = Mutator::new(&mut graph, &mut undo, &mut diff);
+                        let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
                         m.relocate_after(VesselIndex::new(10), VesselIndex::new(60));
 
-                        populate_touched(&diff, &graph, &mut touched);
                         unsafe {
                             decode_unchecked(
                                 &touched,
@@ -262,10 +242,9 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                     diff.clear();
                     touched.reset();
 
-                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff);
+                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
                     m.reverse_segment(VesselIndex::new(10), VesselIndex::new(15));
 
-                    populate_touched(&diff, &graph, &mut touched);
                     unsafe {
                         decode_unchecked(
                             &touched,
@@ -311,9 +290,8 @@ fn bench_single_mutation_cycle(c: &mut Criterion) {
                     diff.clear();
                     touched.reset();
 
-                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff);
+                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
                     m.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
-                    populate_touched(&diff, &graph, &mut touched);
 
                     unsafe {
                         decode_unchecked(

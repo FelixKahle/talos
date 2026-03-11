@@ -122,7 +122,7 @@ where
 ///   and `< model.num_vessels()`.
 /// - `candidate_buffer` must have sufficient capacity for all vessels in the sequence.
 #[inline(always)]
-unsafe fn decode_berth<'a, T, F>(
+unsafe fn decode_berth_unchecked<'a, T, F>(
     berth: BerthIndex,
     sequence: VesselSequenceIter<'a>,
     candidate_buffer: &mut ScheduleState<T>,
@@ -189,8 +189,9 @@ where
         let berth = BerthIndex::new(b);
         let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
 
-        let berth_cost =
-            unsafe { decode_berth(berth, sequence, candidate_buffer, model, &evaluator) }?;
+        let berth_cost = unsafe {
+            decode_berth_unchecked(berth, sequence, candidate_buffer, model, &evaluator)
+        }?;
 
         unsafe { candidate_buffer.set_berth_cost_unchecked(berth, berth_cost) };
         total_obj = total_obj + berth_cost;
@@ -248,8 +249,9 @@ where
     let mut total_obj = accepted.objective();
     for berth in touched.iter_touched_berths() {
         let sequence = unsafe { canditate_graph.vessel_sequence_iter_unchecked(berth) };
-        let berth_cost =
-            unsafe { decode_berth(berth, sequence, candidate_buffer, model, &evaluator) }?;
+        let berth_cost = unsafe {
+            decode_berth_unchecked(berth, sequence, candidate_buffer, model, &evaluator)
+        }?;
         unsafe { candidate_buffer.set_berth_cost_unchecked(berth, berth_cost) };
         let old_cost = unsafe { accepted.berth_cost_unchecked(berth) };
         total_obj = total_obj - old_cost + berth_cost;
@@ -361,8 +363,9 @@ mod test_decoder {
             9999,
         );
 
-        let berth_cost =
-            unsafe { decode_berth(b0, sequence, &mut candidate, &model, &mock_evaluator) };
+        let berth_cost = unsafe {
+            decode_berth_unchecked(b0, sequence, &mut candidate, &model, &mock_evaluator)
+        };
 
         // Expected logic:
         // V0: arrives 10, free 0. B0 intervals: [0, 15), [25, 100)
