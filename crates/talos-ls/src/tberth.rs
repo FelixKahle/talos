@@ -47,9 +47,9 @@ use talos_model::index::BerthIndex;
 // TouchedIndicesIter
 // ----------------------------------------------------------------
 
-/// An iterator that yields the [`BerthIndex`] of every touched berth.
+/// An iterator that yields the `BerthIndex` of every touched berth.
 ///
-/// Created by [`TouchedBerths::iter_touched_berths`]. Scans the boolean
+/// Created by `TouchedBerths::iter_touched_berths`. Scans the boolean
 /// array linearly, skipping untouched entries.
 pub struct TouchedIndicesIter<'a> {
     iter: std::iter::Enumerate<std::slice::Iter<'a, bool>>,
@@ -74,9 +74,9 @@ impl<'a> Iterator for TouchedIndicesIter<'a> {
 // UntouchedBerthsIter
 // ----------------------------------------------------------------
 
-/// An iterator that yields the [`BerthIndex`] of every untouched (clean) berth.
+/// An iterator that yields the `BerthIndex` of every untouched (clean) berth.
 ///
-/// Created by [`TouchedBerths::iter_untouched_berths`]. Scans the boolean
+/// Created by `TouchedBerths::iter_untouched_berths`. Scans the boolean
 /// array linearly, skipping touched entries.
 pub struct UntouchedBerthsIter<'a> {
     iter: std::iter::Enumerate<std::slice::Iter<'a, bool>>,
@@ -268,16 +268,19 @@ impl std::fmt::Display for TouchedBerths {
 // TouchedBerthsTracker
 // ----------------------------------------------------------------
 
-/// A borrowed wrapper around [`TouchedBerths`] used by [`Mutator`](crate::mutator::Mutator)
+/// A borrowed wrapper around `TouchedBerths` used by `Mutator`
 /// to mark berths as dirty during mutations.
 ///
 /// This is a thin `&mut` handle that forwards `touch` / `touch_unchecked`
-/// calls to the underlying [`TouchedBerths`]. It exists so that the
+/// calls to the underlying `TouchedBerths`. It exists so that the
 /// `Mutator` can accept any type that converts into a tracker via
 /// `Into<TouchedBerthsTracker>`.
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct TouchedBerthsTracker<'a> {
+    // Zero-cost wrapper around a mutable reference to `TouchedBerths`
+    // The Rust compiler will completely optimize this away,
+    // so there is no runtime overhead compared to using `&mut TouchedBerths` directly.
     touched: &'a mut TouchedBerths,
 }
 

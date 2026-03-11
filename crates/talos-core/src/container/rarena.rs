@@ -27,9 +27,8 @@
 //! mathematical inverses: `prev[next[v]] == v` for all `v`. Nodes can never enter or leave
 //! the graph once initialized.
 
-use std::iter::FusedIterator;
-
 use crate::utils::index::{TypedIndex, TypedIndexTag};
+use std::iter::FusedIterator;
 
 // ----------------------------------------------------------------
 // Node
@@ -78,7 +77,7 @@ impl<'a> Iterator for RingSequenceIter<'a> {
         }
 
         let current = self.current_node;
-        self.current_node = self.next_pointers[current.get()];
+        self.current_node = *unsafe { self.next_pointers.get_unchecked(current.get()) };
         self.remaining -= 1;
 
         Some(current)
@@ -119,7 +118,7 @@ impl<'a> Iterator for RingSequenceRevIter<'a> {
         }
 
         let current = self.current_node;
-        self.current_node = self.prev_pointers[current.get()];
+        self.current_node = *unsafe { self.prev_pointers.get_unchecked(current.get()) };
         self.remaining -= 1;
 
         Some(current)
@@ -159,7 +158,7 @@ impl<'a> Iterator for RingEdgeIter<'a> {
         }
 
         let from = self.current_node;
-        let to = self.next_pointers[from.get()];
+        let to = *unsafe { self.next_pointers.get_unchecked(from.get()) };
 
         if to == self.stop_node {
             self.current_node = self.stop_node;
@@ -214,18 +213,39 @@ impl RingArena {
     ///
     /// # Panics
     ///
-    /// Panics if `prev.len() != next.len()`.
+    /// Panics if `prev.len() != next.len()`, or if any index is out of bounds.
     #[inline]
     pub fn new(prev: Vec<Node>, next: Vec<Node>) -> Self {
         assert_eq!(prev.len(), next.len());
+        let len = prev.len();
+
+        // Assert that all indices in `prev` and `next` are valid (i.e., less than `len`).
+        // This is crucial for maintaining the integrity of the arena and preventing
+        // out-of-bounds access in future operations, for example in the iterators
+        // that use unsafe indexing for performance.
+        assert!(
+            prev.iter().all(|n| n.get() < len) && next.iter().all(|n| n.get() < len),
+            "all prev/next indices must be < len ({})",
+            len,
+        );
 
         Self { prev, next }
     }
 
     /// Overwrites the current arena with data from parallel slices to avoid reallocation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `prev.len() != next.len()`, or if any index is out of bounds.
     #[inline]
     pub fn overwrite_from_slices(&mut self, prev: &[Node], next: &[Node]) {
         assert_eq!(prev.len(), next.len());
+        let len = prev.len();
+        assert!(
+            prev.iter().all(|n| n.get() < len) && next.iter().all(|n| n.get() < len),
+            "all prev/next indices must be < len ({})",
+            len,
+        );
 
         self.prev.clear();
         self.prev.extend_from_slice(prev);
@@ -277,6 +297,16 @@ impl RingArena {
     /// Returns the total number of nodes in the arena.
     #[inline(always)]
     pub fn len(&self) -> usize {
+        self.prev.len()
+    }
+
+    /// Returns the total number of nodes in the arena.
+    ///
+    /// This is semantically equivalent to `len()`,
+    /// but the name emphasizes that we are treating the arena as a
+    /// collection of nodes.
+    #[inline(always)]
+    pub fn num_nodes(&self) -> usize {
         self.prev.len()
     }
 
@@ -1086,14 +1116,15 @@ impl RingArena {
 
         loop {
             let original_next = self.next[current_node.get()];
-            self.prev.swap(current_node.get(), current_node.get()); // need proper swap implementation for indices
-            let temp = self.prev[current_node.get()];
-            self.prev[current_node.get()] = self.next[current_node.get()];
-            self.next[current_node.get()] = temp;
+            std::mem::swap(
+                &mut self.prev[current_node.get()],
+                &mut self.next[current_node.get()],
+            );
 
             if current_node == last {
                 break;
             }
+
             current_node = original_next;
         }
 
@@ -1131,22 +1162,22 @@ impl RingArena {
 
         let predecessor_of_segment = *unsafe { self.prev.get_unchecked(first.get()) };
         let successor_of_segment = *unsafe { self.next.get_unchecked(last.get()) };
-
-        let prev_ptr = self.prev.as_mut_ptr();
-        let next_ptr = self.next.as_mut_ptr();
         let mut current_node = first;
 
         loop {
             let original_next = *unsafe { self.next.get_unchecked(current_node.get()) };
+
             unsafe {
-                std::ptr::swap(
-                    prev_ptr.add(current_node.get()),
-                    next_ptr.add(current_node.get()),
+                std::mem::swap(
+                    self.prev.get_unchecked_mut(current_node.get()),
+                    self.next.get_unchecked_mut(current_node.get()),
                 );
             }
+
             if current_node == last {
                 break;
             }
+
             current_node = original_next;
         }
 
@@ -1495,5 +1526,726 @@ mod tests {
         arena1.overwrite_from_slices(&binding_prev, &binding_next); // Single node ring
         assert_eq!(arena1.len(), 1);
         assert_eq!(extract_ring(&arena1, 0), [0].map(Node::new));
+    }
+
+    // ----------------------------------------------------------------
+    // Construction, Accessors, and Resizing
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_empty_arena() {
+        let arena = RingArena::new(vec![], vec![]);
+        assert_eq!(arena.len(), 0);
+        assert!(arena.is_empty());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_new_mismatched_lengths_panics() {
+        RingArena::new(vec![Node::new(0)], vec![]);
+    }
+
+    #[test]
+    fn test_reset_to_self_loops() {
+        let mut arena = complex_fixture();
+        arena.reset_to_self_loops(5);
+        assert_eq!(arena.len(), 5);
+        verify_integrity(&arena);
+        for i in 0..5 {
+            assert_eq!(extract_ring(&arena, i), [Node::new(i)]);
+        }
+    }
+
+    #[test]
+    fn test_reset_to_self_loops_zero() {
+        let mut arena = complex_fixture();
+        arena.reset_to_self_loops(0);
+        assert_eq!(arena.len(), 0);
+        assert!(arena.is_empty());
+    }
+
+    #[test]
+    fn test_resize_grow() {
+        let mut arena = RingArena::new(vec![Node::new(0)], vec![Node::new(0)]);
+        arena.resize(3);
+        assert_eq!(arena.len(), 3);
+        // Original self-loop is preserved.
+        assert_eq!(arena.next(Node::new(0)), Node::new(0));
+        assert_eq!(arena.prev(Node::new(0)), Node::new(0));
+    }
+
+    #[test]
+    fn test_resize_shrink() {
+        let arena_orig = complex_fixture();
+        let mut arena = arena_orig.clone();
+        arena.resize(4);
+        assert_eq!(arena.len(), 4);
+        // Ring 0 data is preserved (indices 0..4 stay the same).
+        assert_eq!(arena.next(Node::new(0)), Node::new(1));
+        assert_eq!(arena.prev(Node::new(0)), Node::new(3));
+    }
+
+    #[test]
+    fn test_raw_mut() {
+        let mut arena = RingArena::new(
+            vec![Node::new(0), Node::new(1)],
+            vec![Node::new(0), Node::new(1)],
+        );
+        // Build a two-node ring via raw_mut.
+        let (prev, next) = unsafe { arena.raw_mut() };
+        prev[0] = Node::new(1);
+        prev[1] = Node::new(0);
+        next[0] = Node::new(1);
+        next[1] = Node::new(0);
+
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_prev_next_accessors() {
+        let arena = complex_fixture();
+        assert_eq!(arena.next(Node::new(0)), Node::new(1));
+        assert_eq!(arena.prev(Node::new(1)), Node::new(0));
+        assert_eq!(arena.next(Node::new(3)), Node::new(0));
+        assert_eq!(arena.prev(Node::new(0)), Node::new(3));
+        // Self-loop
+        assert_eq!(arena.next(Node::new(7)), Node::new(7));
+        assert_eq!(arena.prev(Node::new(7)), Node::new(7));
+    }
+
+    #[test]
+    fn test_prev_next_unchecked() {
+        let arena = complex_fixture();
+        unsafe {
+            assert_eq!(arena.next_unchecked(Node::new(0)), Node::new(1));
+            assert_eq!(arena.prev_unchecked(Node::new(1)), Node::new(0));
+            assert_eq!(arena.next_unchecked(Node::new(7)), Node::new(7));
+            assert_eq!(arena.prev_unchecked(Node::new(7)), Node::new(7));
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Swap Nodes (unchecked + extra edge cases)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_swap_nodes_both_self_loops() {
+        // Two distinct self-loop rings — swapping is a no-op.
+        let mut arena = RingArena::new(
+            [0, 1].map(Node::new).to_vec(),
+            [0, 1].map(Node::new).to_vec(),
+        );
+        arena.swap_nodes(Node::new(0), Node::new(1));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0].map(Node::new));
+        assert_eq!(extract_ring(&arena, 1), [1].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_nodes_end_nodes_same_ring() {
+        // Swap the first and last node in Ring 0: [0,1,2,3] -> [3,1,2,0]
+        let mut arena = complex_fixture();
+        arena.swap_nodes(Node::new(0), Node::new(3));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 3), [3, 1, 2, 0].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_nodes_unchecked_adjacent() {
+        let mut arena = complex_fixture();
+        unsafe { arena.swap_nodes_unchecked(Node::new(1), Node::new(2)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 2, 1, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_nodes_unchecked_non_adjacent() {
+        let mut arena = complex_fixture();
+        unsafe { arena.swap_nodes_unchecked(Node::new(0), Node::new(2)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 2), [2, 1, 0, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_nodes_unchecked_different_rings() {
+        let mut arena = complex_fixture();
+        unsafe { arena.swap_nodes_unchecked(Node::new(1), Node::new(5)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 5, 2, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 1, 6].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_nodes_unchecked_with_self_loop() {
+        let mut arena = complex_fixture();
+        unsafe { arena.swap_nodes_unchecked(Node::new(2), Node::new(7)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 7, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 2), [2].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_nodes_unchecked_self_noop() {
+        let mut arena = complex_fixture();
+        unsafe { arena.swap_nodes_unchecked(Node::new(3), Node::new(3)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_nodes_unchecked_reverse_adjacent() {
+        // Test the second_next == first branch.
+        let mut arena = complex_fixture();
+        unsafe { arena.swap_nodes_unchecked(Node::new(2), Node::new(1)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 2, 1, 3].map(Node::new));
+    }
+
+    // ----------------------------------------------------------------
+    // Swap Segments (unchecked + extra edge cases)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_swap_segments_self_noop() {
+        let mut arena = complex_fixture();
+        arena.swap_segments(Node::new(1), Node::new(2), Node::new(1), Node::new(2));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_single_nodes() {
+        let mut arena = complex_fixture();
+        arena.swap_segments(Node::new(1), Node::new(1), Node::new(5), Node::new(5));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 5, 2, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 1, 6].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_full_ring() {
+        // Swap the two halves that together form the entire ring.
+        // Ring: 0 <-> 1 <-> 2 <-> 3; swap [0,1] with [2,3].
+        let mut arena = complex_fixture();
+        arena.swap_segments(Node::new(0), Node::new(1), Node::new(2), Node::new(3));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 2), [2, 3, 0, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_reverse_adjacent() {
+        // Adjacent: B immediately before A.
+        let mut arena = complex_fixture();
+        arena.swap_segments(Node::new(2), Node::new(3), Node::new(0), Node::new(1));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_unchecked_different_rings() {
+        let mut arena = complex_fixture();
+        unsafe {
+            arena.swap_segments_unchecked(Node::new(1), Node::new(2), Node::new(5), Node::new(6));
+        }
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 5, 6, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 1, 2].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_unchecked_adjacent() {
+        let mut arena = complex_fixture();
+        unsafe {
+            arena.swap_segments_unchecked(Node::new(0), Node::new(1), Node::new(2), Node::new(3));
+        }
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 2), [2, 3, 0, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_unchecked_reverse_adjacent() {
+        let mut arena = complex_fixture();
+        unsafe {
+            arena.swap_segments_unchecked(Node::new(2), Node::new(3), Node::new(0), Node::new(1));
+        }
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_unchecked_self_noop() {
+        let mut arena = complex_fixture();
+        unsafe {
+            arena.swap_segments_unchecked(Node::new(1), Node::new(2), Node::new(1), Node::new(2));
+        }
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    // ----------------------------------------------------------------
+    // Relocate (unchecked + extra edge cases)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_relocate_after_self_noop() {
+        let mut arena = complex_fixture();
+        arena.relocate_after(Node::new(1), Node::new(1));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_before_same_ring() {
+        let mut arena = complex_fixture();
+        // Move 3 to before 1 (after 0)
+        arena.relocate_before(Node::new(3), Node::new(1));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 3, 1, 2].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_before_noop() {
+        let mut arena = complex_fixture();
+        // Node 1 is already before 2, moving 1 before 2 is a no-op.
+        arena.relocate_before(Node::new(1), Node::new(2));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_after_into_self_loop() {
+        let mut arena = complex_fixture();
+        // Move node 2 after the self-loop node 7.
+        arena.relocate_after(Node::new(2), Node::new(7));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 7), [7, 2].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_before_into_self_loop() {
+        let mut arena = complex_fixture();
+        // Move node 2 before the self-loop node 7 (which is after 7 since it's a self-loop).
+        arena.relocate_before(Node::new(2), Node::new(7));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 7), [7, 2].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_after_unchecked_same_ring() {
+        let mut arena = complex_fixture();
+        unsafe { arena.relocate_after_unchecked(Node::new(1), Node::new(3)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 2, 3, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_after_unchecked_different_ring() {
+        let mut arena = complex_fixture();
+        unsafe { arena.relocate_after_unchecked(Node::new(1), Node::new(5)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 2, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 5, 1, 6].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_after_unchecked_noop() {
+        let mut arena = complex_fixture();
+        unsafe { arena.relocate_after_unchecked(Node::new(1), Node::new(0)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_after_unchecked_self_noop() {
+        let mut arena = complex_fixture();
+        unsafe { arena.relocate_after_unchecked(Node::new(2), Node::new(2)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_before_unchecked_different_ring() {
+        let mut arena = complex_fixture();
+        unsafe { arena.relocate_before_unchecked(Node::new(1), Node::new(5)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 2, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 1, 5, 6].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_segment_after_same_ring() {
+        let mut arena = complex_fixture();
+        // Move [1,2] to after 3 in Ring 0.
+        arena.relocate_segment_after(Node::new(1), Node::new(2), Node::new(3));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 3, 1, 2].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_segment_after_noop() {
+        let mut arena = complex_fixture();
+        // Segment [1,2] is already after 0, so using anchor 0 is a no-op.
+        arena.relocate_segment_after(Node::new(1), Node::new(2), Node::new(0));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_segment_before_same_ring() {
+        let mut arena = complex_fixture();
+        // Move [2,3] to before 1 (after 0).
+        arena.relocate_segment_before(Node::new(2), Node::new(3), Node::new(1));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 2, 3, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_segment_after_unchecked_different_ring() {
+        let mut arena = complex_fixture();
+        unsafe {
+            arena.relocate_segment_after_unchecked(Node::new(1), Node::new(2), Node::new(5));
+        }
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 5, 1, 2, 6].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_segment_after_unchecked_noop() {
+        let mut arena = complex_fixture();
+        unsafe {
+            arena.relocate_segment_after_unchecked(Node::new(1), Node::new(2), Node::new(0));
+        }
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_segment_before_unchecked_different_ring() {
+        let mut arena = complex_fixture();
+        unsafe {
+            arena.relocate_segment_before_unchecked(Node::new(1), Node::new(2), Node::new(5));
+        }
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 1, 2, 5, 6].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_single_node_segment() {
+        let mut arena = complex_fixture();
+        arena.relocate_segment_after(Node::new(2), Node::new(2), Node::new(5));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 5, 2, 6].map(Node::new));
+    }
+
+    // ----------------------------------------------------------------
+    // Reverse Segments (unchecked + extra edge cases)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_reverse_segment_three_nodes() {
+        let mut arena = complex_fixture();
+        // Reverse [1, 2, 3] in Ring 0.
+        arena.reverse_segment(Node::new(1), Node::new(3));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 3, 2, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_segment_entire_ring_via_all_nodes() {
+        // Ring: 4 -> 0 -> 1 -> 2 -> 3. Reverse [0,1,2,3].
+        let mut arena = RingArena::new(
+            [4, 0, 1, 2, 3].map(Node::new).to_vec(),
+            [1, 2, 3, 4, 0].map(Node::new).to_vec(),
+        );
+        arena.reverse_segment(Node::new(0), Node::new(3));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 4), [4, 3, 2, 1, 0].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_segment_two_nodes() {
+        let mut arena = complex_fixture();
+        arena.reverse_segment(Node::new(2), Node::new(3));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 3, 2].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_segment_partial_three_node_ring() {
+        let mut arena = complex_fixture();
+        // Reverse [5,6] within Ring 1: [4,5,6] -> [4,6,5]
+        arena.reverse_segment(Node::new(5), Node::new(6));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 4), [4, 6, 5].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_segment_unchecked_partial() {
+        let mut arena = complex_fixture();
+        unsafe { arena.reverse_segment_unchecked(Node::new(1), Node::new(2)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 2, 1, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_segment_unchecked_three_nodes() {
+        let mut arena = complex_fixture();
+        unsafe { arena.reverse_segment_unchecked(Node::new(1), Node::new(3)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 3, 2, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_segment_unchecked_single_noop() {
+        let mut arena = complex_fixture();
+        unsafe { arena.reverse_segment_unchecked(Node::new(5), Node::new(5)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 4), [4, 5, 6].map(Node::new));
+    }
+
+    // ----------------------------------------------------------------
+    // Checked Iterator Variants
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_sequence_iter_checked() {
+        let arena = complex_fixture();
+        let seq: Vec<Node> = arena.sequence_iter(Node::new(1), Node::new(0)).collect();
+        assert_eq!(seq, [1, 2, 3].map(Node::new).to_vec());
+    }
+
+    #[test]
+    fn test_sequence_iter_checked_empty() {
+        let arena = complex_fixture();
+        let seq: Vec<Node> = arena.sequence_iter(Node::new(4), Node::new(4)).collect();
+        assert!(seq.is_empty());
+    }
+
+    #[test]
+    fn test_sequence_iter_checked_full_ring() {
+        let arena = complex_fixture();
+        // Start at 0, stop at 0 — yields nothing (stop is exclusive and immediate).
+        let seq: Vec<Node> = arena.sequence_iter(Node::new(0), Node::new(0)).collect();
+        assert!(seq.is_empty());
+    }
+
+    #[test]
+    fn test_sequence_iter_single_node_ring() {
+        let arena = complex_fixture();
+        let seq: Vec<Node> = arena.sequence_iter(Node::new(7), Node::new(7)).collect();
+        assert!(seq.is_empty());
+    }
+
+    #[test]
+    fn test_sequence_iter_size_hint() {
+        let arena = complex_fixture();
+        let iter = arena.sequence_iter(Node::new(1), Node::new(0));
+        let (lo, hi) = iter.size_hint();
+        assert_eq!(lo, 0);
+        assert!(hi.unwrap() >= 3);
+    }
+
+    #[test]
+    fn test_sequence_rev_iter_full_ring() {
+        let arena = complex_fixture();
+        // Reverse iterate Ring 1 starting from 6, stopping at 4 to get [6, 5].
+        let seq: Vec<Node> = unsafe {
+            arena
+                .sequence_rev_iter_unchecked(Node::new(6), Node::new(4))
+                .collect()
+        };
+        assert_eq!(seq, [6, 5].map(Node::new).to_vec());
+    }
+
+    #[test]
+    fn test_sequence_rev_iter_empty() {
+        let arena = complex_fixture();
+        let seq: Vec<Node> = unsafe {
+            arena
+                .sequence_rev_iter_unchecked(Node::new(5), Node::new(5))
+                .collect()
+        };
+        assert!(seq.is_empty());
+    }
+
+    #[test]
+    fn test_edge_iter_checked() {
+        let arena = complex_fixture();
+        let edges: Vec<(Node, Node)> = arena.edge_iter(Node::new(0), Node::new(3)).collect();
+        assert_eq!(
+            edges,
+            vec![(Node::new(0), Node::new(1)), (Node::new(1), Node::new(2))]
+        );
+    }
+
+    #[test]
+    fn test_edge_iter_checked_empty() {
+        let arena = complex_fixture();
+        let edges: Vec<(Node, Node)> = arena.edge_iter(Node::new(4), Node::new(4)).collect();
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn test_edge_iter_single_edge() {
+        let arena = complex_fixture();
+        // From node 5, stop at 4. next(5)=6, next(6)=4 (stop). Should yield (5,6).
+        let edges: Vec<(Node, Node)> = arena.edge_iter(Node::new(5), Node::new(4)).collect();
+        assert_eq!(edges, vec![(Node::new(5), Node::new(6))]);
+    }
+
+    #[test]
+    fn test_edge_iter_immediate_stop() {
+        let arena = complex_fixture();
+        // From 3, stop at 0. next(3) = 0 = stop, so no edges.
+        let edges: Vec<(Node, Node)> = arena.edge_iter(Node::new(3), Node::new(0)).collect();
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn test_edge_iter_size_hint() {
+        let arena = complex_fixture();
+        let iter = arena.edge_iter(Node::new(0), Node::new(3));
+        let (lo, hi) = iter.size_hint();
+        assert_eq!(lo, 0);
+        assert!(hi.is_some());
+    }
+
+    // ----------------------------------------------------------------
+    // Combined / Compound Operations
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_swap_then_reverse() {
+        let mut arena = complex_fixture();
+        arena.swap_nodes(Node::new(1), Node::new(2));
+        verify_integrity(&arena);
+        // After swap: Ring 0 is [0, 2, 1, 3]. Reverse middle segment [2, 1].
+        arena.reverse_segment(Node::new(2), Node::new(1));
+        verify_integrity(&arena);
+        // After reverse [2,1] -> [1,2]: Ring 0 is [0, 1, 2, 3] — back to original.
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
+    }
+
+    #[test]
+    fn test_relocate_then_swap() {
+        let mut arena = complex_fixture();
+        arena.relocate_after(Node::new(1), Node::new(3));
+        verify_integrity(&arena);
+        // Ring 0 is now [0, 2, 3, 1].
+        arena.swap_nodes(Node::new(0), Node::new(3));
+        verify_integrity(&arena);
+        // After swap: [3, 2, 0, 1].
+        assert_eq!(extract_ring(&arena, 3), [3, 2, 0, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_then_relocate() {
+        let mut arena = complex_fixture();
+        arena.reverse_segment(Node::new(1), Node::new(3));
+        verify_integrity(&arena);
+        // Ring 0: [0, 3, 2, 1].
+        arena.relocate_after(Node::new(0), Node::new(5));
+        verify_integrity(&arena);
+        // Ring 0 becomes [3, 2, 1], Ring 1 becomes [4, 5, 0, 6].
+        assert_eq!(extract_ring(&arena, 3), [3, 2, 1].map(Node::new));
+        assert_eq!(extract_ring(&arena, 4), [4, 5, 0, 6].map(Node::new));
+    }
+
+    // ----------------------------------------------------------------
+    // Clone / Equality
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_clone_equality() {
+        let arena = complex_fixture();
+        let cloned = arena.clone();
+        assert_eq!(arena, cloned);
+    }
+
+    #[test]
+    fn test_inequality_after_mutation() {
+        let arena = complex_fixture();
+        let mut mutated = arena.clone();
+        mutated.swap_nodes(Node::new(0), Node::new(1));
+        assert_ne!(arena, mutated);
+    }
+
+    #[test]
+    fn test_overwrite_from_arena_equality() {
+        let source = complex_fixture();
+        let mut target = RingArena::new(vec![], vec![]);
+        target.overwrite_from_arena(&source);
+        assert_eq!(source, target);
+    }
+
+    // ----------------------------------------------------------------
+    // Panics
+    // ----------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_overwrite_from_slices_mismatched_panics() {
+        let mut arena = complex_fixture();
+        arena.overwrite_from_slices(&[Node::new(0)], &[]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_sequence_iter_out_of_bounds_panics() {
+        let arena = complex_fixture();
+        let _ = arena.sequence_iter(Node::new(99), Node::new(0));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_edge_iter_out_of_bounds_panics() {
+        let arena = complex_fixture();
+        let _ = arena.edge_iter(Node::new(99), Node::new(0));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_new_prev_out_of_bounds_panics() {
+        // prev contains index 3, but len is only 3 (valid range 0..2).
+        RingArena::new(
+            vec![Node::new(1), Node::new(2), Node::new(3)],
+            vec![Node::new(1), Node::new(2), Node::new(0)],
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_new_next_out_of_bounds_panics() {
+        // next contains index 5, but len is only 3.
+        RingArena::new(
+            vec![Node::new(2), Node::new(0), Node::new(1)],
+            vec![Node::new(1), Node::new(5), Node::new(0)],
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_overwrite_from_slices_prev_out_of_bounds_panics() {
+        let mut arena = complex_fixture();
+        arena.overwrite_from_slices(
+            &[Node::new(1), Node::new(99)],
+            &[Node::new(1), Node::new(0)],
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_overwrite_from_slices_next_out_of_bounds_panics() {
+        let mut arena = complex_fixture();
+        arena.overwrite_from_slices(
+            &[Node::new(1), Node::new(0)],
+            &[Node::new(1), Node::new(42)],
+        );
     }
 }

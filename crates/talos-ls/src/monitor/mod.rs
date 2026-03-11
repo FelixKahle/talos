@@ -19,13 +19,10 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub mod decoding;
-pub mod engine;
-pub mod exec;
-pub mod monitor;
-pub mod mutator;
-pub mod sgraph;
-pub mod sgraphundo;
-pub mod state;
-pub mod stats;
-pub mod tberth;
+pub mod composite;
+pub mod cycle;
+pub mod iteration;
+pub mod lsmonitor;
+pub mod nimpr;
+pub mod solution;
+pub mod time;

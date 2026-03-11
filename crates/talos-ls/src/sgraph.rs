@@ -219,11 +219,22 @@ impl FusedIterator for AllEdgeIter<'_> {}
 /// Per-berth vessel ordering — the genotype of the local search.
 ///
 /// `ScheduleGraph` maintains the explicit sequencing of vessels assigned to multiple berths.
-/// It is built on top of a [`RingArena`] which handles all raw topology operations.
+/// It is built on top of a `RingArena` which handles all raw topology operations.
+///
+/// # Sentinels and Memory Layout
+///
+/// Every berth is represented as an independent, circular ring containing exactly one sentinel
+/// node and zero or more real vessel nodes. An empty berth is simply a sentinel node whose
+/// `prev` and `next` pointers point to itself.
+///
+/// ```text
+/// Index Space: [ 0, 1, ..., N-1 | N, N+1, ..., N+B-1 ]
+///              |__Real Vessels__|___Berth Sentinels__|
+/// ```
 ///
 /// # Public API
 ///
-/// All public methods use [`VesselIndex`] and [`BerthIndex`] exclusively. The sentinel
+/// All public methods use `VesselIndex` and `BerthIndex` exclusively. The sentinel
 /// convention and arena internals are hidden from downstream consumers.
 #[derive(Clone)]
 pub struct ScheduleGraph {
@@ -458,6 +469,20 @@ impl ScheduleGraph {
     // ----------------------------------------------------------------
     // Accessors
     // ----------------------------------------------------------------
+
+    /// Returns true if `node` is a sentinel node representing a berth boundary,
+    /// and `false` if it is a real vessel node or an invalid index.
+    #[inline(always)]
+    pub fn is_sentinel(&self, node: Node) -> bool {
+        let raw = node.get();
+        raw >= self.num_vessels && raw < self.num_vessels + self.num_berths
+    }
+
+    /// Returns the total number of nodes in the arena, including both vessels and sentinels.
+    #[inline(always)]
+    pub fn num_nodes(&self) -> usize {
+        self.arena.num_nodes()
+    }
 
     /// Returns the raw node representing the boundary before the first vessel of a berth.
     #[inline(always)]
@@ -1336,7 +1361,7 @@ impl ScheduleGraph {
     /// Reassigns an entire contiguous segment of vessels to `new_berth` in the
     /// berth-tracking side tables, without performing bounds checks.
     ///
-    /// This is the unchecked counterpart to [`ScheduleGraph::update_segment_berth`].
+    /// This is the unchecked counterpart to `ScheduleGraph::update_segment_berth`.
     /// It updates only the metadata and does **not** change the arena topology.
     ///
     /// The segment is interpreted as the inclusive path
@@ -1413,7 +1438,7 @@ impl ScheduleGraph {
     /// Reassigns a single vessel to `new_berth` in the berth-tracking side tables,
     /// without performing bounds checks.
     ///
-    /// This is the unchecked counterpart to [`ScheduleGraph::transfer_vessel_berth`].
+    /// This is the unchecked counterpart to `ScheduleGraph::transfer_vessel_berth`.
     /// It updates only metadata and assumes the caller has already made the
     /// corresponding structural change in the arena, if any.
     ///
@@ -1477,7 +1502,7 @@ impl std::fmt::Display for ScheduleGraphDiffEdge {
 // DiffEdgeIter
 // ----------------------------------------------------------------
 
-/// Iterator over broken or created links in a [`ScheduleGraphDiff`].
+/// Iterator over broken or created links in a `ScheduleGraphDiff`.
 pub struct DiffEdgeIter<'a> {
     inner: std::iter::Zip<std::slice::Iter<'a, Node>, std::slice::Iter<'a, Node>>,
     num_vessels: usize,

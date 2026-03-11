@@ -441,11 +441,11 @@ impl std::fmt::Display for ScheduleGraphUndoLog {
 /// A helper wrapper around `ScheduleGraphUndoLog` for recording mutations in real time.
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq)]
-pub struct UndoTracker<'a> {
+pub struct ScheduleGraphUndoTracker<'a> {
     log: &'a mut ScheduleGraphUndoLog,
 }
 
-impl<'a> UndoTracker<'a> {
+impl<'a> ScheduleGraphUndoTracker<'a> {
     #[inline(always)]
     pub fn new(log: &'a mut ScheduleGraphUndoLog) -> Self {
         Self { log }
@@ -512,7 +512,7 @@ impl<'a> UndoTracker<'a> {
     }
 }
 
-impl<'a> From<&'a mut ScheduleGraphUndoLog> for UndoTracker<'a> {
+impl<'a> From<&'a mut ScheduleGraphUndoLog> for ScheduleGraphUndoTracker<'a> {
     #[inline(always)]
     fn from(log: &'a mut ScheduleGraphUndoLog) -> Self {
         Self::new(log)

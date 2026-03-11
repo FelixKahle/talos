@@ -51,7 +51,7 @@
 
 use crate::{
     sgraph::{ScheduleGraph, ScheduleGraphDiffTracker},
-    sgraphundo::UndoTracker,
+    sgraphundo::ScheduleGraphUndoTracker,
     tberth::TouchedBerthsTracker,
 };
 use talos_core::container::rarena::Node;
@@ -139,7 +139,7 @@ impl EdgeDeltaTracker {
 #[derive(Debug)]
 pub struct Mutator<'a> {
     graph: &'a mut ScheduleGraph,
-    undo: UndoTracker<'a>,
+    undo: ScheduleGraphUndoTracker<'a>,
     diff: ScheduleGraphDiffTracker<'a>,
     touched: TouchedBerthsTracker<'a>,
 }
@@ -153,7 +153,7 @@ impl<'a> Mutator<'a> {
     #[inline(always)]
     pub fn new<U, D, B>(graph: &'a mut ScheduleGraph, undo: U, diff: D, touched: B) -> Self
     where
-        U: Into<UndoTracker<'a>>,
+        U: Into<ScheduleGraphUndoTracker<'a>>,
         D: Into<ScheduleGraphDiffTracker<'a>>,
         B: Into<TouchedBerthsTracker<'a>>,
     {
@@ -165,7 +165,7 @@ impl<'a> Mutator<'a> {
         }
     }
 
-    /// Returns a shared reference to the underlying [`ScheduleGraph`].
+    /// Returns a shared reference to the underlying `ScheduleGraph`.
     #[inline(always)]
     pub fn graph(&self) -> &ScheduleGraph {
         self.graph

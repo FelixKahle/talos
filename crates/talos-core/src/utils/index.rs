@@ -37,6 +37,8 @@
 pub trait TypedIndexTag:
     Copy + Clone + PartialEq + Eq + PartialOrd + Ord + std::hash::Hash
 {
+    /// A human-readable name for the index type,
+    /// used in `Debug` and `Display` implementations.
     const NAME: &'static str;
 }
 
@@ -51,7 +53,7 @@ where
     T: TypedIndexTag,
 {
     index: usize,
-    _marker: std::marker::PhantomData<T>,
+    _marker: std::marker::PhantomData<T>, // optimized away at compile time, no runtime overhead
 }
 
 impl<T> TypedIndex<T>
@@ -81,7 +83,7 @@ where
 
     /// Maps this `TypedIndex<T>` to a `TypedIndex<U>` with the same underlying index.
     #[inline(always)]
-    pub fn map<U>(&self) -> TypedIndex<U>
+    pub const fn map<U>(&self) -> TypedIndex<U>
     where
         U: TypedIndexTag,
     {
