@@ -365,7 +365,10 @@ mod tests {
         m.add_monitor(SolutionLimitMonitor::new(1000));
 
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 10, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 10,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Terminate(TerminationReason::IterationLimitReached)
@@ -379,7 +382,10 @@ mod tests {
         m.add_monitor(SolutionLimitMonitor::new(5)); // will fire
 
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { total_solutions: 10, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            total_solutions: 10,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Terminate(TerminationReason::SolutionLimitReached)

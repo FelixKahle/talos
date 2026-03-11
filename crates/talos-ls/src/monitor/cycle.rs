@@ -197,7 +197,10 @@ mod tests {
     fn test_continues_below_limit() {
         let mut m = CycleLimitMonitor::new(5);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { cycles: 4, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            cycles: 4,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Continue
@@ -208,7 +211,10 @@ mod tests {
     fn test_terminates_at_limit() {
         let mut m = CycleLimitMonitor::new(5);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { cycles: 5, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            cycles: 5,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Terminate(TerminationReason::CycleLimitReached)
@@ -219,7 +225,10 @@ mod tests {
     fn test_terminates_above_limit() {
         let mut m = CycleLimitMonitor::new(5);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { cycles: 50, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            cycles: 50,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Terminate(TerminationReason::CycleLimitReached)

@@ -196,7 +196,10 @@ mod tests {
     fn test_continues_below_limit() {
         let mut m = IterationLimitMonitor::new(100);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 99, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 99,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Continue
@@ -207,7 +210,10 @@ mod tests {
     fn test_terminates_at_limit() {
         let mut m = IterationLimitMonitor::new(100);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 100, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 100,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Terminate(TerminationReason::IterationLimitReached)
@@ -218,7 +224,10 @@ mod tests {
     fn test_terminates_above_limit() {
         let mut m = IterationLimitMonitor::new(100);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 200, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 200,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Terminate(TerminationReason::IterationLimitReached)

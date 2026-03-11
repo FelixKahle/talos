@@ -31,6 +31,11 @@
 //!
 //! Any mode that fires first wins. All three are optional; at least one must be set.
 //! The counter / timestamp resets every time `on_best_solution_updated` fires.
+//!
+//! To minimize overhead, duration-based clock checks are throttled using a step mask.
+//! The mask is applied to the iteration counter and only when the masked value is zero
+//! the clock is queried. The default mask of `0x1FFF` yields a check roughly every
+//! 8192 iterations. The mask can be customized via `and_clock_check_mask`.
 
 use crate::{
     exec::{SearchCommand, TerminationReason},
@@ -54,6 +59,9 @@ pub struct NoImprovementMonitor {
     cycle_patience: Option<u64>,
     /// Max wall-clock duration without improvement (None = disabled).
     duration_patience: Option<Duration>,
+    /// Bitmask applied to the iteration counter to throttle clock checks.
+    /// The clock is only queried when `(iterations & mask) == 0`.
+    clock_check_mask: u64,
 
     last_improved_iteration: u64,
     last_improved_cycle: u64,
@@ -61,12 +69,17 @@ pub struct NoImprovementMonitor {
 }
 
 impl NoImprovementMonitor {
+    /// Default mask for clock checks to avoid excessive time checks.
+    /// This mask checks the clock every 8192 steps (0x1FFF).
+    const DEFAULT_STEP_CLOCK_CHECK_MASK: u64 = 0x1FFF;
+
     /// Creates a monitor with iteration-based patience only.
     pub fn with_iteration_patience(patience: u64) -> Self {
         Self {
             iteration_patience: Some(patience),
             cycle_patience: None,
             duration_patience: None,
+            clock_check_mask: Self::DEFAULT_STEP_CLOCK_CHECK_MASK,
             last_improved_iteration: 0,
             last_improved_cycle: 0,
             last_improved_time: Instant::now(),
@@ -79,6 +92,7 @@ impl NoImprovementMonitor {
             iteration_patience: None,
             cycle_patience: Some(patience),
             duration_patience: None,
+            clock_check_mask: Self::DEFAULT_STEP_CLOCK_CHECK_MASK,
             last_improved_iteration: 0,
             last_improved_cycle: 0,
             last_improved_time: Instant::now(),
@@ -91,6 +105,7 @@ impl NoImprovementMonitor {
             iteration_patience: None,
             cycle_patience: None,
             duration_patience: Some(patience),
+            clock_check_mask: Self::DEFAULT_STEP_CLOCK_CHECK_MASK,
             last_improved_iteration: 0,
             last_improved_cycle: 0,
             last_improved_time: Instant::now(),
@@ -112,6 +127,14 @@ impl NoImprovementMonitor {
     /// Adds duration-based patience (can be combined with other modes).
     pub fn and_duration_patience(mut self, patience: Duration) -> Self {
         self.duration_patience = Some(patience);
+        self
+    }
+
+    /// Sets a custom clock check mask for duration patience.
+    /// Lower mask values check more often; higher values check less often.
+    /// A mask of `0` checks every iteration.
+    pub fn and_clock_check_mask(mut self, mask: u64) -> Self {
+        self.clock_check_mask = mask;
         self
     }
 }
@@ -240,6 +263,7 @@ where
             return SearchCommand::Terminate(TerminationReason::MaxNonImprovingIterations);
         }
         if let Some(patience) = self.duration_patience
+            && (statistics.iterations & self.clock_check_mask) == 0
             && self.last_improved_time.elapsed() >= patience
         {
             return SearchCommand::Terminate(TerminationReason::MaxNonImprovingIterations);
@@ -312,7 +336,10 @@ mod tests {
     fn test_iteration_patience_continues_within() {
         let mut m = NoImprovementMonitor::with_iteration_patience(10);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 9, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 9,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Continue
@@ -323,7 +350,10 @@ mod tests {
     fn test_iteration_patience_terminates_at_limit() {
         let mut m = NoImprovementMonitor::with_iteration_patience(10);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 10, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 10,
+            ..Default::default()
+        };
         assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
     }
 
@@ -333,7 +363,10 @@ mod tests {
     fn test_cycle_patience_continues_within() {
         let mut m = NoImprovementMonitor::with_cycle_patience(3);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { cycles: 2, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            cycles: 2,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Continue
@@ -344,7 +377,10 @@ mod tests {
     fn test_cycle_patience_terminates_at_limit() {
         let mut m = NoImprovementMonitor::with_cycle_patience(3);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { cycles: 3, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            cycles: 3,
+            ..Default::default()
+        };
         assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
     }
 
@@ -352,7 +388,8 @@ mod tests {
 
     #[test]
     fn test_duration_patience_continues_within() {
-        let mut m = NoImprovementMonitor::with_duration_patience(Duration::from_secs(60));
+        let mut m = NoImprovementMonitor::with_duration_patience(Duration::from_secs(60))
+            .and_clock_check_mask(0);
         let sv = dummy_view();
         let stats = LocalSearchStatistics::default();
         assert_eq!(
@@ -363,7 +400,8 @@ mod tests {
 
     #[test]
     fn test_duration_patience_terminates_expired() {
-        let mut m = NoImprovementMonitor::with_duration_patience(Duration::from_millis(1));
+        let mut m = NoImprovementMonitor::with_duration_patience(Duration::from_millis(1))
+            .and_clock_check_mask(0);
         let sv = dummy_view();
         let stats = LocalSearchStatistics::default();
         std::thread::sleep(Duration::from_millis(5));
@@ -376,19 +414,28 @@ mod tests {
     fn test_on_best_solution_updated_resets_iteration_counter() {
         let mut m = NoImprovementMonitor::with_iteration_patience(10);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 15, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 15,
+            ..Default::default()
+        };
         // Simulate improvement at iteration 15
         LocalSearchMonitor::<i64>::on_best_solution_updated(&mut m, sv, sv, None, sv, &stats);
 
         // 5 more iterations → total 20, non-improving = 5, patience = 10 → continue
-        let stats = LocalSearchStatistics { iterations: 20, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 20,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Continue
         );
 
         // 10 more → total 25, non-improving = 10 → terminate
-        let stats = LocalSearchStatistics { iterations: 25, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 25,
+            ..Default::default()
+        };
         assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
     }
 
@@ -396,16 +443,25 @@ mod tests {
     fn test_on_best_solution_updated_resets_cycle_counter() {
         let mut m = NoImprovementMonitor::with_cycle_patience(5);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { cycles: 10, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            cycles: 10,
+            ..Default::default()
+        };
         LocalSearchMonitor::<i64>::on_best_solution_updated(&mut m, sv, sv, None, sv, &stats);
 
-        let stats = LocalSearchStatistics { cycles: 14, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            cycles: 14,
+            ..Default::default()
+        };
         assert_eq!(
             m.search_command(sv, sv, None, &stats),
             SearchCommand::Continue
         );
 
-        let stats = LocalSearchStatistics { cycles: 15, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            cycles: 15,
+            ..Default::default()
+        };
         assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
     }
 
@@ -416,7 +472,10 @@ mod tests {
         let mut m = NoImprovementMonitor::with_iteration_patience(5).and_cycle_patience(3);
         let sv = dummy_view();
         // Exhaust iteration patience
-        let stats = LocalSearchStatistics { iterations: 100, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 100,
+            ..Default::default()
+        };
         assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
 
         // Reset via on_start
@@ -445,7 +504,10 @@ mod tests {
     fn test_combined_iteration_fires_first() {
         let mut m = NoImprovementMonitor::with_iteration_patience(5).and_cycle_patience(100);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 5, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 5,
+            ..Default::default()
+        };
         assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
     }
 
@@ -453,7 +515,11 @@ mod tests {
     fn test_combined_cycle_fires_first() {
         let mut m = NoImprovementMonitor::with_iteration_patience(100).and_cycle_patience(3);
         let sv = dummy_view();
-        let stats = LocalSearchStatistics { iterations: 10, cycles: 3, ..Default::default() };
+        let stats = LocalSearchStatistics {
+            iterations: 10,
+            cycles: 3,
+            ..Default::default()
+        };
         assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
     }
 }
