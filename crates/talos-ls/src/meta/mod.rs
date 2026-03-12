@@ -20,3 +20,5 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 pub mod metaheuristic;
+pub mod sa;
+pub mod tabu;

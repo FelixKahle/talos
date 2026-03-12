@@ -1666,6 +1666,32 @@ impl ScheduleGraphDiff {
         self.target_berths.clear();
     }
 
+    /// Overwrites this diff with the contents of `other`, reusing
+    /// existing heap allocations.
+    #[inline(always)]
+    pub fn overwrite_from_graph_diff(&mut self, other: &Self) {
+        self.num_vessels = other.num_vessels;
+
+        self.broken_from.clear();
+        self.broken_from.extend_from_slice(&other.broken_from);
+        self.broken_to.clear();
+        self.broken_to.extend_from_slice(&other.broken_to);
+
+        self.created_from.clear();
+        self.created_from.extend_from_slice(&other.created_from);
+        self.created_to.clear();
+        self.created_to.extend_from_slice(&other.created_to);
+
+        self.reallocated_vessels.clear();
+        self.reallocated_vessels
+            .extend_from_slice(&other.reallocated_vessels);
+        self.original_berths.clear();
+        self.original_berths
+            .extend_from_slice(&other.original_berths);
+        self.target_berths.clear();
+        self.target_berths.extend_from_slice(&other.target_berths);
+    }
+
     #[inline(always)]
     pub fn push_link_broken(&mut self, from: Node, to: Node) {
         self.broken_from.push(from);

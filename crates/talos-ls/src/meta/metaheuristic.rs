@@ -65,6 +65,7 @@ impl std::fmt::Display for AcceptanceOutcome {
 // NeighborhoodExhaustionOutcome
 // ----------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NeighborhoodExhaustionOutcome {
     /// Restart the search with a new neighborhood exploration sequence.
     Restart,
@@ -87,7 +88,7 @@ impl std::fmt::Display for NeighborhoodExhaustionOutcome {
 // ----------------------------------------------------------------
 
 /// A trait governing the strategic acceptance logic and termination of the local search.
-pub trait Metaheuristic<T>: Send + Sync
+pub trait Metaheuristic<T>
 where
     T: SolverNumeric,
 {

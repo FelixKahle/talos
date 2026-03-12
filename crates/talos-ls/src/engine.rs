@@ -89,6 +89,11 @@ pub struct Engine<T> {
     /// metaheuristic for Tabu tenure tracking and aspiration criteria.
     schedule_graph_diff: ScheduleGraphDiff,
 
+    /// Saved copy of the structural diff corresponding to the `buffered_state`.
+    /// Captured when a candidate is buffered and passed to `on_accept` when
+    /// the buffer is committed.
+    buffered_schedule_graph_diff: ScheduleGraphDiff,
+
     /// **Dirty-Tracking Set**: A type-safe bitset or boolean mask identifying
     /// berths modified during the current mutation. Informs the downstream
     /// decoder exactly which timelines require recalculation.
@@ -129,6 +134,7 @@ impl<T> Engine<T> {
             buffered_topology_graph,
             schedule_graph_undo_log: ScheduleGraphUndoLog::preallocated(num_vessels),
             schedule_graph_diff: ScheduleGraphDiff::new(num_vessels),
+            buffered_schedule_graph_diff: ScheduleGraphDiff::new(num_vessels),
             touched: TouchedBerths::new(num_berths),
         }
     }
@@ -324,6 +330,17 @@ impl<T> Engine<T> {
                         has_buffered = false;
                         stats.on_accepted_solution();
 
+                        // Notify the metaheuristic with the saved diff so it
+                        // can update its internal state (e.g. tabu memory).
+                        metaheuristic.on_accept(
+                            model,
+                            self.best_state.as_solution_view(),
+                            self.accepted_state.as_solution_view(),
+                            None,
+                            &self.topology_graph,
+                            &self.buffered_schedule_graph_diff,
+                        );
+
                         monitor.on_buffered_solution_accepted(
                             self.best_state.as_solution_view(),
                             self.accepted_state.as_solution_view(),
@@ -346,7 +363,7 @@ impl<T> Engine<T> {
                                 model,
                                 self.best_state.as_solution_view(),
                                 &self.topology_graph,
-                                &self.schedule_graph_diff,
+                                &self.buffered_schedule_graph_diff,
                             );
                         }
                     }
@@ -656,6 +673,8 @@ impl<T> Engine<T> {
 
     /// Saves the current candidate to the buffer for later comparison.
     /// Used by Tabu Search to evaluate an entire neighborhood before committing.
+    /// Also saves the current structural diff so it is available when the
+    /// buffer is committed.
     #[inline(always)]
     pub fn save_candidate_to_buffer(&mut self)
     where
@@ -663,6 +682,8 @@ impl<T> Engine<T> {
     {
         self.buffered_topology_graph
             .overwrite_from_graph(&self.topology_graph);
+        self.buffered_schedule_graph_diff
+            .overwrite_from_graph_diff(&self.schedule_graph_diff);
         self.buffered_state
             .overwrite_from_state(&self.accepted_state);
 
