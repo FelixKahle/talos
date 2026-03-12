@@ -33,6 +33,10 @@ pub enum TerminationReason {
     CycleLimitReached,
     /// The search ran for too many iterations without finding a new best solution.
     MaxNonImprovingIterations,
+    /// The search ran for too many cycles without finding a new best solution.
+    MaxNonImprovingCycles,
+    /// The search ran for too long without finding a new best solution.
+    MaxNonImprovingTime,
     /// A target objective value was hit.
     TargetObjectiveReached,
     /// The neighborhood was completely exhausted without finding improvements (Local Optimum).
@@ -52,6 +56,12 @@ impl std::fmt::Display for TerminationReason {
             TerminationReason::SolutionLimitReached => write!(f, "Solution limit reached"),
             TerminationReason::MaxNonImprovingIterations => {
                 write!(f, "Max non-improving iterations reached")
+            }
+            TerminationReason::MaxNonImprovingCycles => {
+                write!(f, "Max non-improving cycles reached")
+            }
+            TerminationReason::MaxNonImprovingTime => {
+                write!(f, "Max non-improving time reached")
             }
             TerminationReason::TargetObjectiveReached => write!(f, "Target objective reached"),
             TerminationReason::NeighborhoodExhausted => {

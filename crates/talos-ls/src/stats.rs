@@ -46,6 +46,9 @@ pub struct LocalSearchStatistics {
     /// Number of accepted solutions during the local search.
     pub accepted_solutions: u64,
 
+    /// Number of moves that were mutated but failed delta-decoding (infeasible).
+    pub infeasible_moves: u64,
+
     /// Total time taken by the local search.
     pub time_total: Duration,
 }
@@ -57,6 +60,7 @@ impl Default for LocalSearchStatistics {
             cycles: 0,
             total_solutions: 0,
             accepted_solutions: 0,
+            infeasible_moves: 0,
             time_total: Duration::ZERO,
         }
     }
@@ -87,6 +91,12 @@ impl LocalSearchStatistics {
         self.accepted_solutions += 1;
     }
 
+    /// Called when a mutation produced an infeasible candidate (delta-decode failed).
+    #[inline]
+    pub fn on_infeasible_move(&mut self) {
+        self.infeasible_moves += 1;
+    }
+
     /// Sets the total time taken by the local search.
     #[inline]
     pub fn set_total_time(&mut self, duration: Duration) {
@@ -108,6 +118,7 @@ impl std::fmt::Display for LocalSearchStatistics {
         writeln!(f, "   Total Solutions:     {}", self.total_solutions)?;
         writeln!(f, "   Accepted Solutions:  {}", self.accepted_solutions)?;
         writeln!(f, "   Rejected Solutions:  {}", self.rejected_solutions())?;
+        writeln!(f, "   Infeasible Moves:   {}", self.infeasible_moves)?;
         writeln!(f, "   Total Time:         {:?}", self.time_total)?;
         Ok(())
     }

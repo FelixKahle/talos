@@ -284,7 +284,7 @@ where
         if let Some(patience) = self.cycle_patience
             && statistics.cycles - self.last_improved_cycle >= patience
         {
-            return SearchCommand::Terminate(TerminationReason::MaxNonImprovingIterations);
+            return SearchCommand::Terminate(TerminationReason::MaxNonImprovingCycles);
         }
         // only check clock when masked iteration is zero to reduce overhead
         // to system api calls for time queries
@@ -292,7 +292,7 @@ where
             && (statistics.iterations & self.clock_check_mask) == 0
             && self.last_improved_time.elapsed() >= patience
         {
-            return SearchCommand::Terminate(TerminationReason::MaxNonImprovingIterations);
+            return SearchCommand::Terminate(TerminationReason::MaxNonImprovingTime);
         }
         SearchCommand::Continue
     }
@@ -309,8 +309,12 @@ mod tests {
         SolutionView::new(&BERTHS, &TIMES, 0)
     }
 
-    const TERMINATE: SearchCommand =
+    const TERMINATE_ITERATIONS: SearchCommand =
         SearchCommand::Terminate(TerminationReason::MaxNonImprovingIterations);
+    const TERMINATE_CYCLES: SearchCommand =
+        SearchCommand::Terminate(TerminationReason::MaxNonImprovingCycles);
+    const TERMINATE_TIME: SearchCommand =
+        SearchCommand::Terminate(TerminationReason::MaxNonImprovingTime);
 
     // --- Constructor / builder tests ---
 
@@ -380,7 +384,7 @@ mod tests {
             iterations: 10,
             ..Default::default()
         };
-        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
+        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_ITERATIONS);
     }
 
     // --- Cycle patience ---
@@ -407,7 +411,7 @@ mod tests {
             cycles: 3,
             ..Default::default()
         };
-        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
+        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_CYCLES);
     }
 
     // --- Duration patience ---
@@ -431,7 +435,7 @@ mod tests {
         let sv = dummy_view();
         let stats = LocalSearchStatistics::default();
         std::thread::sleep(Duration::from_millis(5));
-        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
+        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_TIME);
     }
 
     // --- Reset on improvement ---
@@ -462,7 +466,7 @@ mod tests {
             iterations: 25,
             ..Default::default()
         };
-        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
+        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_ITERATIONS);
     }
 
     #[test]
@@ -488,7 +492,7 @@ mod tests {
             cycles: 15,
             ..Default::default()
         };
-        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
+        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_CYCLES);
     }
 
     #[test]
@@ -502,7 +506,7 @@ mod tests {
             iterations: 100,
             ..Default::default()
         };
-        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
+        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_ITERATIONS);
 
         // Reset via on_start
         let model = Model::new(
@@ -534,7 +538,7 @@ mod tests {
             iterations: 5,
             ..Default::default()
         };
-        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
+        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_ITERATIONS);
     }
 
     #[test]
@@ -546,6 +550,6 @@ mod tests {
             cycles: 3,
             ..Default::default()
         };
-        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE);
+        assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_CYCLES);
     }
 }

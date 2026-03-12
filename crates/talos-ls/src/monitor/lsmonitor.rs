@@ -114,6 +114,17 @@ where
         statistics: &LocalSearchStatistics,
     );
 
+    /// Called when a mutation produced an infeasible candidate whose delta-decode failed.
+    /// The engine has already rolled back the topology; this is a pure telemetry hook.
+    fn on_candidate_infeasible(
+        &mut self,
+        _best_solution: SolutionView<'_, T>,
+        _accepted_solution: SolutionView<'_, T>,
+        _buffered_solution: Option<SolutionView<'_, T>>,
+        _statistics: &LocalSearchStatistics,
+    ) {
+    }
+
     /// Called when the current neighborhood has been fully explored without finding
     /// an accepted move.
     fn on_neighborhood_exhausted(

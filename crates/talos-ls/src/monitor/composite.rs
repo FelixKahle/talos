@@ -216,6 +216,23 @@ where
         }
     }
 
+    fn on_candidate_infeasible(
+        &mut self,
+        best_solution: SolutionView<'_, T>,
+        accepted_solution: SolutionView<'_, T>,
+        buffered_solution: Option<SolutionView<'_, T>>,
+        statistics: &LocalSearchStatistics,
+    ) {
+        for monitor in &mut self.monitors {
+            monitor.on_candidate_infeasible(
+                best_solution,
+                accepted_solution,
+                buffered_solution,
+                statistics,
+            );
+        }
+    }
+
     fn on_neighborhood_exhausted(
         &mut self,
         best_solution: SolutionView<'_, T>,
