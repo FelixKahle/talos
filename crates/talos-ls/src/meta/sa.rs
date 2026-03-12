@@ -63,9 +63,9 @@
 //!
 //! | Schedule       | Update rule                          | Character                       |
 //! |----------------|--------------------------------------|---------------------------------|
-//! | Geometric      | $T_{k+1} = \alpha \cdot T_k$        | Fast early decay, slow settling |
-//! | Linear         | $T_{k+1} = T_k - \delta$            | Constant decay, deadline-aware  |
-//! | Logarithmic    | $T_k = C / \ln(k \cdot s + e)$      | Provably optimal, very slow     |
+//! | Geometric      | $T_{k+1} = \alpha \cdot T_k$         | Fast early decay, slow settling |
+//! | Linear         | $T_{k+1} = T_k - \delta$             | Constant decay, deadline-aware  |
+//! | Logarithmic    | $T_k = C / \ln(k \cdot s + e)$       | Provably optimal, very slow     |
 //!
 //! All schedules expose an `is_frozen()` check: once the temperature drops below
 //! a minimum threshold, the Metropolis criterion is bypassed entirely and only

@@ -169,7 +169,7 @@ impl<T> Engine<T> {
         let metaheuristic = params.metaheuristic;
         let mut monitor = params.monitor;
 
-        // ── Initialise topology from the validated initial solution ──
+        // Initialise topology from the validated initial solution.
         self.topology_graph.overwrite_from_slices(
             params.berths,
             params.start_times,
@@ -177,6 +177,7 @@ impl<T> Engine<T> {
         );
 
         // Full-decode to populate the candidate buffer, then propagate to all states.
+        // This ensures all four states start from the same decoded solution.
         unsafe {
             decode_full_unchecked(
                 &self.topology_graph,
@@ -192,12 +193,10 @@ impl<T> Engine<T> {
         self.buffered_topology_graph
             .overwrite_from_graph(&self.topology_graph);
 
-        // ── Statistics & timing ──
         let mut stats = LocalSearchStatistics::default();
         let start_time = Instant::now();
         let mut has_buffered = false;
 
-        // ── Lifecycle: on_start ──
         monitor.on_start(model, self.accepted_state.as_solution_view());
         metaheuristic.on_start(
             model,
@@ -207,11 +206,8 @@ impl<T> Engine<T> {
 
         let termination_reason;
 
-        // ══════════════════════════════════════════════════════════════
-        //  OUTER LOOP — one pass per neighbourhood exploration
-        // ══════════════════════════════════════════════════════════════
         'outer: loop {
-            // ── Check termination: metaheuristic ──
+            // Check termination via metaheuristic.
             let cmd = metaheuristic.search_command(
                 stats.iterations,
                 model,
@@ -228,7 +224,7 @@ impl<T> Engine<T> {
                 break 'outer;
             }
 
-            // ── Check termination: monitor ──
+            // Check termination via monitor.
             let cmd = monitor.search_command(
                 self.best_state.as_solution_view(),
                 self.accepted_state.as_solution_view(),
@@ -244,7 +240,6 @@ impl<T> Engine<T> {
                 break 'outer;
             }
 
-            // ── Notify cycle start ──
             monitor.on_iteration(
                 self.best_state.as_solution_view(),
                 self.accepted_state.as_solution_view(),
@@ -256,7 +251,6 @@ impl<T> Engine<T> {
                 &stats,
             );
 
-            // ── Prepare operator for this neighbourhood ──
             operator.prepare(
                 self.best_state.as_solution_view(),
                 self.accepted_state.as_solution_view(),
@@ -268,14 +262,9 @@ impl<T> Engine<T> {
                 &self.topology_graph,
             );
 
-            // ══════════════════════════════════════════════════════════
-            //  INNER LOOP — one pass per candidate neighbour
-            // ══════════════════════════════════════════════════════════
             'inner: loop {
-                // Clear the structural diff before the next mutation.
                 self.schedule_graph_diff.clear();
 
-                // ── Generate the next neighbour ──
                 let mutated = {
                     let mut mutator = Mutator::new(
                         &mut self.topology_graph,
@@ -299,7 +288,6 @@ impl<T> Engine<T> {
                     }
                 };
 
-                // ── Neighbourhood exhausted ──
                 if !mutated {
                     stats.on_cycle();
 
@@ -393,7 +381,6 @@ impl<T> Engine<T> {
 
                 stats.on_iteration();
 
-                // ── Delta-decode touched berths ──
                 let decode_ok = unsafe {
                     decode_unchecked(
                         &self.touched,
@@ -433,6 +420,21 @@ impl<T> Engine<T> {
                         &self.topology_graph,
                     );
 
+                    let cmd = monitor.search_command(
+                        self.best_state.as_solution_view(),
+                        self.accepted_state.as_solution_view(),
+                        if has_buffered {
+                            Some(self.buffered_state.as_solution_view())
+                        } else {
+                            None
+                        },
+                        &stats,
+                    );
+                    if let SearchCommand::Terminate(reason) = cmd {
+                        termination_reason = reason;
+                        break 'outer;
+                    }
+
                     continue 'inner;
                 }
 
@@ -440,7 +442,6 @@ impl<T> Engine<T> {
 
                 let candidate_objective = self.candidate_state.objective();
 
-                // ── Monitor: candidate generated ──
                 monitor.on_candidate_generated(
                     self.best_state.as_solution_view(),
                     self.accepted_state.as_solution_view(),
@@ -453,7 +454,6 @@ impl<T> Engine<T> {
                     &stats,
                 );
 
-                // ── Metaheuristic: decide fate ──
                 let decision = metaheuristic.decide_fate(
                     model,
                     self.best_state.as_solution_view(),
@@ -469,7 +469,6 @@ impl<T> Engine<T> {
                 );
 
                 match decision {
-                    // ─────────── ACCEPT ───────────
                     AcceptanceOutcome::Accept => {
                         self.accept_candidate();
                         stats.on_accepted_solution();
@@ -535,10 +534,20 @@ impl<T> Engine<T> {
                             &self.topology_graph,
                         );
 
+                        let cmd = monitor.search_command(
+                            self.best_state.as_solution_view(),
+                            self.accepted_state.as_solution_view(),
+                            None,
+                            &stats,
+                        );
+                        if let SearchCommand::Terminate(reason) = cmd {
+                            termination_reason = reason;
+                            break 'outer;
+                        }
+
                         break 'inner;
                     }
 
-                    // ─────────── BUFFER ───────────
                     AcceptanceOutcome::Buffer => {
                         self.save_candidate_to_buffer();
                         has_buffered = true;
@@ -564,10 +573,20 @@ impl<T> Engine<T> {
                             &self.topology_graph,
                         );
 
+                        let cmd = monitor.search_command(
+                            self.best_state.as_solution_view(),
+                            self.accepted_state.as_solution_view(),
+                            Some(self.buffered_state.as_solution_view()),
+                            &stats,
+                        );
+                        if let SearchCommand::Terminate(reason) = cmd {
+                            termination_reason = reason;
+                            break 'outer;
+                        }
+
                         continue 'inner;
                     }
 
-                    // ─────────── REJECT ───────────
                     AcceptanceOutcome::Reject => {
                         // Notify while the candidate topology is still live so
                         // the metaheuristic can inspect the diff / graph.
@@ -611,13 +630,27 @@ impl<T> Engine<T> {
                             &self.topology_graph,
                         );
 
+                        let cmd = monitor.search_command(
+                            self.best_state.as_solution_view(),
+                            self.accepted_state.as_solution_view(),
+                            if has_buffered {
+                                Some(self.buffered_state.as_solution_view())
+                            } else {
+                                None
+                            },
+                            &stats,
+                        );
+                        if let SearchCommand::Terminate(reason) = cmd {
+                            termination_reason = reason;
+                            break 'outer;
+                        }
+
                         continue 'inner;
                     }
                 }
             }
         }
 
-        // ── Finalize ──
         stats.set_total_time(start_time.elapsed());
 
         monitor.on_end(self.best_state.as_solution_view(), &stats);
@@ -638,7 +671,7 @@ impl<T> Engine<T> {
     }
 
     #[inline(always)]
-    pub fn update_best(&mut self)
+    fn update_best(&mut self)
     where
         T: SolverNumeric,
     {
@@ -648,7 +681,7 @@ impl<T> Engine<T> {
     /// Accepts the current candidate immediately.
     /// This is the fastest commit path, skipping full array copies.
     #[inline(always)]
-    pub fn accept_candidate(&mut self)
+    fn accept_candidate(&mut self)
     where
         T: SolverNumeric,
     {
@@ -665,7 +698,7 @@ impl<T> Engine<T> {
 
     /// Rejects the current candidate and restores the graph to its previous state.
     #[inline(always)]
-    pub fn reject_candidate(&mut self) {
+    fn reject_candidate(&mut self) {
         self.schedule_graph_undo_log
             .apply_rollback(&mut self.topology_graph);
         self.touched.reset();
@@ -676,7 +709,7 @@ impl<T> Engine<T> {
     /// Also saves the current structural diff so it is available when the
     /// buffer is committed.
     #[inline(always)]
-    pub fn save_candidate_to_buffer(&mut self)
+    fn save_candidate_to_buffer(&mut self)
     where
         T: SolverNumeric,
     {
@@ -731,10 +764,6 @@ mod tests {
     use talos_model::model::{Model, ProcessingTime};
     use talos_model::solution::SolutionView;
 
-    // ────────────────────────────────────────────────────────
-    //  Test helpers
-    // ────────────────────────────────────────────────────────
-
     /// Builds a minimal 2-vessel / 2-berth model.
     /// V0: arrival=0, deadline=100, weight=1, p(B0)=5, p(B1)=5
     /// V1: arrival=0, deadline=100, weight=1, p(B0)=10, p(B1)=10
@@ -768,10 +797,6 @@ mod tests {
     ) -> Option<i64> {
         Some(model.vessel_weight(vessel) * start)
     }
-
-    // ────────────────────────────────────────────────────────
-    //  Mock Monitor — records event counts
-    // ────────────────────────────────────────────────────────
 
     #[derive(Debug, Default)]
     struct MockMonitor {
@@ -894,10 +919,6 @@ mod tests {
         }
     }
 
-    // ────────────────────────────────────────────────────────
-    //  Mock Operator — serves a fixed number of swap mutations
-    // ────────────────────────────────────────────────────────
-
     /// Produces `max_moves` swap(V0, V1) mutations, then reports exhaustion.
     /// All moves swap V0 and V1 within berth 0.
     struct MockOperator {
@@ -951,10 +972,6 @@ mod tests {
             self.cursor = 0;
         }
     }
-
-    // ────────────────────────────────────────────────────────
-    //  Mock Metaheuristic — configurable acceptance policy
-    // ────────────────────────────────────────────────────────
 
     /// Always-accept metaheuristic that terminates after `max_iterations`.
     struct AcceptAllMetaheuristic {
@@ -1348,10 +1365,6 @@ mod tests {
         }
     }
 
-    // ────────────────────────────────────────────────────────
-    //  Helper: build params + engine, run, return (outcome, monitor)
-    // ────────────────────────────────────────────────────────
-
     fn run_engine<H: Metaheuristic<i64>, O: LocalSearchOperator<i64>>(
         metaheuristic: &mut H,
         operator: &mut O,
@@ -1543,10 +1556,6 @@ mod tests {
         let mut engine = Engine::<i64>::new(2, 2);
         engine.run(params, mock_evaluator, |_| {})
     }
-
-    // ════════════════════════════════════════════════════════
-    //  Tests
-    // ════════════════════════════════════════════════════════
 
     #[test]
     fn test_engine_terminates_immediately_at_zero_iterations() {

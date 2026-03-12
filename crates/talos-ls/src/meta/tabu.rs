@@ -29,9 +29,9 @@
 //!
 //! This implementation tracks two independent attribute classes via `TabuMemory`:
 //!
-//! | Attribute           | Memory                           | Semantics                               |
-//! |---------------------|----------------------------------|-----------------------------------------|
-//! | **Edge (Sequence)** | `edge[A * V + B] = expire_iter`  | Vessel A directly preceding Vessel B    |
+//! | Attribute           | Memory                              | Semantics                               |
+//! |---------------------|-------------------------------------|-----------------------------------------|
+//! | **Edge (Sequence)** | `edge[A * V + B] = expire_iter`     | Vessel A directly preceding Vessel B    |
 //! | **Berth (Assignment)** | `berth[V * B + X] = expire_iter` | Vessel V assigned to Berth X         |
 //!
 //! When a move is accepted, the *broken* edges and the *old* berth assignments
@@ -54,7 +54,7 @@
 //! | Strategy       | Behavior                                           |
 //! |----------------|----------------------------------------------------|
 //! | `FixedTenure`  | Constant tenure for every move.                    |
-//! | `RandomTenure` | Uniformly sampled from a configurable range.        |
+//! | `RandomTenure` | Uniformly sampled from a configurable range.       |
 //!
 //! # Selection Strategy
 //!
@@ -321,16 +321,26 @@ impl TabuMemory {
     /// This forbids the search from *reverting* the accepted move.
     #[inline]
     pub fn record(&mut self, diff: &ScheduleGraphDiff, expire_iter: u64) {
-        // Forbid re-creating the broken edges.
-        for edge in diff.broken_links() {
-            if let (Some(a), Some(b)) = (edge.from, edge.to) {
-                self.edge[a.get() * self.num_vessels + b.get()] = expire_iter;
+        // SAFETY: all flat indices are bounded by allocation sizes.
+        // Edge indices: a < num_vessels, b < num_vessels => idx < num_vessels^2.
+        // Berth indices: vessel < num_vessels, berth < num_berths => idx < num_vessels*num_berths.
+        unsafe {
+            // Forbid re-creating the broken edges.
+            for edge in diff.broken_links() {
+                if let (Some(a), Some(b)) = (edge.from, edge.to) {
+                    *self
+                        .edge
+                        .get_unchecked_mut(a.get() * self.num_vessels + b.get()) = expire_iter;
+                }
             }
-        }
 
-        // Forbid returning vessels to their old berths.
-        for (vessel, old_berth, _new_berth) in diff.reallocations() {
-            self.berth[vessel.get() * self.num_berths + old_berth.get()] = expire_iter;
+            // Forbid returning vessels to their old berths.
+            for (vessel, old_berth, _new_berth) in diff.reallocations() {
+                *self
+                    .berth
+                    .get_unchecked_mut(vessel.get() * self.num_berths + old_berth.get()) =
+                    expire_iter;
+            }
         }
     }
 
@@ -338,19 +348,29 @@ impl TabuMemory {
     /// is currently tabu at the given iteration.
     #[inline]
     pub fn is_tabu(&self, diff: &ScheduleGraphDiff, current_iter: u64) -> bool {
-        // Check created edges.
-        for edge in diff.created_links() {
-            if let (Some(a), Some(b)) = (edge.from, edge.to)
-                && self.edge[a.get() * self.num_vessels + b.get()] > current_iter
-            {
-                return true;
+        // SAFETY: all flat indices are bounded by allocation sizes (same as `record`).
+        unsafe {
+            // Check created edges.
+            for edge in diff.created_links() {
+                if let (Some(a), Some(b)) = (edge.from, edge.to)
+                    && *self
+                        .edge
+                        .get_unchecked(a.get() * self.num_vessels + b.get())
+                        > current_iter
+                {
+                    return true;
+                }
             }
-        }
 
-        // Check new berth assignments.
-        for (vessel, _old_berth, new_berth) in diff.reallocations() {
-            if self.berth[vessel.get() * self.num_berths + new_berth.get()] > current_iter {
-                return true;
+            // Check new berth assignments.
+            for (vessel, _old_berth, new_berth) in diff.reallocations() {
+                if *self
+                    .berth
+                    .get_unchecked(vessel.get() * self.num_berths + new_berth.get())
+                    > current_iter
+                {
+                    return true;
+                }
             }
         }
 

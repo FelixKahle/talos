@@ -594,10 +594,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "talos_cmd"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "num-traits",
+ "rand",
+ "regex",
+ "talos_core",
+ "talos_ls",
+ "talos_model",
+]
+
+[[package]]
 name = "talos_core"
 version = "0.1.0"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "talos_ffi"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rand",
+ "talos_core",
+ "talos_ls",
+ "talos_model",
 ]
 
 [[package]]

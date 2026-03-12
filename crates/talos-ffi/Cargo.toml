@@ -19,15 +19,23 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-[workspace]
-members = [
-    "crates/talos-core",
-    "crates/talos-model",
-    "crates/talos-ls",
-    "crates/talos-ffi",
-    "crates/talos-cmd",
-]
-resolver = "3"
+[package]
+name = "talos_ffi"
+version = "0.1.0"
+edition.workspace = true
 
-[workspace.package]
-edition = "2024"
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
+[dependencies]
+talos_core = { path = "../talos-core" }
+talos_model = { path = "../talos-model" }
+talos_ls = { path = "../talos-ls" }
+libc = "0.2.178"
+rand = "0.10.0"
