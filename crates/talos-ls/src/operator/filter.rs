@@ -19,6 +19,13 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+//! Neighborhood filter functions for local-search operators.
+//!
+//! Each filter is designed to be passed to the corresponding operator's
+//! constructor (e.g. `IntraBerthSwapOperator::new(intra_berth_swap_filter_unchecked)`).
+//! They prune moves that are guaranteed to be infeasible or dominated,
+//! without ever discarding a move that could lead to the optimum.
+
 use crate::sgraph::ScheduleGraph;
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{index::VesselIndex, model::Model, solution::SolutionView};
@@ -33,20 +40,31 @@ use talos_model::{index::VesselIndex, model::Model, solution::SolutionView};
 ///
 /// This is an optimum-preserving filter: any swap that could improve the
 /// objective involves two vessels whose time windows overlap.
+///
+/// # Safety
+///
+/// The caller must ensure that `v_a` and `v_b` are valid vessel indices
+/// in `0..model.num_vessels()`.
 #[inline]
-pub fn intra_berth_swap_filter<T: SolverNumeric>(
+pub unsafe fn intra_berth_swap_filter_unchecked<T>(
     v_a: VesselIndex,
     v_b: VesselIndex,
     _solution: SolutionView<'_, T>,
     _graph: &ScheduleGraph,
     model: &Model<T>,
-) -> bool {
+) -> bool
+where
+    T: SolverNumeric,
+{
+    debug_assert!(v_a < model.num_vessels());
+    debug_assert!(v_b < model.num_vessels());
+
     // Time windows overlap iff neither is entirely before the other.
     //   overlap ⟺ arrival_a < deadline_b  ∧  arrival_b < deadline_a
-    let arrival_a = model.vessel_arrival_time(v_a);
-    let deadline_a = model.vessel_latest_departure_time(v_a);
-    let arrival_b = model.vessel_arrival_time(v_b);
-    let deadline_b = model.vessel_latest_departure_time(v_b);
+    let arrival_a = unsafe { model.vessel_arrival_time_unchecked(v_a) };
+    let deadline_a = unsafe { model.vessel_latest_departure_time_unchecked(v_a) };
+    let arrival_b = unsafe { model.vessel_arrival_time_unchecked(v_b) };
+    let deadline_b = unsafe { model.vessel_latest_departure_time_unchecked(v_b) };
 
     arrival_a < deadline_b && arrival_b < deadline_a
 }
@@ -59,16 +77,27 @@ pub fn intra_berth_swap_filter<T: SolverNumeric>(
 ///
 /// This is an optimum-preserving filter: every feasible inter-berth swap
 /// requires both vessels to be compatible with each other's berths.
+///
+/// # Safety
+///
+/// The caller must ensure that `v_a` and `v_b` are valid vessel indices
+/// in `0..graph.num_vessels()`.
 #[inline]
-pub fn inter_berth_swap_filter<T: SolverNumeric>(
+pub unsafe fn inter_berth_swap_filter_unchecked<T>(
     v_a: VesselIndex,
     v_b: VesselIndex,
     _solution: SolutionView<'_, T>,
     graph: &ScheduleGraph,
     model: &Model<T>,
-) -> bool {
-    let berth_a = graph.vessel_berth(v_a);
-    let berth_b = graph.vessel_berth(v_b);
+) -> bool
+where
+    T: SolverNumeric,
+{
+    debug_assert!(v_a < graph.num_vessels());
+    debug_assert!(v_b < graph.num_vessels());
+
+    let berth_a = unsafe { graph.vessel_berth_unchecked(v_a) };
+    let berth_b = unsafe { graph.vessel_berth_unchecked(v_b) };
 
     // v_a must be allowed on berth_b, and v_b must be allowed on berth_a.
     model.vessel_allowed_on_berth(v_a, berth_b) && model.vessel_allowed_on_berth(v_b, berth_a)
@@ -84,18 +113,29 @@ pub fn inter_berth_swap_filter<T: SolverNumeric>(
 ///
 /// This is an optimum-preserving filter: any shift that could improve the
 /// objective involves two vessels whose time windows overlap.
+///
+/// # Safety
+///
+/// The caller must ensure that `v` and `anchor` are valid vessel indices
+/// in `0..model.num_vessels()`.
 #[inline]
-pub fn intra_berth_shift_filter<T: SolverNumeric>(
+pub unsafe fn intra_berth_shift_filter_unchecked<T>(
     v: VesselIndex,
     anchor: VesselIndex,
     _solution: SolutionView<'_, T>,
     _graph: &ScheduleGraph,
     model: &Model<T>,
-) -> bool {
-    let arrival_v = model.vessel_arrival_time(v);
-    let deadline_v = model.vessel_latest_departure_time(v);
-    let arrival_anchor = model.vessel_arrival_time(anchor);
-    let deadline_anchor = model.vessel_latest_departure_time(anchor);
+) -> bool
+where
+    T: SolverNumeric,
+{
+    debug_assert!(anchor < model.num_vessels());
+    debug_assert!(v < model.num_vessels());
+
+    let arrival_v = unsafe { model.vessel_arrival_time_unchecked(v) };
+    let deadline_v = unsafe { model.vessel_latest_departure_time_unchecked(v) };
+    let arrival_anchor = unsafe { model.vessel_arrival_time_unchecked(anchor) };
+    let deadline_anchor = unsafe { model.vessel_latest_departure_time_unchecked(anchor) };
 
     arrival_v < deadline_anchor && arrival_anchor < deadline_v
 }
@@ -108,14 +148,23 @@ pub fn intra_berth_shift_filter<T: SolverNumeric>(
 ///
 /// This is an optimum-preserving filter: every feasible inter-berth shift
 /// requires the vessel to be compatible with the target berth.
+///
+/// # Safety
+///
+/// The caller must ensure that `anchor` is a valid vessel index
+/// in `0..graph.num_vessels()`.
 #[inline]
-pub fn inter_berth_shift_filter<T: SolverNumeric>(
+pub unsafe fn inter_berth_shift_filter_unchecked<T>(
     v: VesselIndex,
     anchor: VesselIndex,
     _solution: SolutionView<'_, T>,
     graph: &ScheduleGraph,
     model: &Model<T>,
-) -> bool {
-    let berth_anchor = graph.vessel_berth(anchor);
+) -> bool
+where
+    T: SolverNumeric,
+{
+    debug_assert!(anchor < graph.num_vessels());
+    let berth_anchor = unsafe { graph.vessel_berth_unchecked(anchor) };
     model.vessel_allowed_on_berth(v, berth_anchor)
 }
