@@ -21,6 +21,7 @@
 
 pub mod decoding;
 pub mod engine;
+pub mod eval;
 pub mod exec;
 pub mod meta;
 pub mod monitor;

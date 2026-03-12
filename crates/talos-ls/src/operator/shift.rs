@@ -36,7 +36,9 @@ use talos_model::{index::VesselIndex, model::Model, solution::SolutionView};
 pub struct IntraBerthShiftOperator<T, F>
 where
     T: SolverNumeric,
-    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph) -> bool + Send + Sync,
+    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph, &Model<T>) -> bool
+        + Send
+        + Sync,
 {
     filter: F,
     num_vessels: usize,
@@ -48,7 +50,9 @@ where
 impl<T, F> IntraBerthShiftOperator<T, F>
 where
     T: SolverNumeric,
-    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph) -> bool + Send + Sync,
+    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph, &Model<T>) -> bool
+        + Send
+        + Sync,
 {
     pub fn new(filter: F) -> Self {
         Self {
@@ -64,7 +68,9 @@ where
 impl<T, F> LocalSearchOperator<T> for IntraBerthShiftOperator<T, F>
 where
     T: SolverNumeric,
-    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph) -> bool + Send + Sync,
+    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph, &Model<T>) -> bool
+        + Send
+        + Sync,
 {
     #[inline(always)]
     fn name(&self) -> &str {
@@ -85,7 +91,7 @@ where
 
     unsafe fn next_neighbor(
         &mut self,
-        _model: &Model<T>,
+        model: &Model<T>,
         _best_solution: SolutionView<'_, T>,
         accepted_solution: SolutionView<'_, T>,
         _buffered_solution: Option<SolutionView<'_, T>>,
@@ -122,7 +128,7 @@ where
                     continue;
                 }
 
-                if (self.filter)(v, anchor, accepted_solution, mutator.graph()) {
+                if (self.filter)(v, anchor, accepted_solution, mutator.graph(), model) {
                     unsafe {
                         mutator.relocate_after_unchecked(v, anchor);
                     }
@@ -148,7 +154,9 @@ where
 pub struct InterBerthShiftOperator<T, F>
 where
     T: SolverNumeric,
-    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph) -> bool + Send + Sync,
+    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph, &Model<T>) -> bool
+        + Send
+        + Sync,
 {
     filter: F,
     num_vessels: usize,
@@ -160,7 +168,9 @@ where
 impl<T, F> InterBerthShiftOperator<T, F>
 where
     T: SolverNumeric,
-    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph) -> bool + Send + Sync,
+    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph, &Model<T>) -> bool
+        + Send
+        + Sync,
 {
     pub fn new(filter: F) -> Self {
         Self {
@@ -176,7 +186,9 @@ where
 impl<T, F> LocalSearchOperator<T> for InterBerthShiftOperator<T, F>
 where
     T: SolverNumeric,
-    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph) -> bool + Send + Sync,
+    F: Fn(VesselIndex, VesselIndex, SolutionView<'_, T>, &ScheduleGraph, &Model<T>) -> bool
+        + Send
+        + Sync,
 {
     #[inline(always)]
     fn name(&self) -> &str {
@@ -197,7 +209,7 @@ where
 
     unsafe fn next_neighbor(
         &mut self,
-        _model: &Model<T>,
+        model: &Model<T>,
         _best_solution: SolutionView<'_, T>,
         accepted_solution: SolutionView<'_, T>,
         _buffered_solution: Option<SolutionView<'_, T>>,
@@ -227,7 +239,7 @@ where
             let berth_anchor = unsafe { mutator.graph().vessel_berth_unchecked(anchor) };
 
             if berth_v != berth_anchor
-                && (self.filter)(v, anchor, accepted_solution, mutator.graph())
+                && (self.filter)(v, anchor, accepted_solution, mutator.graph(), model)
             {
                 unsafe {
                     mutator.relocate_after_unchecked(v, anchor);
