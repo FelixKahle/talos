@@ -22,11 +22,11 @@
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use std::ffi::c_void;
-use std::ptr;
 use std::time::Duration;
 use talos_ls::engine::Engine;
 use talos_ls::eval::calculate_weighted_turnaround_time_unchecked;
 use talos_ls::exec::{SearchCommand, TerminationReason};
+use talos_ls::meta::gd::GreedyDescent;
 use talos_ls::meta::gls::{
     FixedLambda, GuidedLocalSearch, MaxUtilityPenalization, PenalizationTrigger, ReactiveLambda,
     UniformCost,
@@ -38,6 +38,7 @@ use talos_ls::meta::sa::{
     CoolingTrigger, GeometricCooling, LinearCooling, MetropolisCriterion, SimulatedAnnealing,
 };
 use talos_ls::meta::tabu::{FixedTenure, RandomTenure, SelectionStrategy, TabuSearch};
+use talos_ls::meta::tie::KeepFirst;
 use talos_ls::monitor::composite::CompositeLocalSearchMonitor;
 use talos_ls::monitor::cycle::CycleLimitMonitor;
 use talos_ls::monitor::iteration::IterationLimitMonitor;
@@ -131,27 +132,10 @@ impl From<&LocalSearchStatistics> for FfiLocalSearchStatistics {
 /// The `solution` pointer (if non-null) must be freed with `talos_solution_free`.
 #[repr(C)]
 pub struct FfiLocalSearchOutcome {
-    /// Best solution found. Null on validation error.
+    /// Best solution found.
     pub solution: *mut Solution<i64>,
     pub termination_reason: FfiTerminationReason,
     pub stats: FfiLocalSearchStatistics,
-}
-
-impl FfiLocalSearchOutcome {
-    fn error() -> Self {
-        Self {
-            solution: ptr::null_mut(),
-            termination_reason: FfiTerminationReason::Aborted,
-            stats: FfiLocalSearchStatistics {
-                iterations: 0,
-                cycles: 0,
-                total_solutions: 0,
-                accepted_solutions: 0,
-                infeasible_moves: 0,
-                time_total_nanos: 0,
-            },
-        }
-    }
 }
 
 // ----------------------------------------------------------------
@@ -168,6 +152,7 @@ enum MetaInner {
     SaLinear(SimulatedAnnealing<StdRng, LinearCooling, MetropolisCriterion>),
     GlsFixed(GuidedLocalSearch<MaxUtilityPenalization, UniformCost, FixedLambda>),
     GlsReactive(GuidedLocalSearch<MaxUtilityPenalization, UniformCost, ReactiveLambda>),
+    GreedyDescent(GreedyDescent<KeepFirst>),
 }
 
 macro_rules! delegate_meta {
@@ -179,6 +164,7 @@ macro_rules! delegate_meta {
             MetaInner::SaLinear(m) => m.$method($($arg),*),
             MetaInner::GlsFixed(m) => m.$method($($arg),*),
             MetaInner::GlsReactive(m) => m.$method($($arg),*),
+            MetaInner::GreedyDescent(m) => m.$method($($arg),*),
         }
     };
 }
@@ -192,6 +178,7 @@ impl Metaheuristic<i64> for MetaInner {
             MetaInner::SaLinear(_) => "SimulatedAnnealing",
             MetaInner::GlsFixed(_) => "GuidedLocalSearch",
             MetaInner::GlsReactive(_) => "GuidedLocalSearch",
+            MetaInner::GreedyDescent(_) => "GreedyDescent",
         }
     }
 
@@ -385,6 +372,7 @@ pub enum FfiMetaheuristic {
     TabuSearch = 0,
     SimulatedAnnealing = 1,
     GuidedLocalSearch = 2,
+    GreedyDescent = 3,
 }
 
 /// SA cooling schedule type.
@@ -436,6 +424,9 @@ pub enum FfiPenalizationTrigger {
 ///   `gls_penalization_trigger`, `gls_trigger_n`, `num_vessels`, `num_berths`.
 ///   If `gls_reactive != 0`: `gls_growth_factor`, `gls_decay_factor`,
 ///   `gls_min_lambda`, `gls_max_lambda` are also used.
+///
+/// * **GreedyDescent** — `gd_selection`.
+///   0 = FirstImprovement (default), 1 = BestImprovement.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiMetaheuristicConfig {
@@ -476,6 +467,10 @@ pub struct FfiMetaheuristicConfig {
     pub gls_decay_factor: f64,
     pub gls_min_lambda: f64,
     pub gls_max_lambda: f64,
+
+    // Greedy Descent
+    /// 0 = FirstImprovement (default), 1 = BestImprovement.
+    pub gd_selection: i32,
 }
 
 impl FfiMetaheuristicConfig {
@@ -555,6 +550,13 @@ impl FfiMetaheuristicConfig {
                         MetaInner::SaLinear(sa)
                     }
                 }
+            }
+            FfiMetaheuristic::GreedyDescent => {
+                let sel = match self.gd_selection {
+                    1 => SelectionStrategy::BestImprovement,
+                    _ => SelectionStrategy::FirstImprovement,
+                };
+                MetaInner::GreedyDescent(GreedyDescent::new().with_selection(sel))
             }
             FfiMetaheuristic::GuidedLocalSearch => {
                 let trigger = match self.gls_penalization_trigger {
@@ -742,13 +744,12 @@ pub extern "C" fn talos_engine_new(num_vessels: usize, num_berths: usize) -> *mu
 ///
 /// # Safety
 ///
-/// * `engine` must be null or a valid pointer from `talos_engine_new`.
+/// * `engine` must be a valid pointer from `talos_engine_new`.
 /// * Must not be called while `talos_engine_run` is executing.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_engine_free(engine: *mut Engine<i64>) {
-    if !engine.is_null() {
-        drop(unsafe { Box::from_raw(engine) });
-    }
+    assert!(!engine.is_null(), "engine must not be null");
+    drop(unsafe { Box::from_raw(engine) });
 }
 
 // ----------------------------------------------------------------
@@ -796,7 +797,7 @@ pub type FfiNewBestCallbackFn =
 /// evaluator, or provide a custom function pointer.
 ///
 /// On validation failure (e.g. mismatched dimensions or no operators enabled),
-/// returns an outcome with a null `solution` pointer and `Aborted` termination reason.
+/// the function panics.
 ///
 /// # Safety
 ///
@@ -818,9 +819,12 @@ pub unsafe extern "C" fn talos_engine_run(
     callback: FfiNewBestCallbackFn,
     user_data: *mut c_void,
 ) -> FfiLocalSearchOutcome {
-    if engine.is_null() || model.is_null() || initial_solution.is_null() {
-        return FfiLocalSearchOutcome::error();
-    }
+    assert!(!engine.is_null(), "engine must not be null");
+    assert!(!model.is_null(), "model must not be null");
+    assert!(
+        !initial_solution.is_null(),
+        "initial_solution must not be null"
+    );
 
     let engine = unsafe { &mut *engine };
     let model = unsafe { &*model };
@@ -829,9 +833,10 @@ pub unsafe extern "C" fn talos_engine_run(
     let mut meta_inner = meta_config.build_metaheuristic();
 
     let operators = op_config.build_operators();
-    if operators.is_empty() {
-        return FfiLocalSearchOutcome::error();
-    }
+    assert!(
+        !operators.is_empty(),
+        "at least one operator must be enabled"
+    );
 
     let monitor = mon_config.build_monitor();
 
@@ -875,7 +880,7 @@ pub unsafe extern "C" fn talos_engine_run(
                 objective_value,
             ) {
                 Ok(params) => engine.run(params.into(), eval, cb),
-                Err(_) => return FfiLocalSearchOutcome::error(),
+                Err(e) => panic!("LocalSearchParams validation failed: {e}"),
             }
         }};
     }
@@ -913,6 +918,8 @@ pub unsafe extern "C" fn talos_engine_run(
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use super::*;
     use crate::model::talos_model_new;
     use crate::solution::{talos_solution_free, talos_solution_view_free, talos_solution_view_new};
@@ -975,11 +982,6 @@ mod tests {
         unsafe { talos_engine_free(e) };
     }
 
-    #[test]
-    fn test_engine_free_null() {
-        unsafe { talos_engine_free(ptr::null_mut()) };
-    }
-
     // ---- Metaheuristic config ----
 
     /// Helper: returns a default-zeroed config for a given metaheuristic type.
@@ -1011,6 +1013,7 @@ mod tests {
             gls_decay_factor: 0.0,
             gls_min_lambda: 0.0,
             gls_max_lambda: 0.0,
+            gd_selection: 0,
         }
     }
 
@@ -1059,6 +1062,19 @@ mod tests {
     fn test_meta_config_gls_fixed() {
         let mut cfg = zeroed_meta_config(FfiMetaheuristic::GuidedLocalSearch);
         cfg.gls_lambda = 0.5;
+        let _m = cfg.build_metaheuristic();
+    }
+
+    #[test]
+    fn test_meta_config_gd_first_improvement() {
+        let cfg = zeroed_meta_config(FfiMetaheuristic::GreedyDescent);
+        let _m = cfg.build_metaheuristic();
+    }
+
+    #[test]
+    fn test_meta_config_gd_best_improvement() {
+        let mut cfg = zeroed_meta_config(FfiMetaheuristic::GreedyDescent);
+        cfg.gd_selection = 1;
         let _m = cfg.build_metaheuristic();
     }
 
@@ -1236,45 +1252,6 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_run_null_pointers() {
-        let meta_config = zeroed_meta_config(FfiMetaheuristic::TabuSearch);
-        let op_config = FfiOperatorConfig {
-            strategy: FfiCompoundStrategy::RoundRobin,
-            use_intra_berth_swap: 1,
-            use_inter_berth_swap: 0,
-            use_intra_berth_shift: 0,
-            use_inter_berth_shift: 0,
-            seed: 0,
-            bandit_memory_coeff: 0.0,
-            bandit_exploration_coeff: 0.0,
-        };
-        let mon_config = FfiMonitorConfig {
-            time_limit_millis: 0,
-            iteration_limit: 100,
-            solution_limit: 0,
-            cycle_limit: 0,
-            no_improvement_iterations: 0,
-            no_improvement_cycles: 0,
-            no_improvement_time_millis: 0,
-        };
-        let outcome = unsafe {
-            talos_engine_run(
-                ptr::null_mut(),
-                ptr::null(),
-                meta_config,
-                op_config,
-                mon_config,
-                ptr::null(),
-                None,
-                noop_callback,
-                ptr::null_mut(),
-            )
-        };
-        assert!(outcome.solution.is_null());
-        assert_eq!(outcome.termination_reason, FfiTerminationReason::Aborted);
-    }
-
-    #[test]
     fn test_engine_run_with_callback() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1338,63 +1315,6 @@ mod tests {
 
         unsafe {
             talos_solution_free(outcome.solution);
-            talos_solution_view_free(init_sol);
-            talos_engine_free(engine);
-            crate::model::talos_model_free(model);
-        }
-    }
-
-    #[test]
-    fn test_engine_run_no_operators_returns_error() {
-        let model = build_test_model();
-        let engine = talos_engine_new(2, 2);
-        let mut meta_config = zeroed_meta_config(FfiMetaheuristic::TabuSearch);
-        meta_config.tabu_tenure = 5;
-        meta_config.num_vessels = 2;
-        meta_config.num_berths = 2;
-        let op_config = FfiOperatorConfig {
-            strategy: FfiCompoundStrategy::Random,
-            use_intra_berth_swap: 0,
-            use_inter_berth_swap: 0,
-            use_intra_berth_shift: 0,
-            use_inter_berth_shift: 0,
-            seed: 42,
-            bandit_memory_coeff: 0.0,
-            bandit_exploration_coeff: 0.0,
-        };
-        let mon_config = FfiMonitorConfig {
-            time_limit_millis: 0,
-            iteration_limit: 100,
-            solution_limit: 0,
-            cycle_limit: 0,
-            no_improvement_iterations: 0,
-            no_improvement_cycles: 0,
-            no_improvement_time_millis: 0,
-        };
-
-        let berths: [usize; 2] = [0, 1];
-        let starts: [i64; 2] = [0, 0];
-        let init_sol = unsafe { talos_solution_view_new(2, berths.as_ptr(), starts.as_ptr(), 0) };
-        assert!(!init_sol.is_null());
-
-        let outcome = unsafe {
-            talos_engine_run(
-                engine,
-                model,
-                meta_config,
-                op_config,
-                mon_config,
-                init_sol,
-                None,
-                noop_callback,
-                ptr::null_mut(),
-            )
-        };
-
-        assert!(outcome.solution.is_null());
-        assert_eq!(outcome.termination_reason, FfiTerminationReason::Aborted);
-
-        unsafe {
             talos_solution_view_free(init_sol);
             talos_engine_free(engine);
             crate::model::talos_model_free(model);

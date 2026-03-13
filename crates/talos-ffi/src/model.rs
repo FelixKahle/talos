@@ -19,7 +19,6 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-use std::ptr;
 use std::slice;
 use talos_core::math::interval::ClosedOpenInterval;
 use talos_model::index::{BerthIndex, VesselIndex};
@@ -55,15 +54,30 @@ pub unsafe extern "C" fn talos_model_new(
     opening_intervals_ptrs: *const *const FfiClosedOpenIntervalI64,
     opening_intervals_lens: *const usize,
 ) -> *mut Model<i64> {
-    if arrival_times_ptr.is_null()
-        || latest_departure_times_ptr.is_null()
-        || vessel_weights_ptr.is_null()
-        || processing_times_ptr.is_null()
-        || opening_intervals_ptrs.is_null()
-        || opening_intervals_lens.is_null()
-    {
-        return ptr::null_mut();
-    }
+    assert!(
+        !arrival_times_ptr.is_null(),
+        "arrival_times_ptr must not be null"
+    );
+    assert!(
+        !latest_departure_times_ptr.is_null(),
+        "latest_departure_times_ptr must not be null"
+    );
+    assert!(
+        !vessel_weights_ptr.is_null(),
+        "vessel_weights_ptr must not be null"
+    );
+    assert!(
+        !processing_times_ptr.is_null(),
+        "processing_times_ptr must not be null"
+    );
+    assert!(
+        !opening_intervals_ptrs.is_null(),
+        "opening_intervals_ptrs must not be null"
+    );
+    assert!(
+        !opening_intervals_lens.is_null(),
+        "opening_intervals_lens must not be null"
+    );
 
     let arrival_times = unsafe { slice::from_raw_parts(arrival_times_ptr, num_vessels).to_vec() };
     let latest_departure_times =
@@ -85,9 +99,10 @@ pub unsafe extern "C" fn talos_model_new(
         let ptr = intervals_ptrs_slice[i];
         let len = intervals_lens_slice[i];
 
-        if ptr.is_null() && len > 0 {
-            return ptr::null_mut();
-        }
+        assert!(
+            !(ptr.is_null() && len > 0),
+            "opening_intervals_ptrs[{i}] must not be null when len > 0"
+        );
 
         let c_intervals = if len > 0 {
             unsafe { slice::from_raw_parts(ptr, len) }
@@ -142,23 +157,36 @@ pub unsafe extern "C" fn talos_model_override(
     opening_intervals_ptrs: *const *const FfiClosedOpenIntervalI64,
     opening_intervals_lens: *const usize,
 ) -> bool {
-    if model_ptr.is_null()
-        || arrival_times_ptr.is_null()
-        || latest_departure_times_ptr.is_null()
-        || vessel_weights_ptr.is_null()
-        || processing_times_ptr.is_null()
-        || opening_intervals_ptrs.is_null()
-        || opening_intervals_lens.is_null()
-    {
-        return false;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
+    assert!(
+        !arrival_times_ptr.is_null(),
+        "arrival_times_ptr must not be null"
+    );
+    assert!(
+        !latest_departure_times_ptr.is_null(),
+        "latest_departure_times_ptr must not be null"
+    );
+    assert!(
+        !vessel_weights_ptr.is_null(),
+        "vessel_weights_ptr must not be null"
+    );
+    assert!(
+        !processing_times_ptr.is_null(),
+        "processing_times_ptr must not be null"
+    );
+    assert!(
+        !opening_intervals_ptrs.is_null(),
+        "opening_intervals_ptrs must not be null"
+    );
+    assert!(
+        !opening_intervals_lens.is_null(),
+        "opening_intervals_lens must not be null"
+    );
 
     let model = unsafe { &mut *model_ptr };
 
-    // ADDED: Validate dimensions match
-    if num_vessels != model.num_vessels() || num_berths != model.num_berths() {
-        return false;
-    }
+    assert_eq!(num_vessels, model.num_vessels(), "num_vessels mismatch");
+    assert_eq!(num_berths, model.num_berths(), "num_berths mismatch");
 
     let arrival_times = unsafe { slice::from_raw_parts(arrival_times_ptr, num_vessels) };
     let latest_departure_times =
@@ -180,9 +208,10 @@ pub unsafe extern "C" fn talos_model_override(
         let ptr = intervals_ptrs_slice[i];
         let len = intervals_lens_slice[i];
 
-        if ptr.is_null() && len > 0 {
-            return false;
-        }
+        assert!(
+            !(ptr.is_null() && len > 0),
+            "opening_intervals_ptrs[{i}] must not be null when len > 0"
+        );
 
         let c_intervals = if len > 0 {
             unsafe { slice::from_raw_parts(ptr, len) }
@@ -218,29 +247,25 @@ pub unsafe extern "C" fn talos_model_override(
 // Accessors / Getters
 // -----------------------------------------------------------------------------
 
-/// Returns the number of vessels in the model. Returns 0 if pointer is null.
+/// Returns the number of vessels in the model.
 ///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_num_vessels(model_ptr: *const Model<i64>) -> usize {
-    if model_ptr.is_null() {
-        return 0;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     unsafe { (*model_ptr).num_vessels() }
 }
 
-/// Returns the number of berths in the model. Returns 0 if pointer is null.
+/// Returns the number of berths in the model.
 ///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_num_berths(model_ptr: *const Model<i64>) -> usize {
-    if model_ptr.is_null() {
-        return 0;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     unsafe { (*model_ptr).num_berths() }
 }
 
@@ -249,14 +274,12 @@ pub unsafe extern "C" fn talos_model_num_berths(model_ptr: *const Model<i64>) ->
 ///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 /// * The returned pointer is strictly bound to the lifetime of the `Model`. The caller must not dereference this pointer after `talos_model_free` is called.
 /// * The returned memory must be treated as strictly read-only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_arrival_times_ptr(model_ptr: *const Model<i64>) -> *const i64 {
-    if model_ptr.is_null() {
-        return ptr::null();
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     unsafe { (*model_ptr).vessel_arrival_times().as_ptr() }
 }
 
@@ -265,16 +288,14 @@ pub unsafe extern "C" fn talos_model_arrival_times_ptr(model_ptr: *const Model<i
 ///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 /// * The returned pointer is strictly bound to the lifetime of the `Model`. The caller must not dereference this pointer after `talos_model_free` is called.
 /// * The returned memory must be treated as strictly read-only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_latest_departure_times_ptr(
     model_ptr: *const Model<i64>,
 ) -> *const i64 {
-    if model_ptr.is_null() {
-        return ptr::null();
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     unsafe { (*model_ptr).vessel_latest_departure_times().as_ptr() }
 }
 
@@ -283,16 +304,14 @@ pub unsafe extern "C" fn talos_model_latest_departure_times_ptr(
 ///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 /// * The returned pointer is strictly bound to the lifetime of the `Model`. The caller must not dereference this pointer after `talos_model_free` is called.
 /// * The returned memory must be treated as strictly read-only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_vessel_weights_ptr(
     model_ptr: *const Model<i64>,
 ) -> *const i64 {
-    if model_ptr.is_null() {
-        return ptr::null();
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     unsafe { (*model_ptr).vessel_weights().as_ptr() }
 }
 
@@ -303,83 +322,72 @@ pub unsafe extern "C" fn talos_model_vessel_weights_ptr(
 ///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 /// * The returned pointer is strictly bound to the lifetime of the `Model`. The caller must not dereference this pointer after `talos_model_free` is called.
 /// * The returned memory must be treated as strictly read-only.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_processing_times_ptr(
     model_ptr: *const Model<i64>,
 ) -> *const i64 {
-    if model_ptr.is_null() {
-        return ptr::null();
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     // Cast is safe due to #[repr(transparent)] on ProcessingTime
     unsafe { (*model_ptr).vessel_processing_times_matrix().as_ptr() as *const i64 }
 }
 
 /// Returns the arrival time for a single vessel.
 ///
-/// Returns `i64::MIN` if `model_ptr` is null or `vessel_index` is out of bounds.
-///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_vessel_arrival_time(
     model_ptr: *const Model<i64>,
     vessel_index: usize,
 ) -> i64 {
-    if model_ptr.is_null() {
-        return i64::MIN;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     let model = unsafe { &*model_ptr };
-    if vessel_index >= model.num_vessels() {
-        return i64::MIN;
-    }
+    assert!(
+        vessel_index < model.num_vessels(),
+        "vessel_index out of bounds"
+    );
     model.vessel_arrival_time(VesselIndex::new(vessel_index))
 }
 
 /// Returns the latest departure time for a single vessel.
 ///
-/// Returns `i64::MIN` if `model_ptr` is null or `vessel_index` is out of bounds.
-///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_vessel_latest_departure_time(
     model_ptr: *const Model<i64>,
     vessel_index: usize,
 ) -> i64 {
-    if model_ptr.is_null() {
-        return i64::MIN;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     let model = unsafe { &*model_ptr };
-    if vessel_index >= model.num_vessels() {
-        return i64::MIN;
-    }
+    assert!(
+        vessel_index < model.num_vessels(),
+        "vessel_index out of bounds"
+    );
     model.vessel_latest_departure_time(VesselIndex::new(vessel_index))
 }
 
 /// Returns the weight for a single vessel.
 ///
-/// Returns `i64::MIN` if `model_ptr` is null or `vessel_index` is out of bounds.
-///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_vessel_weight(
     model_ptr: *const Model<i64>,
     vessel_index: usize,
 ) -> i64 {
-    if model_ptr.is_null() {
-        return i64::MIN;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     let model = unsafe { &*model_ptr };
-    if vessel_index >= model.num_vessels() {
-        return i64::MIN;
-    }
+    assert!(
+        vessel_index < model.num_vessels(),
+        "vessel_index out of bounds"
+    );
     model.vessel_weight(VesselIndex::new(vessel_index))
 }
 
@@ -388,24 +396,25 @@ pub unsafe extern "C" fn talos_model_vessel_weight(
 /// Returns the raw `i64` value. Negative values indicate that the assignment
 /// is forbidden (equivalent to `None`).
 ///
-/// Returns `i64::MIN` if `model_ptr` is null or indices are out of bounds.
-///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_vessel_processing_time(
     model_ptr: *const Model<i64>,
     vessel_index: usize,
     berth_index: usize,
 ) -> i64 {
-    if model_ptr.is_null() {
-        return i64::MIN;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     let model = unsafe { &*model_ptr };
-    if vessel_index >= model.num_vessels() || berth_index >= model.num_berths() {
-        return i64::MIN;
-    }
+    assert!(
+        vessel_index < model.num_vessels(),
+        "vessel_index out of bounds"
+    );
+    assert!(
+        berth_index < model.num_berths(),
+        "berth_index out of bounds"
+    );
     model
         .vessel_processing_time(VesselIndex::new(vessel_index), BerthIndex::new(berth_index))
         .raw()
@@ -413,46 +422,44 @@ pub unsafe extern "C" fn talos_model_vessel_processing_time(
 
 /// Returns `true` if the vessel is allowed to dock at the specified berth.
 ///
-/// Returns `false` if `model_ptr` is null or indices are out of bounds.
-///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_vessel_allowed_on_berth(
     model_ptr: *const Model<i64>,
     vessel_index: usize,
     berth_index: usize,
 ) -> bool {
-    if model_ptr.is_null() {
-        return false;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     let model = unsafe { &*model_ptr };
-    if vessel_index >= model.num_vessels() || berth_index >= model.num_berths() {
-        return false;
-    }
+    assert!(
+        vessel_index < model.num_vessels(),
+        "vessel_index out of bounds"
+    );
+    assert!(
+        berth_index < model.num_berths(),
+        "berth_index out of bounds"
+    );
     model.vessel_allowed_on_berth(VesselIndex::new(vessel_index), BerthIndex::new(berth_index))
 }
 
 /// Returns the number of opening-time intervals for a given berth.
 ///
-/// Returns 0 if `model_ptr` is null or `berth_index` is out of bounds.
-///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_berth_opening_times_len(
     model_ptr: *const Model<i64>,
     berth_index: usize,
 ) -> usize {
-    if model_ptr.is_null() {
-        return 0;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
     let model = unsafe { &*model_ptr };
-    if berth_index >= model.num_berths() {
-        return 0;
-    }
+    assert!(
+        berth_index < model.num_berths(),
+        "berth_index out of bounds"
+    );
     model
         .berth_opening_times(BerthIndex::new(berth_index))
         .len()
@@ -464,12 +471,11 @@ pub unsafe extern "C" fn talos_model_berth_opening_times_len(
 /// `talos_model_berth_opening_times_len` to query the required length first.
 ///
 /// Returns the number of intervals actually written (capped at `buf_len`).
-/// Returns 0 if `model_ptr` or `out_buf` is null, or if `berth_index` is out of bounds.
 ///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer to a `Model<i64>`.
-/// * `out_buf` must be either null or a valid pointer to an array of at least `buf_len` elements.
+/// * `model_ptr` must be a valid pointer to a `Model<i64>`.
+/// * `out_buf` must be a valid pointer to an array of at least `buf_len` elements.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_berth_opening_times(
     model_ptr: *const Model<i64>,
@@ -477,13 +483,13 @@ pub unsafe extern "C" fn talos_model_berth_opening_times(
     out_buf: *mut FfiClosedOpenIntervalI64,
     buf_len: usize,
 ) -> usize {
-    if model_ptr.is_null() || out_buf.is_null() {
-        return 0;
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
+    assert!(!out_buf.is_null(), "out_buf must not be null");
     let model = unsafe { &*model_ptr };
-    if berth_index >= model.num_berths() {
-        return 0;
-    }
+    assert!(
+        berth_index < model.num_berths(),
+        "berth_index out of bounds"
+    );
 
     let intervals = model.berth_opening_times(BerthIndex::new(berth_index));
     let count = intervals.len().min(buf_len);
@@ -503,20 +509,18 @@ pub unsafe extern "C" fn talos_model_berth_opening_times(
 ///
 /// # Safety
 ///
-/// * `model_ptr` must be either null or a valid pointer returned by `talos_model_new`.
+/// * `model_ptr` must be a valid pointer returned by `talos_model_new`.
 /// * The pointer must not be used after this function returns (no use-after-free).
 /// * The pointer must not be freed more than once (no double-free).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_model_free(model_ptr: *mut Model<i64>) {
-    if !model_ptr.is_null() {
-        drop(unsafe { Box::from_raw(model_ptr) });
-    }
+    assert!(!model_ptr.is_null(), "model_ptr must not be null");
+    drop(unsafe { Box::from_raw(model_ptr) });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ptr;
 
     #[test]
     fn test_talos_model_ffi_lifecycle_and_accessors() {
@@ -636,21 +640,6 @@ mod tests {
         assert_eq!(buf[0].start_inclusive, 0);
         assert_eq!(buf[0].end_exclusive, 60);
 
-        // Out-of-bounds index returns sentinels
-        assert_eq!(
-            unsafe { talos_model_vessel_arrival_time(model_ptr, 99) },
-            i64::MIN
-        );
-        assert_eq!(
-            unsafe { talos_model_vessel_processing_time(model_ptr, 99, 0) },
-            i64::MIN
-        );
-        assert!(!unsafe { talos_model_vessel_allowed_on_berth(model_ptr, 99, 0) });
-        assert_eq!(
-            unsafe { talos_model_berth_opening_times_len(model_ptr, 99) },
-            0
-        );
-
         // 3. Free the model
         unsafe {
             talos_model_free(model_ptr);
@@ -735,48 +724,6 @@ mod tests {
 
         unsafe {
             talos_model_free(model_ptr);
-        }
-    }
-
-    #[test]
-    fn test_talos_model_accessors_null_pointer() {
-        assert_eq!(unsafe { talos_model_num_vessels(ptr::null()) }, 0);
-        assert_eq!(unsafe { talos_model_num_berths(ptr::null()) }, 0);
-        assert!(unsafe { talos_model_arrival_times_ptr(ptr::null()) }.is_null());
-        assert!(unsafe { talos_model_latest_departure_times_ptr(ptr::null()) }.is_null());
-        assert!(unsafe { talos_model_vessel_weights_ptr(ptr::null()) }.is_null());
-        assert!(unsafe { talos_model_processing_times_ptr(ptr::null()) }.is_null());
-        assert_eq!(
-            unsafe { talos_model_vessel_arrival_time(ptr::null(), 0) },
-            i64::MIN
-        );
-        assert_eq!(
-            unsafe { talos_model_vessel_latest_departure_time(ptr::null(), 0) },
-            i64::MIN
-        );
-        assert_eq!(
-            unsafe { talos_model_vessel_weight(ptr::null(), 0) },
-            i64::MIN
-        );
-        assert_eq!(
-            unsafe { talos_model_vessel_processing_time(ptr::null(), 0, 0) },
-            i64::MIN
-        );
-        assert!(!unsafe { talos_model_vessel_allowed_on_berth(ptr::null(), 0, 0) });
-        assert_eq!(
-            unsafe { talos_model_berth_opening_times_len(ptr::null(), 0) },
-            0
-        );
-        assert_eq!(
-            unsafe { talos_model_berth_opening_times(ptr::null(), 0, ptr::null_mut(), 0) },
-            0
-        );
-    }
-
-    #[test]
-    fn test_talos_model_free_null_pointer() {
-        unsafe {
-            talos_model_free(ptr::null_mut());
         }
     }
 }
