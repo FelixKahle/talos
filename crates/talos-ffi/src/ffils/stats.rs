@@ -19,5 +19,30 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub mod ffils;
-pub mod ffimodel;
+use talos_ls::stats::LocalSearchStatistics;
+
+/// C-compatible mirror of [`LocalSearchStatistics`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfiLocalSearchStatistics {
+    pub iterations: u64,
+    pub cycles: u64,
+    pub total_solutions: u64,
+    pub accepted_solutions: u64,
+    pub infeasible_moves: u64,
+    /// Total elapsed time in nanoseconds.
+    pub time_total_nanos: u64,
+}
+
+impl From<&LocalSearchStatistics> for FfiLocalSearchStatistics {
+    fn from(s: &LocalSearchStatistics) -> Self {
+        Self {
+            iterations: s.iterations,
+            cycles: s.cycles,
+            total_solutions: s.total_solutions,
+            accepted_solutions: s.accepted_solutions,
+            infeasible_moves: s.infeasible_moves,
+            time_total_nanos: s.time_total.as_nanos() as u64,
+        }
+    }
+}

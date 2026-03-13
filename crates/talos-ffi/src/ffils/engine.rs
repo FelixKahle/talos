@@ -31,12 +31,26 @@
 //! Each metaheuristic has its own configuration struct
 //! (`FfiTabuSearchConfig`, `FfiSimulatedAnnealingConfig`,
 //! `FfiGuidedLocalSearchConfig`, `FfiGreedyDescentConfig`) that maps 1:1
-//! to the Rust-side builder API. A single generic helper function
-//! `run_inner` performs the common work (building operators, monitors,
-//! the evaluator closure, and launching the engine), while each
-//! per-algorithm exported function (`talos_engine_run_tabu`,
+//! to the Rust-side builder API.
+//!
+//! Internally, three `#[inline(always)]` generic helpers form a
+//! zero-cost dispatch chain that avoids both macros and dynamic dispatch
+//! for the metaheuristic, evaluator function, and compound operator:
+//!
+//! 1. **`execute`** — fully monomorphised over `H` (metaheuristic),
+//!    `O` (compound operator), and `F` (evaluator closure). Constructs
+//!    `LocalSearchParams`, runs the engine, and packs the result.
+//! 2. **`dispatch_operator`** — generic over `H` and `F`, matches on
+//!    the `FfiCompoundStrategy` discriminant to instantiate a concrete
+//!    compound operator and forward to `execute`.
+//! 3. **`run_inner`** — generic over `H`, matches on the evaluator
+//!    function pointer (custom vs. built-in) and forwards to
+//!    `dispatch_operator`.
+//!
+//! Each per-algorithm exported function (`talos_engine_run_tabu`,
 //! `talos_engine_run_sa`, `talos_engine_run_gls`, `talos_engine_run_gd`)
-//! constructs the concrete metaheuristic and delegates to `run_inner`.
+//! constructs the concrete metaheuristic type via exhaustive `match`
+//! arms and delegates to `run_inner`.
 //!
 //! A unified `talos_engine_run` entry point is also provided, dispatching
 //! on an `FfiMetaheuristic` discriminant for callers that prefer a single
@@ -48,15 +62,13 @@ use std::ffi::c_void;
 use std::time::Duration;
 use talos_ls::engine::Engine;
 use talos_ls::eval::calculate_weighted_turnaround_time_unchecked;
-use talos_ls::exec::TerminationReason;
 use talos_ls::meta::gd::GreedyDescent;
 use talos_ls::meta::gls::{GuidedLocalSearch, PenalizationTrigger, ReactiveLambda};
-use talos_ls::meta::metaheuristic::{Metaheuristic, NeighborhoodExhaustionOutcome};
+use talos_ls::meta::metaheuristic::Metaheuristic;
 use talos_ls::meta::sa::{
-    CoolingTrigger, GeometricCooling, LinearCooling, LogarithmicCooling, MetropolisCriterion,
-    SimulatedAnnealing,
+    GeometricCooling, LinearCooling, LogarithmicCooling, MetropolisCriterion, SimulatedAnnealing,
 };
-use talos_ls::meta::tabu::{FixedTenure, RandomTenure, SelectionStrategy, TabuSearch};
+use talos_ls::meta::tabu::{FixedTenure, RandomTenure, TabuSearch};
 use talos_ls::meta::tie::{KeepFirst, KeepLast, RandomTieBreak};
 use talos_ls::monitor::composite::CompositeLocalSearchMonitor;
 use talos_ls::monitor::cycle::CycleLimitMonitor;
@@ -75,434 +87,19 @@ use talos_ls::operator::lsoperator::LocalSearchOperator;
 use talos_ls::operator::shift::{InterBerthShiftOperator, IntraBerthShiftOperator};
 use talos_ls::operator::swap::{InterBerthSwapOperator, IntraBerthSwapOperator};
 use talos_ls::params::LocalSearchParams;
-use talos_ls::stats::LocalSearchStatistics;
 use talos_model::index::{BerthIndex, VesselIndex};
 use talos_model::model::Model;
-use talos_model::solution::{Solution, SolutionView};
+use talos_model::solution::SolutionView;
 
-// ----------------------------------------------------------------
-// C-compatible output types
-// ----------------------------------------------------------------
-
-/// C-compatible mirror of [`TerminationReason`].
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiTerminationReason {
-    TimeLimitReached = 0,
-    SolutionLimitReached = 1,
-    IterationLimitReached = 2,
-    CycleLimitReached = 3,
-    MaxNonImprovingIterations = 4,
-    MaxNonImprovingCycles = 5,
-    MaxNonImprovingTime = 6,
-    TargetObjectiveReached = 7,
-    NeighborhoodExhausted = 8,
-    Interrupted = 9,
-    Aborted = 10,
-}
-
-impl From<TerminationReason> for FfiTerminationReason {
-    fn from(r: TerminationReason) -> Self {
-        match r {
-            TerminationReason::TimeLimitReached => Self::TimeLimitReached,
-            TerminationReason::SolutionLimitReached => Self::SolutionLimitReached,
-            TerminationReason::IterationLimitReached => Self::IterationLimitReached,
-            TerminationReason::CycleLimitReached => Self::CycleLimitReached,
-            TerminationReason::MaxNonImprovingIterations => Self::MaxNonImprovingIterations,
-            TerminationReason::MaxNonImprovingCycles => Self::MaxNonImprovingCycles,
-            TerminationReason::MaxNonImprovingTime => Self::MaxNonImprovingTime,
-            TerminationReason::TargetObjectiveReached => Self::TargetObjectiveReached,
-            TerminationReason::NeighborhoodExhausted => Self::NeighborhoodExhausted,
-            TerminationReason::Interrupted => Self::Interrupted,
-            TerminationReason::Aborted => Self::Aborted,
-        }
-    }
-}
-
-/// C-compatible mirror of [`LocalSearchStatistics`].
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FfiLocalSearchStatistics {
-    pub iterations: u64,
-    pub cycles: u64,
-    pub total_solutions: u64,
-    pub accepted_solutions: u64,
-    pub infeasible_moves: u64,
-    /// Total elapsed time in nanoseconds.
-    pub time_total_nanos: u64,
-}
-
-impl From<&LocalSearchStatistics> for FfiLocalSearchStatistics {
-    fn from(s: &LocalSearchStatistics) -> Self {
-        Self {
-            iterations: s.iterations,
-            cycles: s.cycles,
-            total_solutions: s.total_solutions,
-            accepted_solutions: s.accepted_solutions,
-            infeasible_moves: s.infeasible_moves,
-            time_total_nanos: s.time_total.as_nanos() as u64,
-        }
-    }
-}
-
-/// C-compatible result of an engine run.
-///
-/// The `solution` pointer (if non-null) must be freed with
-/// `talos_solution_free`.
-#[repr(C)]
-pub struct FfiLocalSearchOutcome {
-    /// Best solution found.
-    pub solution: *mut Solution<i64>,
-    pub termination_reason: FfiTerminationReason,
-    pub stats: FfiLocalSearchStatistics,
-}
-
-// ----------------------------------------------------------------
-// Shared enums
-// ----------------------------------------------------------------
-
-/// Move selection strategy (used by Tabu Search and Greedy Descent).
-///
-/// * `BestImprovement` (0) — evaluate the full neighbourhood, commit the
-///   best admissible move.
-/// * `FirstImprovement` (1) — accept the first admissible move.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiSelectionStrategy {
-    BestImprovement = 0,
-    FirstImprovement = 1,
-}
-
-impl FfiSelectionStrategy {
-    fn into_inner(self) -> SelectionStrategy {
-        match self {
-            Self::BestImprovement => SelectionStrategy::BestImprovement,
-            Self::FirstImprovement => SelectionStrategy::FirstImprovement,
-        }
-    }
-}
-
-/// Tie-breaking strategy for best-improvement mode.
-///
-/// * `KeepFirst` (0) — keep the earlier move (default).
-/// * `KeepLast` (1) — always replace the buffer with the newer move.
-/// * `Random` (2) — fair coin flip (requires a seeded RNG).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiTieBreaking {
-    KeepFirst = 0,
-    KeepLast = 1,
-    Random = 2,
-}
-
-/// Behaviour when the neighbourhood is exhausted.
-///
-/// * `Restart` (0) — re-scan the neighbourhood (standard for Tabu Search).
-/// * `Terminate` (1) — stop the search.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiExhaustionOutcome {
-    Restart = 0,
-    Terminate = 1,
-}
-
-impl FfiExhaustionOutcome {
-    fn into_inner(self) -> NeighborhoodExhaustionOutcome {
-        match self {
-            Self::Restart => NeighborhoodExhaustionOutcome::Restart,
-            Self::Terminate => NeighborhoodExhaustionOutcome::Terminate,
-        }
-    }
-}
-
-/// SA cooling schedule type.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiCoolingSchedule {
-    /// Manual geometric: provide `initial_temperature`, `alpha`,
-    /// `min_temperature`.
-    Geometric = 0,
-    /// Heuristic geometric: provide `heuristic_objective`,
-    /// `heuristic_acceptance_prob`, `heuristic_sensitivity`,
-    /// `heuristic_cooling_rate`.
-    GeometricHeuristic = 1,
-    /// Linear: provide `initial_temperature`, `linear_decrement`,
-    /// `min_temperature`.
-    Linear = 2,
-    /// Linear from budget: provide `initial_temperature`, `min_temperature`,
-    /// `linear_budget_iterations`.
-    LinearBudget = 3,
-    /// Logarithmic: provide `log_constant`, `log_k_scale`,
-    /// `min_temperature`.
-    Logarithmic = 4,
-}
-
-/// SA cooling trigger.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiCoolingTrigger {
-    /// Cool once per iteration.
-    Iteration = 0,
-    /// Cool once per cycle (neighbourhood exhaustion).
-    Cycle = 1,
-    /// Cool on move acceptance.
-    Acceptance = 2,
-}
-
-impl FfiCoolingTrigger {
-    fn into_inner(self) -> CoolingTrigger {
-        match self {
-            Self::Iteration => CoolingTrigger::Iteration,
-            Self::Cycle => CoolingTrigger::Cycle,
-            Self::Acceptance => CoolingTrigger::Acceptance,
-        }
-    }
-}
-
-/// GLS penalization trigger.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiPenalizationTrigger {
-    /// Penalize on neighbourhood exhaustion (classic GLS).
-    OnExhaustion = 0,
-    /// Penalize after `n` non-improving iterations.
-    AfterNonImprovements = 1,
-    /// Penalize every `n` accepted moves.
-    AfterMoves = 2,
-}
-
-/// Which metaheuristic algorithm to use (for the unified entry point).
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiMetaheuristic {
-    TabuSearch = 0,
-    SimulatedAnnealing = 1,
-    GuidedLocalSearch = 2,
-    GreedyDescent = 3,
-}
-
-// ----------------------------------------------------------------
-// Per-algorithm configuration structs
-// ----------------------------------------------------------------
-
-/// Full configuration for Tabu Search.
-///
-/// ## Tenure
-///
-/// * Fixed tenure: set `tenure_min` to the desired value and
-///   `tenure_max` to the same value (or 0).
-/// * Random tenure: set `tenure_min` < `tenure_max`. Requires `seed`.
-///
-/// ## Selection
-///
-/// * `selection` — `BestImprovement` (0) or `FirstImprovement` (1).
-///
-/// ## Tie-breaking
-///
-/// * `tie_breaking` — `KeepFirst` (0), `KeepLast` (1), or `Random` (2).
-///   Only relevant with `BestImprovement`. `Random` uses `seed`.
-///
-/// ## Exhaustion
-///
-/// * `exhaustion_outcome` — `Restart` (0) or `Terminate` (1).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct FfiTabuSearchConfig {
-    pub num_vessels: usize,
-    pub num_berths: usize,
-    /// Minimum tenure. For fixed tenure, set `tenure_max` equal to this.
-    pub tenure_min: u64,
-    /// Maximum tenure. If `> tenure_min`, random tenure in
-    /// `[tenure_min, tenure_max]`.
-    pub tenure_max: u64,
-    pub selection: FfiSelectionStrategy,
-    pub tie_breaking: FfiTieBreaking,
-    pub exhaustion_outcome: FfiExhaustionOutcome,
-    /// RNG seed (used for random tenure and random tie-breaking).
-    pub seed: u64,
-}
-
-/// Full configuration for Simulated Annealing.
-///
-/// ## Cooling schedule
-///
-/// Select via `schedule`:
-///
-/// | `schedule`           | Required fields                                    |
-/// |----------------------|----------------------------------------------------|
-/// | `Geometric`          | `initial_temperature`, `alpha`, `min_temperature`  |
-/// | `GeometricHeuristic` | `heuristic_*` fields                               |
-/// | `Linear`             | `initial_temperature`, `linear_decrement`,         |
-/// |                      | `min_temperature`                                  |
-/// | `LinearBudget`       | `initial_temperature`, `min_temperature`,          |
-/// |                      | `linear_budget_iterations`                         |
-/// | `Logarithmic`        | `log_constant`, `log_k_scale`, `min_temperature`   |
-///
-/// ## Reheating
-///
-/// Set `reheat_factor > 1.0` to enable reheating on neighbourhood
-/// exhaustion. `<= 1.0` disables it.
-///
-/// ## Frozen threshold
-///
-/// Set `frozen_threshold > 0.0` to override the default (`1e-12`).
-/// Set to `0.0` to use the default.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct FfiSimulatedAnnealingConfig {
-    pub schedule: FfiCoolingSchedule,
-    pub cooling_trigger: FfiCoolingTrigger,
-    /// RNG seed.
-    pub seed: u64,
-
-    // ── Geometric / Linear / LinearBudget ────────────────────
-    pub initial_temperature: f64,
-    /// Geometric decay factor $\alpha \in (0, 1)$.
-    pub alpha: f64,
-    /// Linear decrement per step (for `Linear` schedule).
-    pub linear_decrement: f64,
-    /// Total iteration budget (for `LinearBudget` schedule).
-    pub linear_budget_iterations: u64,
-    /// Frozen threshold. `0.0` uses the default `1e-12`.
-    pub min_temperature: f64,
-
-    // ── Logarithmic ──────────────────────────────────────────
-    /// Logarithmic numerator constant $C$.
-    pub log_constant: f64,
-    /// Logarithmic iteration scaling factor.
-    pub log_k_scale: f64,
-
-    // ── GeometricHeuristic ───────────────────────────────────
-    pub heuristic_objective: f64,
-    pub heuristic_acceptance_prob: f64,
-    pub heuristic_sensitivity: f64,
-    pub heuristic_cooling_rate: f64,
-
-    // ── Reheating ────────────────────────────────────────────
-    /// Reheat multiplier on neighbourhood exhaustion.
-    /// `<= 1.0` disables reheating.
-    pub reheat_factor: f64,
-
-    /// Custom frozen threshold. `0.0` uses the built-in default (`1e-12`).
-    pub frozen_threshold: f64,
-}
-
-/// Full configuration for Guided Local Search.
-///
-/// ## Lambda
-///
-/// * Fixed: set `reactive = 0` and `lambda` to the desired weight.
-/// * Reactive: set `reactive != 0` and provide `lambda` (initial),
-///   `growth_factor`, `decay_factor`, `min_lambda`, `max_lambda`.
-///
-/// ## Penalization trigger
-///
-/// * `OnExhaustion` (0) — classic GLS.
-/// * `AfterNonImprovements` (1) — provide `trigger_n`.
-/// * `AfterMoves` (2) — provide `trigger_n`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct FfiGuidedLocalSearchConfig {
-    pub num_vessels: usize,
-    pub num_berths: usize,
-    /// Penalty weight $\lambda$.
-    pub lambda: f64,
-    /// Non-zero to use reactive lambda.
-    pub reactive: i32,
-    pub penalization_trigger: FfiPenalizationTrigger,
-    /// Trigger threshold (for `AfterNonImprovements` / `AfterMoves`).
-    pub trigger_n: u64,
-    /// Reactive: growth factor (must be `> 1.0`).
-    pub growth_factor: f64,
-    /// Reactive: decay factor (must be in `(0.0, 1.0)`).
-    pub decay_factor: f64,
-    /// Reactive: minimum lambda clamp.
-    pub min_lambda: f64,
-    /// Reactive: maximum lambda clamp.
-    pub max_lambda: f64,
-}
-
-/// Full configuration for Greedy Descent.
-///
-/// ## Selection
-///
-/// * `FirstImprovement` (1) — accept the first improving move (default).
-/// * `BestImprovement` (0) — steepest descent.
-///
-/// ## Tie-breaking
-///
-/// * `KeepFirst` (0), `KeepLast` (1), `Random` (2).
-///   Only relevant with `BestImprovement`. `Random` uses `seed`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct FfiGreedyDescentConfig {
-    pub selection: FfiSelectionStrategy,
-    pub tie_breaking: FfiTieBreaking,
-    /// RNG seed (used for random tie-breaking).
-    pub seed: u64,
-}
-
-// ----------------------------------------------------------------
-// Operator configuration
-// ----------------------------------------------------------------
-
-/// Compound operator selection strategy.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FfiCompoundStrategy {
-    RoundRobin = 0,
-    Random = 1,
-    MultiArmedBandit = 2,
-}
-
-/// Flat configuration for the compound operator, passed by value.
-///
-/// Set the `use_*` fields to non-zero to enable the corresponding
-/// operator. At least one operator must be enabled.
-///
-/// * `seed` — used by the `Random` compound strategy.
-/// * `bandit_memory_coeff` / `bandit_exploration_coeff` — used only
-///   with `MultiArmedBandit`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct FfiOperatorConfig {
-    pub strategy: FfiCompoundStrategy,
-    pub use_intra_berth_swap: i32,
-    pub use_inter_berth_swap: i32,
-    pub use_intra_berth_shift: i32,
-    pub use_inter_berth_shift: i32,
-    pub seed: u64,
-    pub bandit_memory_coeff: f64,
-    pub bandit_exploration_coeff: f64,
-}
-
-// ----------------------------------------------------------------
-// Monitor configuration
-// ----------------------------------------------------------------
-
-/// Flat configuration for termination conditions, passed by value.
-///
-/// Set a limit field to a positive value to enable that condition.
-/// A value of `0` disables it. At least one condition should be
-/// enabled, otherwise the search will never terminate.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct FfiMonitorConfig {
-    /// Maximum wall-clock time in milliseconds.
-    pub time_limit_millis: u64,
-    /// Maximum number of iterations.
-    pub iteration_limit: u64,
-    /// Maximum number of accepted solutions.
-    pub solution_limit: u64,
-    /// Maximum number of cycles.
-    pub cycle_limit: u64,
-    /// Stop after this many iterations without improvement.
-    pub no_improvement_iterations: u64,
-    /// Stop after this many cycles without improvement.
-    pub no_improvement_cycles: u64,
-    /// Stop after this many milliseconds without improvement.
-    pub no_improvement_time_millis: u64,
-}
+use crate::ffils::exec::FfiTerminationReason;
+use crate::ffils::outcome::FfiLocalSearchOutcome;
+use crate::ffils::params::{
+    FfiCompoundStrategy, FfiCoolingSchedule, FfiCoolingTrigger, FfiExhaustionOutcome,
+    FfiGreedyDescentConfig, FfiGuidedLocalSearchConfig, FfiMetaheuristic, FfiMonitorConfig,
+    FfiOperatorConfig, FfiPenalizationTrigger, FfiSelectionStrategy, FfiSimulatedAnnealingConfig,
+    FfiTabuSearchConfig, FfiTieBreaking,
+};
+use crate::ffils::stats::FfiLocalSearchStatistics;
 
 // ----------------------------------------------------------------
 // Callback types
@@ -645,6 +242,11 @@ fn build_monitor(cfg: &FfiMonitorConfig) -> CompositeLocalSearchMonitor<'static,
 /// engine. Every exported `talos_engine_run_*` function builds the
 /// concrete metaheuristic and then delegates here.
 ///
+/// Dispatches on `evaluator` (custom vs. built-in) and
+/// `op_config.strategy` (Round-Robin / Random / Multi-Armed Bandit)
+/// via `dispatch_operator` and `execute`, producing fully
+/// monomorphised, branchless code paths for each combination.
+///
 /// # Safety
 ///
 /// All pointer arguments must be valid and live for the duration of the
@@ -692,79 +294,184 @@ unsafe fn run_inner<H: Metaheuristic<i64>>(
 
     // Branch on evaluator once, outside the hot loop, to produce two
     // fully monomorphised, branchless code-paths.
-    macro_rules! run_with_eval {
-        ($eval:expr) => {{
-            let eval = $eval;
-            let cb = move |view: SolutionView<'_, i64>| unsafe {
-                let view_ptr: *const SolutionView<'static, i64> = std::ptr::from_ref(&view).cast();
-                callback(view_ptr, user_data);
-            };
-
-            macro_rules! run_with {
-                ($op_expr:expr) => {{
-                    let mut concrete_op = $op_expr;
-                    match LocalSearchParams::new(
-                        model,
-                        &mut concrete_op,
-                        meta,
-                        monitor,
-                        berths,
-                        start_times,
-                        objective_value,
-                    ) {
-                        Ok(params) => engine.run(params.into(), eval, cb),
-                        Err(e) => {
-                            panic!("called `run_inner`: LocalSearchParams validation failed: {e}")
-                        }
-                    }
-                }};
-            }
-
-            match op_config.strategy {
-                FfiCompoundStrategy::Random => {
-                    run_with!(RandomCompoundOperator::new(
-                        operators,
-                        StdRng::seed_from_u64(op_config.seed)
-                    ))
-                }
-                FfiCompoundStrategy::RoundRobin => {
-                    run_with!(RoundRobinCompoundOperator::new(operators))
-                }
-                FfiCompoundStrategy::MultiArmedBandit => {
-                    run_with!(MultiArmedBanditCompoundOperator::new(
-                        operators,
-                        op_config.bandit_memory_coeff,
-                        op_config.bandit_exploration_coeff
-                    ))
-                }
-            }
-        }};
-    }
-
     let model_ptr = model as *const Model<i64>;
-    let outcome = match evaluator {
-        Some(f) => run_with_eval!(move |_m: &Model<i64>,
-                                        v: VesselIndex,
-                                        b: BerthIndex,
-                                        t: i64|
-              -> Option<i64> {
-            let result = unsafe { f(model_ptr, v.get(), b.get(), t) };
-            if result < 0 { None } else { Some(result) }
-        }),
-        None => run_with_eval!(move |m: &Model<i64>,
-                                     v: VesselIndex,
-                                     b: BerthIndex,
-                                     t: i64|
-              -> Option<i64> {
-            unsafe { calculate_weighted_turnaround_time_unchecked(m, v, b, t) }
-        }),
+    match evaluator {
+        Some(f) => {
+            let eval =
+                move |_m: &Model<i64>, v: VesselIndex, b: BerthIndex, t: i64| -> Option<i64> {
+                    let result = unsafe { f(model_ptr, v.get(), b.get(), t) };
+                    if result < 0 { None } else { Some(result) }
+                };
+            dispatch_operator(
+                engine,
+                model,
+                meta,
+                monitor,
+                operators,
+                op_config,
+                berths,
+                start_times,
+                objective_value,
+                eval,
+                callback,
+                user_data,
+            )
+        }
+        None => {
+            let eval =
+                move |m: &Model<i64>, v: VesselIndex, b: BerthIndex, t: i64| -> Option<i64> {
+                    unsafe { calculate_weighted_turnaround_time_unchecked(m, v, b, t) }
+                };
+            dispatch_operator(
+                engine,
+                model,
+                meta,
+                monitor,
+                operators,
+                op_config,
+                berths,
+                start_times,
+                objective_value,
+                eval,
+                callback,
+                user_data,
+            )
+        }
+    }
+}
+
+/// Dispatches on the compound operator strategy, instantiating the
+/// concrete compound operator type and forwarding to [`execute`].
+///
+/// Generic over `H` (metaheuristic) and `F` (evaluator) so that each
+/// call site is fully monomorphised — no trait-object indirection for
+/// the compound operator or the evaluator.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_operator<H, F>(
+    engine: &mut Engine<i64>,
+    model: &Model<i64>,
+    meta: &mut H,
+    monitor: CompositeLocalSearchMonitor<'static, i64>,
+    operators: Vec<Box<dyn LocalSearchOperator<i64>>>,
+    op_config: &FfiOperatorConfig,
+    berths: &[BerthIndex],
+    start_times: &[i64],
+    objective_value: i64,
+    evaluator: F,
+    callback: FfiNewBestCallbackFn,
+    user_data: *mut c_void,
+) -> FfiLocalSearchOutcome
+where
+    H: Metaheuristic<i64>,
+    F: Fn(&Model<i64>, VesselIndex, BerthIndex, i64) -> Option<i64>,
+{
+    match op_config.strategy {
+        FfiCompoundStrategy::RoundRobin => {
+            let mut op = RoundRobinCompoundOperator::new(operators);
+            execute(
+                engine,
+                model,
+                meta,
+                monitor,
+                &mut op,
+                berths,
+                start_times,
+                objective_value,
+                evaluator,
+                callback,
+                user_data,
+            )
+        }
+        FfiCompoundStrategy::Random => {
+            let mut op =
+                RandomCompoundOperator::new(operators, StdRng::seed_from_u64(op_config.seed));
+            execute(
+                engine,
+                model,
+                meta,
+                monitor,
+                &mut op,
+                berths,
+                start_times,
+                objective_value,
+                evaluator,
+                callback,
+                user_data,
+            )
+        }
+        FfiCompoundStrategy::MultiArmedBandit => {
+            let mut op = MultiArmedBanditCompoundOperator::new(
+                operators,
+                op_config.bandit_memory_coeff,
+                op_config.bandit_exploration_coeff,
+            );
+            execute(
+                engine,
+                model,
+                meta,
+                monitor,
+                &mut op,
+                berths,
+                start_times,
+                objective_value,
+                evaluator,
+                callback,
+                user_data,
+            )
+        }
+    }
+}
+
+/// Fully-monomorphised engine execution core.
+///
+/// All type parameters (`H`, `O`, `F`) are concrete at each call site,
+/// so the compiler generates a dedicated, branchless code-path for every
+/// (metaheuristic × compound-operator × evaluator) combination.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn execute<H, O, F>(
+    engine: &mut Engine<i64>,
+    model: &Model<i64>,
+    meta: &mut H,
+    monitor: CompositeLocalSearchMonitor<'static, i64>,
+    operator: &mut O,
+    berths: &[BerthIndex],
+    start_times: &[i64],
+    objective_value: i64,
+    evaluator: F,
+    callback: FfiNewBestCallbackFn,
+    user_data: *mut c_void,
+) -> FfiLocalSearchOutcome
+where
+    H: Metaheuristic<i64>,
+    O: LocalSearchOperator<i64>,
+    F: Fn(&Model<i64>, VesselIndex, BerthIndex, i64) -> Option<i64>,
+{
+    let cb = move |view: SolutionView<'_, i64>| unsafe {
+        let view_ptr: *const SolutionView<'static, i64> = std::ptr::from_ref(&view).cast();
+        callback(view_ptr, user_data);
     };
 
-    let (solution, reason, stats) = outcome.into_inner();
-    FfiLocalSearchOutcome {
-        solution: Box::into_raw(Box::new(solution)),
-        termination_reason: FfiTerminationReason::from(reason),
-        stats: FfiLocalSearchStatistics::from(&stats),
+    match LocalSearchParams::new(
+        model,
+        operator,
+        meta,
+        monitor,
+        berths,
+        start_times,
+        objective_value,
+    ) {
+        Ok(params) => {
+            let outcome = engine.run(params.into(), evaluator, cb);
+            let (solution, reason, stats) = outcome.into_inner();
+            FfiLocalSearchOutcome {
+                solution: Box::into_raw(Box::new(solution)),
+                termination_reason: FfiTerminationReason::from(reason),
+                stats: FfiLocalSearchStatistics::from(&stats),
+            }
+        }
+        Err(e) => panic!("called `run_inner`: LocalSearchParams validation failed: {e}"),
     }
 }
 
@@ -795,13 +502,18 @@ pub unsafe extern "C" fn talos_engine_run_tabu(
     let selection = config.selection.into_inner();
     let exhaustion = config.exhaustion_outcome.into_inner();
 
-    // Dispatch on tenure × tie-breaking to get the concrete type.
-    macro_rules! build_and_run_tabu {
-        ($tenure:expr, $tie:expr) => {{
-            let mut ts = TabuSearch::new($tenure, config.num_vessels, config.num_berths)
-                .with_tie_breaking($tie)
-                .with_selection(selection)
-                .with_exhaustion_outcome(exhaustion);
+    let random_tenure = config.tenure_max > config.tenure_min;
+
+    match (random_tenure, config.tie_breaking) {
+        (false, FfiTieBreaking::KeepFirst) => {
+            let mut ts = TabuSearch::new(
+                FixedTenure::new(config.tenure_min),
+                config.num_vessels,
+                config.num_berths,
+            )
+            .with_tie_breaking(KeepFirst)
+            .with_selection(selection)
+            .with_exhaustion_outcome(exhaustion);
             unsafe {
                 run_inner(
                     engine,
@@ -815,55 +527,137 @@ pub unsafe extern "C" fn talos_engine_run_tabu(
                     user_data,
                 )
             }
-        }};
-    }
-
-    let random_tenure = config.tenure_max > config.tenure_min;
-
-    match (random_tenure, config.tie_breaking) {
-        (false, FfiTieBreaking::KeepFirst) => {
-            build_and_run_tabu!(FixedTenure::new(config.tenure_min), KeepFirst)
         }
         (false, FfiTieBreaking::KeepLast) => {
-            build_and_run_tabu!(FixedTenure::new(config.tenure_min), KeepLast)
+            let mut ts = TabuSearch::new(
+                FixedTenure::new(config.tenure_min),
+                config.num_vessels,
+                config.num_berths,
+            )
+            .with_tie_breaking(KeepLast)
+            .with_selection(selection)
+            .with_exhaustion_outcome(exhaustion);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut ts,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
         (false, FfiTieBreaking::Random) => {
-            build_and_run_tabu!(
+            let mut ts = TabuSearch::new(
                 FixedTenure::new(config.tenure_min),
-                RandomTieBreak::new(StdRng::seed_from_u64(config.seed))
+                config.num_vessels,
+                config.num_berths,
             )
+            .with_tie_breaking(RandomTieBreak::new(StdRng::seed_from_u64(config.seed)))
+            .with_selection(selection)
+            .with_exhaustion_outcome(exhaustion);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut ts,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
         (true, FfiTieBreaking::KeepFirst) => {
-            build_and_run_tabu!(
+            let mut ts = TabuSearch::new(
                 RandomTenure::new(
                     config.tenure_min,
                     config.tenure_max,
-                    StdRng::seed_from_u64(config.seed)
+                    StdRng::seed_from_u64(config.seed),
                 ),
-                KeepFirst
+                config.num_vessels,
+                config.num_berths,
             )
+            .with_tie_breaking(KeepFirst)
+            .with_selection(selection)
+            .with_exhaustion_outcome(exhaustion);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut ts,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
         (true, FfiTieBreaking::KeepLast) => {
-            build_and_run_tabu!(
+            let mut ts = TabuSearch::new(
                 RandomTenure::new(
                     config.tenure_min,
                     config.tenure_max,
-                    StdRng::seed_from_u64(config.seed)
+                    StdRng::seed_from_u64(config.seed),
                 ),
-                KeepLast
+                config.num_vessels,
+                config.num_berths,
             )
+            .with_tie_breaking(KeepLast)
+            .with_selection(selection)
+            .with_exhaustion_outcome(exhaustion);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut ts,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
         (true, FfiTieBreaking::Random) => {
             // Use different seeds to avoid correlation between tenure RNG
             // and tie-breaking RNG.
-            build_and_run_tabu!(
+            let mut ts = TabuSearch::new(
                 RandomTenure::new(
                     config.tenure_min,
                     config.tenure_max,
-                    StdRng::seed_from_u64(config.seed)
+                    StdRng::seed_from_u64(config.seed),
                 ),
-                RandomTieBreak::new(StdRng::seed_from_u64(config.seed.wrapping_add(1)))
+                config.num_vessels,
+                config.num_berths,
             )
+            .with_tie_breaking(RandomTieBreak::new(StdRng::seed_from_u64(
+                config.seed.wrapping_add(1),
+            )))
+            .with_selection(selection)
+            .with_exhaustion_outcome(exhaustion);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut ts,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
     }
 }
@@ -912,9 +706,16 @@ pub unsafe extern "C" fn talos_engine_run_sa(
     callback: FfiNewBestCallbackFn,
     user_data: *mut c_void,
 ) -> FfiLocalSearchOutcome {
-    macro_rules! sa_run {
-        ($sa:expr) => {{
-            let mut sa = $sa;
+    let rng = StdRng::seed_from_u64(config.seed);
+
+    match config.schedule {
+        FfiCoolingSchedule::Geometric => {
+            let cooling = GeometricCooling::new(
+                config.initial_temperature,
+                config.alpha,
+                config.min_temperature,
+            );
+            let mut sa = apply_sa_options(SimulatedAnnealing::new(cooling, rng), &config);
             unsafe {
                 run_inner(
                     engine,
@@ -928,22 +729,6 @@ pub unsafe extern "C" fn talos_engine_run_sa(
                     user_data,
                 )
             }
-        }};
-    }
-
-    let rng = StdRng::seed_from_u64(config.seed);
-
-    match config.schedule {
-        FfiCoolingSchedule::Geometric => {
-            let cooling = GeometricCooling::new(
-                config.initial_temperature,
-                config.alpha,
-                config.min_temperature,
-            );
-            sa_run!(apply_sa_options(
-                SimulatedAnnealing::new(cooling, rng),
-                &config
-            ))
         }
         FfiCoolingSchedule::GeometricHeuristic => {
             let cooling =
@@ -953,10 +738,20 @@ pub unsafe extern "C" fn talos_engine_run_sa(
                     config.heuristic_sensitivity,
                     config.heuristic_cooling_rate,
                 );
-            sa_run!(apply_sa_options(
-                SimulatedAnnealing::new(cooling, rng),
-                &config
-            ))
+            let mut sa = apply_sa_options(SimulatedAnnealing::new(cooling, rng), &config);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut sa,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
         FfiCoolingSchedule::Linear => {
             let cooling = LinearCooling::new(
@@ -964,10 +759,20 @@ pub unsafe extern "C" fn talos_engine_run_sa(
                 config.linear_decrement,
                 config.min_temperature,
             );
-            sa_run!(apply_sa_options(
-                SimulatedAnnealing::new(cooling, rng),
-                &config
-            ))
+            let mut sa = apply_sa_options(SimulatedAnnealing::new(cooling, rng), &config);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut sa,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
         FfiCoolingSchedule::LinearBudget => {
             let cooling = LinearCooling::from_budget(
@@ -975,10 +780,20 @@ pub unsafe extern "C" fn talos_engine_run_sa(
                 config.min_temperature,
                 config.linear_budget_iterations,
             );
-            sa_run!(apply_sa_options(
-                SimulatedAnnealing::new(cooling, rng),
-                &config
-            ))
+            let mut sa = apply_sa_options(SimulatedAnnealing::new(cooling, rng), &config);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut sa,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
         FfiCoolingSchedule::Logarithmic => {
             let cooling = LogarithmicCooling::new(
@@ -986,10 +801,20 @@ pub unsafe extern "C" fn talos_engine_run_sa(
                 config.log_k_scale,
                 config.min_temperature,
             );
-            sa_run!(apply_sa_options(
-                SimulatedAnnealing::new(cooling, rng),
-                &config
-            ))
+            let mut sa = apply_sa_options(SimulatedAnnealing::new(cooling, rng), &config);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut sa,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
     }
 }
@@ -1095,11 +920,11 @@ pub unsafe extern "C" fn talos_engine_run_gd(
 ) -> FfiLocalSearchOutcome {
     let selection = config.selection.into_inner();
 
-    macro_rules! build_and_run_gd {
-        ($tie:expr) => {{
+    match config.tie_breaking {
+        FfiTieBreaking::KeepFirst => {
             let mut gd = GreedyDescent::new()
                 .with_selection(selection)
-                .with_tie_breaking($tie);
+                .with_tie_breaking(KeepFirst);
             unsafe {
                 run_inner(
                     engine,
@@ -1113,14 +938,42 @@ pub unsafe extern "C" fn talos_engine_run_gd(
                     user_data,
                 )
             }
-        }};
-    }
-
-    match config.tie_breaking {
-        FfiTieBreaking::KeepFirst => build_and_run_gd!(KeepFirst),
-        FfiTieBreaking::KeepLast => build_and_run_gd!(KeepLast),
+        }
+        FfiTieBreaking::KeepLast => {
+            let mut gd = GreedyDescent::new()
+                .with_selection(selection)
+                .with_tie_breaking(KeepLast);
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut gd,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
+        }
         FfiTieBreaking::Random => {
-            build_and_run_gd!(RandomTieBreak::new(StdRng::seed_from_u64(config.seed)))
+            let mut gd = GreedyDescent::new()
+                .with_selection(selection)
+                .with_tie_breaking(RandomTieBreak::new(StdRng::seed_from_u64(config.seed)));
+            unsafe {
+                run_inner(
+                    engine,
+                    model,
+                    &mut gd,
+                    &op_config,
+                    &mon_config,
+                    initial_solution,
+                    evaluator,
+                    callback,
+                    user_data,
+                )
+            }
         }
     }
 }
@@ -1169,14 +1022,14 @@ pub struct FfiMetaheuristicConfig {
     pub num_vessels: usize,
     pub num_berths: usize,
 
-    // ── Tabu Search ──────────────────────────────────────────
+    // Tabu Search
     pub tabu_tenure_min: u64,
     pub tabu_tenure_max: u64,
     pub tabu_selection: FfiSelectionStrategy,
     pub tabu_tie_breaking: FfiTieBreaking,
     pub tabu_exhaustion_outcome: FfiExhaustionOutcome,
 
-    // ── Simulated Annealing ──────────────────────────────────
+    // Simulated Annealing
     pub sa_schedule: FfiCoolingSchedule,
     pub sa_initial_temperature: f64,
     pub sa_alpha: f64,
@@ -1193,7 +1046,7 @@ pub struct FfiMetaheuristicConfig {
     pub sa_heuristic_sensitivity: f64,
     pub sa_heuristic_cooling_rate: f64,
 
-    // ── Guided Local Search ──────────────────────────────────
+    // Guided Local Search
     pub gls_lambda: f64,
     pub gls_reactive: i32,
     pub gls_penalization_trigger: FfiPenalizationTrigger,
@@ -1203,7 +1056,7 @@ pub struct FfiMetaheuristicConfig {
     pub gls_min_lambda: f64,
     pub gls_max_lambda: f64,
 
-    // ── Greedy Descent ───────────────────────────────────────
+    // Greedy Descent
     pub gd_selection: FfiSelectionStrategy,
     pub gd_tie_breaking: FfiTieBreaking,
 }
@@ -1346,19 +1199,18 @@ pub unsafe extern "C" fn talos_engine_run(
 
 #[cfg(test)]
 mod tests {
-    use std::ptr;
-
     use super::*;
-    use crate::model::talos_model_new;
-    use crate::solution::{talos_solution_free, talos_solution_view_free, talos_solution_view_new};
+    use crate::ffimodel::{
+        model::{FfiClosedOpenIntervalI64, talos_model_free, talos_model_new},
+        solution::{talos_solution_free, talos_solution_view_free, talos_solution_view_new},
+    };
+    use std::ptr;
 
     /// Builds a minimal 2-vessel / 2-berth model via the FFI.
     /// V0: arrival=0, deadline=100, weight=1, p(B0)=5, p(B1)=5
     /// V1: arrival=0, deadline=100, weight=1, p(B0)=10, p(B1)=10
     /// Both berths open [0, 200).
     fn build_test_model() -> *mut Model<i64> {
-        use crate::model::FfiClosedOpenIntervalI64;
-
         let arrivals: [i64; 2] = [0, 0];
         let deadlines: [i64; 2] = [100, 100];
         let weights: [i64; 2] = [1, 1];
@@ -1449,7 +1301,7 @@ mod tests {
             talos_solution_free(outcome.solution);
             talos_solution_view_free(init_sol);
             talos_engine_free(engine);
-            crate::model::talos_model_free(model);
+            talos_model_free(model);
         }
     }
 
@@ -2239,7 +2091,7 @@ mod tests {
             talos_solution_free(outcome.solution);
             talos_solution_view_free(init_sol);
             talos_engine_free(engine);
-            crate::model::talos_model_free(model);
+            talos_model_free(model);
         }
     }
 }

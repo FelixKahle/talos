@@ -19,5 +19,17 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub mod ffils;
-pub mod ffimodel;
+use crate::ffils::{exec::FfiTerminationReason, stats::FfiLocalSearchStatistics};
+use talos_model::solution::Solution;
+
+/// C-compatible result of an engine run.
+///
+/// The `solution` pointer (if non-null) must be freed with
+/// `talos_solution_free`.
+#[repr(C)]
+pub struct FfiLocalSearchOutcome {
+    /// Best solution found.
+    pub solution: *mut Solution<i64>,
+    pub termination_reason: FfiTerminationReason,
+    pub stats: FfiLocalSearchStatistics,
+}
