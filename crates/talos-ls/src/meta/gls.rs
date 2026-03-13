@@ -236,6 +236,8 @@ impl PenalizationStrategy for MaxUtilityPenalization {
                     let c = cost.edge_cost(from, to);
                     if c > 0.0 {
                         let idx = edge_flat_index(from, to, num_vessels);
+                        debug_assert!(idx < memory.edge.len());
+
                         // SAFETY: idx < (num_vessels+1)^2, the edge allocation size.
                         let p = unsafe { *memory.edge.get_unchecked(idx) } as f64;
                         let utility = c / (1.0 + p);
@@ -263,6 +265,7 @@ impl PenalizationStrategy for MaxUtilityPenalization {
             let c = cost.berth_cost(vessel, berth);
             if c > 0.0 {
                 let idx = v * num_berths + berth.get();
+                debug_assert!(idx < memory.berth.len());
                 // SAFETY: idx = v * num_berths + berth < num_vessels * num_berths.
                 let p = unsafe { *memory.berth.get_unchecked(idx) } as f64;
                 let utility = c / (1.0 + p);
@@ -279,6 +282,12 @@ impl PenalizationStrategy for MaxUtilityPenalization {
 
         // Increment penalty for all winning features.
         for &(is_edge, idx) in &self.buf {
+            debug_assert!(if is_edge {
+                idx < memory.edge.len()
+            } else {
+                idx < memory.berth.len()
+            });
+
             // SAFETY: idx was computed from the scan loops above and is within bounds.
             unsafe {
                 if is_edge {
@@ -323,6 +332,16 @@ pub struct PenaltyMemory {
 
 /// Computes the flat index for an edge feature, mapping `None` (sentinel)
 /// to the index `num_vessels`.
+///
+/// The resulting index is guaranteed to be less than
+/// $(\text{num\_vessels} + 1)^2$ — the allocation size of
+/// [`PenaltyMemory::edge`].
+///
+/// # Arguments
+///
+/// * `from` — Source vessel index, or `None` for the berth sentinel.
+/// * `to` — Destination vessel index, or `None` for the berth sentinel.
+/// * `num_vessels` — Total number of vessels in the problem.
 #[inline]
 fn edge_flat_index(
     from: Option<VesselIndex>,
@@ -331,11 +350,23 @@ fn edge_flat_index(
 ) -> usize {
     let a = from.map_or(num_vessels, |v| v.get());
     let b = to.map_or(num_vessels, |v| v.get());
+
+    debug_assert!(a <= num_vessels);
+    debug_assert!(b <= num_vessels);
+
     a * (num_vessels + 1) + b
 }
 
 impl PenaltyMemory {
     /// Creates a new penalty memory for the given problem dimensions.
+    ///
+    /// Allocates two flat arrays:
+    /// - `edge`: $(\text{num\_vessels} + 1)^2$ entries for sequence features
+    ///   (including berth sentinels).
+    /// - `berth`: $\text{num\_vessels} \times \text{num\_berths}$ entries for
+    ///   assignment features.
+    ///
+    /// All counters are initialised to zero.
     #[inline]
     pub fn new(num_vessels: usize, num_berths: usize) -> Self {
         Self {
@@ -366,25 +397,33 @@ impl PenaltyMemory {
     }
 
     /// Returns the penalty count for a given edge feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `from` — The source vessel, or `None` for the berth sentinel.
+    /// * `to` — The destination vessel, or `None` for the berth sentinel.
     #[inline]
     pub fn edge_penalty(&self, from: Option<VesselIndex>, to: Option<VesselIndex>) -> u64 {
+        let idx = edge_flat_index(from, to, self.num_vessels);
+        debug_assert!(idx < self.edge.len());
+
         // SAFETY: edge_flat_index yields < (num_vessels+1)^2, the allocation size.
-        unsafe {
-            *self
-                .edge
-                .get_unchecked(edge_flat_index(from, to, self.num_vessels))
-        }
+        unsafe { *self.edge.get_unchecked(idx) }
     }
 
     /// Returns the penalty count for a given berth-assignment feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `vessel` — The vessel index.
+    /// * `berth` — The berth index.
     #[inline]
     pub fn berth_penalty(&self, vessel: VesselIndex, berth: BerthIndex) -> u64 {
+        let idx = vessel.get() * self.num_berths + berth.get();
+        debug_assert!(idx < self.berth.len());
+
         // SAFETY: vessel < num_vessels and berth < num_berths.
-        unsafe {
-            *self
-                .berth
-                .get_unchecked(vessel.get() * self.num_berths + berth.get())
-        }
+        unsafe { *self.berth.get_unchecked(idx) }
     }
 
     /// Computes the augmented penalty delta for a candidate move described
@@ -393,6 +432,14 @@ impl PenaltyMemory {
     /// The delta is: penalties gained from *created* edges and *new* berth
     /// assignments minus penalties lost from *broken* edges and *old* berth
     /// assignments.
+    ///
+    /// Because a single move typically touches only 2–6 diff entries, this
+    /// runs in $O(|\text{diff}|)$ — far cheaper than recomputing the full
+    /// penalty sum from scratch.
+    ///
+    /// # Arguments
+    ///
+    /// * `diff` — The schedule-graph diff describing the candidate move.
     #[inline]
     pub fn penalty_delta(&self, diff: &ScheduleGraphDiff) -> i64 {
         let mut delta: i64 = 0;
@@ -403,25 +450,35 @@ impl PenaltyMemory {
             // Subtract penalties for broken edges.
             for edge in diff.broken_links() {
                 let idx = edge_flat_index(edge.from, edge.to, self.num_vessels);
+                debug_assert!(idx < self.edge.len());
+
                 delta -= *self.edge.get_unchecked(idx) as i64;
             }
 
             // Add penalties for created edges.
             for edge in diff.created_links() {
                 let idx = edge_flat_index(edge.from, edge.to, self.num_vessels);
+                debug_assert!(idx < self.edge.len());
+
                 delta += *self.edge.get_unchecked(idx) as i64;
             }
 
             // Subtract penalties for old berth assignments, add for new.
             for (vessel, old_berth, new_berth) in diff.reallocations() {
-                delta -= *self
-                    .berth
-                    .get_unchecked(vessel.get() * self.num_berths + old_berth.get())
-                    as i64;
-                delta += *self
-                    .berth
-                    .get_unchecked(vessel.get() * self.num_berths + new_berth.get())
-                    as i64;
+                let old_idx = vessel.get() * self.num_berths + old_berth.get();
+                let new_idx = vessel.get() * self.num_berths + new_berth.get();
+                debug_assert!(
+                    old_idx < self.berth.len(),
+                    "penalty_delta old berth: index {old_idx} out of bounds (len {})",
+                    self.berth.len()
+                );
+                debug_assert!(
+                    new_idx < self.berth.len(),
+                    "penalty_delta new berth: index {new_idx} out of bounds (len {})",
+                    self.berth.len()
+                );
+                delta -= *self.berth.get_unchecked(old_idx) as i64;
+                delta += *self.berth.get_unchecked(new_idx) as i64;
             }
         }
 
@@ -615,12 +672,23 @@ impl LambdaStrategy for ReactiveLambda {
 /// where $|F_0|$ is the number of features present in the initial
 /// solution and $\alpha$ is a scaling factor (typically 0.1–0.5).
 ///
+/// The result is clamped to at least [`f64::EPSILON`] to avoid a
+/// zero penalty weight, which would disable GLS entirely.
+///
 /// # Arguments
 ///
 /// * `objective` — The initial solution's objective value.
 /// * `num_features` — The number of features in the initial solution
-///   (e.g., `num_vessels + num_edges`).
+///   (e.g., `num_vessels + num_edges`). Clamped to at least 1.
 /// * `alpha` — Scaling factor (e.g., 0.3).
+///
+/// # Examples
+///
+/// ```
+/// # use talos_ls::meta::gls::heuristic_lambda;
+/// let lambda = heuristic_lambda(1000.0, 50, 0.3);
+/// assert!((lambda - 6.0).abs() < f64::EPSILON);
+/// ```
 #[inline]
 pub fn heuristic_lambda(objective: f64, num_features: usize, alpha: f64) -> f64 {
     let nf = num_features.max(1) as f64;
@@ -846,6 +914,11 @@ where
 
     /// Computes the full penalty sum for the current solution by scanning
     /// the schedule graph.
+    ///
+    /// This traverses every berth chain and every vessel assignment,
+    /// summing up the corresponding penalty counters. Used to bootstrap
+    /// the cached `current_penalty_sum` after a penalization step or at
+    /// search start.
     fn compute_penalty_sum(&self, graph: &ScheduleGraph) -> i64 {
         let num_vessels = graph.num_vessels();
         let num_berths = graph.num_berths();
@@ -870,6 +943,8 @@ where
                 };
                 if from.is_some() || to.is_some() {
                     let idx = edge_flat_index(from, to, num_vessels);
+                    debug_assert!(idx < self.memory.edge.len());
+
                     // SAFETY: idx < (num_vessels+1)^2, the edge allocation size.
                     sum += unsafe { *self.memory.edge.get_unchecked(idx) } as i64;
                 }
@@ -884,13 +959,11 @@ where
         for v in 0..num_vessels {
             let vessel = VesselIndex::new(v);
             let berth = graph.vessel_berth(vessel);
+            let idx = v * num_berths + berth.get();
+            debug_assert!(idx < self.memory.berth.len());
+
             // SAFETY: v < num_vessels and berth < num_berths.
-            sum += unsafe {
-                *self
-                    .memory
-                    .berth
-                    .get_unchecked(v * num_berths + berth.get())
-            } as i64;
+            sum += unsafe { *self.memory.berth.get_unchecked(idx) } as i64;
         }
 
         sum
@@ -898,6 +971,12 @@ where
 
     /// Applies the penalization strategy, notifies the lambda strategy,
     /// and recomputes the cached penalty sum.
+    ///
+    /// This is the core "kick" step of GLS: after identifying and
+    /// incrementing penalties for the highest-utility features, the
+    /// lambda strategy is notified (so reactive variants can adjust
+    /// the weight), and the cached penalty sum is fully recomputed
+    /// to stay consistent.
     fn penalize_and_recompute(&mut self, graph: &ScheduleGraph) {
         self.penalization
             .penalize(&mut self.memory, graph, &self.feature_cost);

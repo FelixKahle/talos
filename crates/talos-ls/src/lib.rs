@@ -26,7 +26,6 @@ pub mod exec;
 pub mod meta;
 pub mod monitor;
 pub mod mutator;
-pub mod neighborhood;
 pub mod operator;
 pub mod outcome;
 pub mod params;

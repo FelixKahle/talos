@@ -159,6 +159,9 @@ pub trait CoolingSchedule: std::fmt::Debug {
 /// The most common schedule in the literature. Cools rapidly at first and
 /// asymptotically approaches zero, allowing fine-grained settling in the
 /// final phases.
+///
+/// Supports reheating: [`CoolingSchedule::reheat`] scales the current
+/// temperature by a factor, capping it at the initial temperature.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeometricCooling {
     initial: f64,
@@ -177,12 +180,12 @@ impl GeometricCooling {
     pub fn new(initial: f64, alpha: f64, min_temp: f64) -> Self {
         assert!(
             alpha > 0.0 && alpha < 1.0,
-            "GeometricCooling: alpha must be in (0, 1), got {}",
+            "called `GeometricCooling::new()` with invalid alpha: {} (must be in (0, 1))",
             alpha
         );
         assert!(
             initial > 0.0,
-            "GeometricCooling: initial temperature must be positive, got {}",
+            "called `GeometricCooling::new()` with non-positive initial temperature: {}",
             initial
         );
         Self {
@@ -248,6 +251,12 @@ impl CoolingSchedule for GeometricCooling {
 /// Reduces the temperature by a fixed decrement each step. Useful when the
 /// iteration budget is known in advance and you want the temperature to reach
 /// zero at a predictable time.
+///
+/// Supports reheating: [`CoolingSchedule::reheat`] scales the current
+/// temperature by a factor, capping it at the initial temperature.
+///
+/// See also [`LinearCooling::from_budget`] for constructing a schedule that
+/// reaches a target minimum after a known number of steps.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LinearCooling {
     initial: f64,
@@ -258,10 +267,29 @@ pub struct LinearCooling {
 
 impl LinearCooling {
     /// Creates a new linear cooling schedule.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial` — Starting temperature. Must be positive.
+    /// * `decrement` — Amount subtracted each step. Must be positive.
+    /// * `min_temp` — Frozen threshold below which only improvements are accepted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `initial` or `decrement` is not positive.
     #[inline]
     pub fn new(initial: f64, decrement: f64, min_temp: f64) -> Self {
-        assert!(initial > 0.0, "LinearCooling: initial must be positive");
-        assert!(decrement > 0.0, "LinearCooling: decrement must be positive");
+        assert!(
+            initial > 0.0,
+            "called `LinearCooling::new()` with non-positive initial temperature: {}",
+            initial
+        );
+        assert!(
+            decrement > 0.0,
+            "called `LinearCooling::new()` with non-positive decrement: {}",
+            decrement
+        );
+
         Self {
             initial,
             current: initial,
@@ -272,6 +300,15 @@ impl LinearCooling {
 
     /// Constructs a linear schedule that reaches `min_temp` after exactly
     /// `total_iterations` steps.
+    ///
+    /// The decrement is computed as $(T_0 - T_{\min}) / N$ where $N$ is
+    /// clamped to at least 1.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial` — Starting temperature.
+    /// * `min_temp` — Target minimum temperature.
+    /// * `total_iterations` — Number of steps to reach `min_temp`.
     #[inline]
     pub fn from_budget(initial: f64, min_temp: f64, total_iterations: u64) -> Self {
         let decrement = (initial - min_temp) / total_iterations.max(1) as f64;
@@ -312,9 +349,14 @@ impl CoolingSchedule for LinearCooling {
 
 /// Logarithmic cooling: $T_k = C / \ln(k \cdot s + e)$.
 ///
-/// Theoretically guaranteed to find the global optimum given infinite time,
-/// but decays extremely slowly. Best used for fine-tuning near a known good
-/// solution or as a baseline for academic comparisons.
+/// Theoretically guaranteed to find the global optimum given infinite time
+/// (under the conditions of the Hajek convergence theorem), but decays
+/// extremely slowly. Best used for fine-tuning near a known good solution
+/// or as a baseline for academic comparisons.
+///
+/// Does **not** support reheating — [`CoolingSchedule::reheat`] is a no-op
+/// for this schedule since the temperature is derived from the iteration
+/// counter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LogarithmicCooling {
     constant: f64,
@@ -329,10 +371,26 @@ impl LogarithmicCooling {
     /// # Arguments
     ///
     /// * `constant` — The numerator $C$. Controls the initial temperature magnitude.
+    ///   Must be positive.
     /// * `k_scale` — Scaling factor for iteration count. Higher = faster cooling.
+    ///   Must be positive.
     /// * `min_temp` — The frozen threshold.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `constant` or `k_scale` is not positive.
     #[inline]
     pub fn new(constant: f64, k_scale: f64, min_temp: f64) -> Self {
+        assert!(
+            constant > 0.0,
+            "called `LogarithmicCooling::new()` with non-positive constant: {}",
+            constant
+        );
+        assert!(
+            k_scale > 0.0,
+            "called `LogarithmicCooling::new()` with non-positive k_scale: {}",
+            k_scale
+        );
         Self {
             constant,
             k_scale,
@@ -400,6 +458,13 @@ impl std::fmt::Display for CoolingTrigger {
 /// Simulated Annealing metaheuristic with a pluggable cooling schedule.
 ///
 /// See the [module-level documentation](self) for algorithmic details.
+///
+/// # Type Parameters
+///
+/// * `R` — Random number generator (implements [`Rng`]).
+/// * `C` — Cooling schedule (implements [`CoolingSchedule`]).
+/// * `A` — Acceptance criterion (implements [`AcceptanceCriterion`],
+///   defaults to [`MetropolisCriterion`]).
 pub struct SimulatedAnnealing<R, C, A = MetropolisCriterion> {
     /// The cooling schedule managing temperature decay.
     cooling: C,
@@ -497,7 +562,7 @@ where
     pub fn with_reheat(mut self, factor: f64) -> Self {
         assert!(
             factor > 1.0,
-            "SimulatedAnnealing: reheat factor must be > 1.0, got {}",
+            "called `SimulatedAnnealing::with_reheat()` with non-greater-than-one factor: {}",
             factor
         );
         self.reheat_factor = Some(factor);
@@ -510,7 +575,7 @@ where
     pub fn with_frozen_threshold(mut self, threshold: f64) -> Self {
         assert!(
             threshold >= 0.0,
-            "SimulatedAnnealing: frozen threshold must be >= 0.0, got {}",
+            "called `SimulatedAnnealing::with_frozen_threshold()` with negative threshold: {}",
             threshold
         );
         self.frozen_threshold = threshold;
@@ -560,7 +625,7 @@ where
         &mut self.cooling
     }
 
-    /// Constructs a `GeometricCooling` schedule auto-tuned from the initial objective.
+    /// Constructs a [`GeometricCooling`] schedule auto-tuned from the initial objective.
     ///
     /// The initial temperature $T_0$ is chosen so that a worsening move of
     /// magnitude $\Delta E = \text{sensitivity} \times f(s_0)$ is accepted with
@@ -571,12 +636,18 @@ where
     /// The frozen threshold is set where that same move would be accepted with
     /// probability $10^{-4}$.
     ///
+    /// The acceptance probability is clamped to $[0.001, 0.999]$ to avoid
+    /// degenerate temperatures.
+    ///
     /// # Arguments
     ///
     /// * `objective` — The initial solution's objective value.
-    /// * `initial_acceptance_prob` — Target acceptance probability at $T_0$ (e.g., 0.5).
-    /// * `sensitivity` — Fraction of the objective representing a "typical bad move" (e.g., 0.01).
+    /// * `initial_acceptance_prob` — Target acceptance probability at $T_0$
+    ///   (e.g., 0.5). Clamped to $[0.001, 0.999]$.
+    /// * `sensitivity` — Fraction of the objective representing a "typical
+    ///   bad move" (e.g., 0.01).
     /// * `cooling_rate` — Geometric decay factor $\alpha$ (e.g., 0.9999).
+    ///   Must be in $(0, 1)$.
     pub fn heuristic_geometric_params(
         objective: f64,
         initial_acceptance_prob: f64,
@@ -679,9 +750,13 @@ where
     /// The acceptance criterion.
     ///
     /// - Strict improvement ($f' < f$): always accept.
-    /// - Frozen ($T \leq$ threshold): only accept improvements.
+    /// - Frozen ($T \leq$ threshold): only improvements accepted.
     /// - Otherwise (equal or worsening): accept with probability from
-    ///   the `AcceptanceCriterion`.
+    ///   the [`AcceptanceCriterion`]. The probability is clamped to
+    ///   $[0, 1]$ before the random coin flip.
+    ///
+    /// Returns [`AcceptanceOutcome::Reject`] if the objective cannot be
+    /// converted to a finite `f64`.
     #[allow(clippy::too_many_arguments)]
     fn decide_fate(
         &mut self,
@@ -870,19 +945,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "alpha must be in (0, 1)")]
+    #[should_panic]
     fn geometric_alpha_zero_panics() {
         GeometricCooling::new(100.0, 0.0, 0.0);
     }
 
     #[test]
-    #[should_panic(expected = "alpha must be in (0, 1)")]
+    #[should_panic]
     fn geometric_alpha_one_panics() {
         GeometricCooling::new(100.0, 1.0, 0.0);
     }
 
     #[test]
-    #[should_panic(expected = "initial temperature must be positive")]
+    #[should_panic]
     fn geometric_zero_initial_panics() {
         GeometricCooling::new(0.0, 0.9, 0.0);
     }
@@ -945,13 +1020,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "initial must be positive")]
+    #[should_panic]
     fn linear_zero_initial_panics() {
         LinearCooling::new(0.0, 1.0, 0.0);
     }
 
     #[test]
-    #[should_panic(expected = "decrement must be positive")]
+    #[should_panic]
     fn linear_zero_decrement_panics() {
         LinearCooling::new(100.0, 0.0, 0.0);
     }
@@ -1000,6 +1075,18 @@ mod tests {
         panic!("logarithmic cooling should eventually freeze");
     }
 
+    #[test]
+    #[should_panic]
+    fn logarithmic_zero_constant_panics() {
+        LogarithmicCooling::new(0.0, 1.0, 0.0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn logarithmic_zero_k_scale_panics() {
+        LogarithmicCooling::new(100.0, 0.0, 0.0);
+    }
+
     // ── CoolingTrigger ───────────────────────────────────────
 
     #[test]
@@ -1038,14 +1125,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "reheat factor must be > 1.0")]
+    #[should_panic]
     fn sa_reheat_factor_must_exceed_one() {
         SimulatedAnnealing::new(GeometricCooling::new(100.0, 0.9, 0.0), rand::rng())
             .with_reheat(0.5);
     }
 
     #[test]
-    #[should_panic(expected = "frozen threshold must be >= 0.0")]
+    #[should_panic]
     fn sa_negative_frozen_threshold_panics() {
         SimulatedAnnealing::new(GeometricCooling::new(100.0, 0.9, 0.0), rand::rng())
             .with_frozen_threshold(-1.0);

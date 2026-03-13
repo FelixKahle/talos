@@ -47,10 +47,13 @@ pub unsafe extern "C" fn talos_solution_new(
     start_times_ptr: *const i64,
     objective_value: i64,
 ) -> *mut Solution<i64> {
-    assert!(!berths_ptr.is_null(), "berths_ptr must not be null");
+    assert!(
+        !berths_ptr.is_null(),
+        "called `talos_solution_new` with `berths_ptr` as `null`"
+    );
     assert!(
         !start_times_ptr.is_null(),
-        "start_times_ptr must not be null"
+        "called `talos_solution_new` with `start_times_ptr` as `null`"
     );
 
     let raw_berths = unsafe { slice::from_raw_parts(berths_ptr, num_vessels) };
@@ -72,7 +75,10 @@ pub unsafe extern "C" fn talos_solution_new(
 /// * The pointer must not be freed more than once (no double-free).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_solution_free(solution_ptr: *mut Solution<i64>) {
-    assert!(!solution_ptr.is_null(), "solution_ptr must not be null");
+    assert!(
+        !solution_ptr.is_null(),
+        "called `talos_solution_free` with `solution_ptr` as `null`"
+    );
     drop(unsafe { Box::from_raw(solution_ptr) });
 }
 
@@ -87,7 +93,10 @@ pub unsafe extern "C" fn talos_solution_free(solution_ptr: *mut Solution<i64>) {
 /// * `solution_ptr` must be a valid pointer to a `Solution<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_solution_num_vessels(solution_ptr: *const Solution<i64>) -> usize {
-    assert!(!solution_ptr.is_null(), "solution_ptr must not be null");
+    assert!(
+        !solution_ptr.is_null(),
+        "called `talos_solution_num_vessels` with `solution_ptr` as `null`"
+    );
     unsafe { (*solution_ptr).num_vessels() }
 }
 
@@ -98,7 +107,10 @@ pub unsafe extern "C" fn talos_solution_num_vessels(solution_ptr: *const Solutio
 /// * `solution_ptr` must be a valid pointer to a `Solution<i64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_solution_objective_value(solution_ptr: *const Solution<i64>) -> i64 {
-    assert!(!solution_ptr.is_null(), "solution_ptr must not be null");
+    assert!(
+        !solution_ptr.is_null(),
+        "called `talos_solution_objective_value` with `solution_ptr` as `null`"
+    );
     unsafe { (*solution_ptr).objective_value() }
 }
 
@@ -113,7 +125,10 @@ pub unsafe extern "C" fn talos_solution_set_objective_value(
     solution_ptr: *mut Solution<i64>,
     value: i64,
 ) {
-    assert!(!solution_ptr.is_null(), "solution_ptr must not be null");
+    assert!(
+        !solution_ptr.is_null(),
+        "called `talos_solution_set_objective_value` with `solution_ptr` as `null`"
+    );
     unsafe { (*solution_ptr).set_objective_value(value) }
 }
 
@@ -131,7 +146,10 @@ pub unsafe extern "C" fn talos_solution_set_objective_value(
 pub unsafe extern "C" fn talos_solution_berths_ptr(
     solution_ptr: *const Solution<i64>,
 ) -> *const usize {
-    assert!(!solution_ptr.is_null(), "solution_ptr must not be null");
+    assert!(
+        !solution_ptr.is_null(),
+        "called `talos_solution_berths_ptr` with `solution_ptr` as `null`"
+    );
     // Safe cast: BerthIndex is #[repr(transparent)] over usize
     unsafe { (*solution_ptr).berths().as_ptr() as *const usize }
 }
@@ -147,7 +165,10 @@ pub unsafe extern "C" fn talos_solution_berths_ptr(
 pub unsafe extern "C" fn talos_solution_start_times_ptr(
     solution_ptr: *const Solution<i64>,
 ) -> *const i64 {
-    assert!(!solution_ptr.is_null(), "solution_ptr must not be null");
+    assert!(
+        !solution_ptr.is_null(),
+        "called `talos_solution_start_times_ptr` with `solution_ptr` as `null`"
+    );
     unsafe { (*solution_ptr).start_times().as_ptr() }
 }
 
@@ -161,11 +182,15 @@ pub unsafe extern "C" fn talos_solution_berth_for_vessel(
     solution_ptr: *const Solution<i64>,
     vessel_index: usize,
 ) -> usize {
-    assert!(!solution_ptr.is_null(), "solution_ptr must not be null");
+    assert!(
+        !solution_ptr.is_null(),
+        "called `talos_solution_berth_for_vessel` with `solution_ptr` as `null`"
+    );
     let sol = unsafe { &*solution_ptr };
     assert!(
         vessel_index < sol.num_vessels(),
-        "vessel_index out of bounds"
+        "called `talos_solution_berth_for_vessel` with out-of-bounds vessel_index: {}",
+        vessel_index
     );
     sol.berth_for_vessel(talos_model::index::VesselIndex::new(vessel_index))
         .get()
@@ -181,11 +206,15 @@ pub unsafe extern "C" fn talos_solution_start_time_for_vessel(
     solution_ptr: *const Solution<i64>,
     vessel_index: usize,
 ) -> i64 {
-    assert!(!solution_ptr.is_null(), "solution_ptr must not be null");
+    assert!(
+        !solution_ptr.is_null(),
+        "called `talos_solution_start_time_for_vessel` with `solution_ptr` as `null`"
+    );
     let sol = unsafe { &*solution_ptr };
     assert!(
         vessel_index < sol.num_vessels(),
-        "vessel_index out of bounds"
+        "called `talos_solution_start_time_for_vessel` with out-of-bounds vessel_index: {}",
+        vessel_index
     );
     *sol.start_time_for_vessel(talos_model::index::VesselIndex::new(vessel_index))
 }
@@ -215,10 +244,13 @@ pub unsafe extern "C" fn talos_solution_view_new(
     start_times_ptr: *const i64,
     objective_value: i64,
 ) -> *mut SolutionView<'static, i64> {
-    assert!(!berths_ptr.is_null(), "berths_ptr must not be null");
+    assert!(
+        !berths_ptr.is_null(),
+        "called `talos_solution_view_new` with `berths_ptr` as `null`"
+    );
     assert!(
         !start_times_ptr.is_null(),
-        "start_times_ptr must not be null"
+        "called `talos_solution_view_new` with `start_times_ptr` as `null`"
     );
 
     // Safe cast: BerthIndex is #[repr(transparent)] over usize
@@ -239,7 +271,10 @@ pub unsafe extern "C" fn talos_solution_view_new(
 /// * The pointer must not be used after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_solution_view_free(view_ptr: *mut SolutionView<'_, i64>) {
-    assert!(!view_ptr.is_null(), "view_ptr must not be null");
+    assert!(
+        !view_ptr.is_null(),
+        "called `talos_solution_view_free` with `view_ptr` as `null`"
+    );
     drop(unsafe { Box::from_raw(view_ptr) });
 }
 
@@ -256,7 +291,10 @@ pub unsafe extern "C" fn talos_solution_view_free(view_ptr: *mut SolutionView<'_
 pub unsafe extern "C" fn talos_solution_view_num_vessels(
     view_ptr: *const SolutionView<'_, i64>,
 ) -> usize {
-    assert!(!view_ptr.is_null(), "view_ptr must not be null");
+    assert!(
+        !view_ptr.is_null(),
+        "called `talos_solution_view_num_vessels` with `view_ptr` as `null`"
+    );
     unsafe { (*view_ptr).num_vessels() }
 }
 
@@ -269,7 +307,10 @@ pub unsafe extern "C" fn talos_solution_view_num_vessels(
 pub unsafe extern "C" fn talos_solution_view_objective_value(
     view_ptr: *const SolutionView<'_, i64>,
 ) -> i64 {
-    assert!(!view_ptr.is_null(), "view_ptr must not be null");
+    assert!(
+        !view_ptr.is_null(),
+        "called `talos_solution_view_objective_value` with `view_ptr` as `null`"
+    );
     unsafe { (*view_ptr).objective_value() }
 }
 
@@ -283,7 +324,10 @@ pub unsafe extern "C" fn talos_solution_view_objective_value(
 pub unsafe extern "C" fn talos_solution_view_berths_ptr(
     view_ptr: *const SolutionView<'_, i64>,
 ) -> *const usize {
-    assert!(!view_ptr.is_null(), "view_ptr must not be null");
+    assert!(
+        !view_ptr.is_null(),
+        "called `talos_solution_view_berths_ptr` with `view_ptr` as `null`"
+    );
     unsafe { (*view_ptr).berths().as_ptr() as *const usize }
 }
 
@@ -297,7 +341,10 @@ pub unsafe extern "C" fn talos_solution_view_berths_ptr(
 pub unsafe extern "C" fn talos_solution_view_start_times_ptr(
     view_ptr: *const SolutionView<'_, i64>,
 ) -> *const i64 {
-    assert!(!view_ptr.is_null(), "view_ptr must not be null");
+    assert!(
+        !view_ptr.is_null(),
+        "called `talos_solution_view_start_times_ptr` with `view_ptr` as `null`"
+    );
     unsafe { (*view_ptr).start_times().as_ptr() }
 }
 
@@ -311,11 +358,15 @@ pub unsafe extern "C" fn talos_solution_view_berth_for_vessel(
     view_ptr: *const SolutionView<'_, i64>,
     vessel_index: usize,
 ) -> usize {
-    assert!(!view_ptr.is_null(), "view_ptr must not be null");
+    assert!(
+        !view_ptr.is_null(),
+        "called `talos_solution_view_berth_for_vessel` with `view_ptr` as `null`"
+    );
     let view = unsafe { &*view_ptr };
     assert!(
         vessel_index < view.num_vessels(),
-        "vessel_index out of bounds"
+        "called `talos_solution_view_berth_for_vessel` with out-of-bounds vessel_index: {}",
+        vessel_index
     );
     view.berth_for_vessel(talos_model::index::VesselIndex::new(vessel_index))
         .get()
@@ -331,11 +382,15 @@ pub unsafe extern "C" fn talos_solution_view_start_time_for_vessel(
     view_ptr: *const SolutionView<'_, i64>,
     vessel_index: usize,
 ) -> i64 {
-    assert!(!view_ptr.is_null(), "view_ptr must not be null");
+    assert!(
+        !view_ptr.is_null(),
+        "called `talos_solution_view_start_time_for_vessel` with `view_ptr` as `null`"
+    );
     let view = unsafe { &*view_ptr };
     assert!(
         vessel_index < view.num_vessels(),
-        "vessel_index out of bounds"
+        "called `talos_solution_view_start_time_for_vessel` with out-of-bounds vessel_index: {}",
+        vessel_index
     );
     *view.start_time_for_vessel(talos_model::index::VesselIndex::new(vessel_index))
 }
@@ -351,10 +406,17 @@ pub unsafe extern "C" fn talos_solution_view_start_time_for_vessel(
 pub unsafe extern "C" fn talos_solution_view_to_owned(
     view_ptr: *const SolutionView<'_, i64>,
 ) -> *mut Solution<i64> {
-    assert!(!view_ptr.is_null(), "view_ptr must not be null");
+    assert!(
+        !view_ptr.is_null(),
+        "called `talos_solution_view_to_owned` with `view_ptr` as `null`"
+    );
     let owned = unsafe { (*view_ptr).to_owned_solution() };
     Box::into_raw(Box::new(owned))
 }
+
+// ----------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

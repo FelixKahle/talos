@@ -19,11 +19,11 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// ──────────────────────────────────────────────────────────────
-// Tie-Breaking Strategy
-// ──────────────────────────────────────────────────────────────
-
 use rand::{Rng, RngExt};
+
+// ----------------------------------------------------------------
+// Tie-Breaking Strategy
+// ----------------------------------------------------------------
 
 /// Decides which move to keep when two candidates have the same objective
 /// value in best-improvement mode.
@@ -35,6 +35,10 @@ pub trait TieBreakingStrategy: std::fmt::Debug {
     /// buffer when both have the same objective value.
     fn break_tie(&mut self) -> bool;
 }
+
+// ----------------------------------------------------------------
+// KeepFirst
+// ----------------------------------------------------------------
 
 /// Always keeps the first-seen move on a tie (rejects the newer one).
 ///
@@ -49,6 +53,10 @@ impl TieBreakingStrategy for KeepFirst {
     }
 }
 
+// ----------------------------------------------------------------
+// KeepLast
+// ----------------------------------------------------------------
+
 /// Always keeps the last-seen move on a tie (replaces the buffer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct KeepLast;
@@ -59,6 +67,10 @@ impl TieBreakingStrategy for KeepLast {
         true
     }
 }
+
+// ----------------------------------------------------------------
+// RandomTieBreak
+// ----------------------------------------------------------------
 
 /// Breaks ties randomly with a fair coin flip.
 ///
