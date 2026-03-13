@@ -617,7 +617,6 @@ dependencies = [
 name = "talos_ffi"
 version = "0.1.0"
 dependencies = [
- "libc",
  "rand",
  "talos_core",
  "talos_ls",

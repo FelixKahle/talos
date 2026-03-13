@@ -37,5 +37,4 @@ panic = "abort"
 talos_core = { path = "../talos-core" }
 talos_model = { path = "../talos-model" }
 talos_ls = { path = "../talos-ls" }
-libc = "0.2.178"
 rand = "0.10.0"

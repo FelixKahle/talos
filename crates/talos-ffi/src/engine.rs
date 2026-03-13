@@ -21,10 +21,11 @@
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use std::ffi::c_void;
 use std::ptr;
-use std::slice;
 use std::time::Duration;
 use talos_ls::engine::Engine;
+use talos_ls::eval::calculate_weighted_turnaround_time_unchecked;
 use talos_ls::exec::{SearchCommand, TerminationReason};
 use talos_ls::meta::gls::{
     FixedLambda, GuidedLocalSearch, MaxUtilityPenalization, PenalizationTrigger, ReactiveLambda,
@@ -754,33 +755,33 @@ pub unsafe extern "C" fn talos_engine_free(engine: *mut Engine<i64>) {
 // Callback types
 // ----------------------------------------------------------------
 
-/// Evaluator function pointer.
+/// Optional custom evaluator function pointer (nullable in C).
 ///
 /// Called for every vessel during solution decoding. Return a non-negative
 /// cost value, or any negative value to signal infeasibility (the move will
 /// be rejected).
 ///
+/// Pass `NULL` to use the built-in weighted-turnaround-time evaluator.
+///
 /// Arguments: `(model, vessel_index, berth_index, start_time) -> cost`
-pub type FfiEvaluatorFn = unsafe extern "C" fn(
-    model: *const Model<i64>,
-    vessel: usize,
-    berth: usize,
-    start_time: i64,
-) -> i64;
+pub type FfiEvaluatorFn = Option<
+    unsafe extern "C" fn(
+        model: *const Model<i64>,
+        vessel: usize,
+        berth: usize,
+        start_time: i64,
+    ) -> i64,
+>;
 
 /// Callback invoked whenever a new global-best solution is found.
 ///
-/// The data behind `berths_ptr` and `start_times_ptr` is only valid for the
-/// duration of the callback invocation. Copy them if you need to keep the data.
+/// The `solution_view` pointer is only valid for the duration of the callback
+/// invocation. Use the `talos_solution_view_*` accessors to read it, or call
+/// `talos_solution_view_to_owned` to deep-copy.
 ///
-/// Arguments: `(num_vessels, berths_ptr, start_times_ptr, objective_value, user_data)`
-pub type FfiNewBestCallbackFn = unsafe extern "C" fn(
-    num_vessels: usize,
-    berths_ptr: *const usize,
-    start_times_ptr: *const i64,
-    objective_value: i64,
-    user_data: *mut libc::c_void,
-);
+/// Arguments: `(solution_view, user_data)`
+pub type FfiNewBestCallbackFn =
+    unsafe extern "C" fn(solution_view: *const SolutionView<'static, i64>, user_data: *mut c_void);
 
 // ----------------------------------------------------------------
 // Run
@@ -791,6 +792,9 @@ pub type FfiNewBestCallbackFn = unsafe extern "C" fn(
 /// All configuration is passed by value — no opaque handles, no ownership
 /// transfer, no pointers to free.
 ///
+/// Pass `NULL` for `evaluator` to use the built-in weighted-turnaround-time
+/// evaluator, or provide a custom function pointer.
+///
 /// On validation failure (e.g. mismatched dimensions or no operators enabled),
 /// returns an outcome with a null `solution` pointer and `Aborted` termination reason.
 ///
@@ -798,8 +802,9 @@ pub type FfiNewBestCallbackFn = unsafe extern "C" fn(
 ///
 /// * `engine` must be a valid pointer from `talos_engine_new`.
 /// * `model` must be a valid pointer from `talos_model_new`.
-/// * `berths_ptr` must point to `num_vessels` `usize` values (berth indices).
-/// * `start_times_ptr` must point to `num_vessels` `i64` values.
+/// * `initial_solution` must be a valid pointer to a `SolutionView` (e.g.
+///   from `talos_solution_view_new`). The view and its backing arrays must
+///   remain valid for the duration of the call.
 /// * All pointers must remain valid for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn talos_engine_run(
@@ -808,20 +813,18 @@ pub unsafe extern "C" fn talos_engine_run(
     meta_config: FfiMetaheuristicConfig,
     op_config: FfiOperatorConfig,
     mon_config: FfiMonitorConfig,
-    berths_ptr: *const usize,
-    start_times_ptr: *const i64,
-    num_vessels: usize,
-    objective_value: i64,
+    initial_solution: *const SolutionView<'static, i64>,
     evaluator: FfiEvaluatorFn,
     callback: FfiNewBestCallbackFn,
-    user_data: *mut libc::c_void,
+    user_data: *mut c_void,
 ) -> FfiLocalSearchOutcome {
-    if engine.is_null() || model.is_null() || berths_ptr.is_null() || start_times_ptr.is_null() {
+    if engine.is_null() || model.is_null() || initial_solution.is_null() {
         return FfiLocalSearchOutcome::error();
     }
 
     let engine = unsafe { &mut *engine };
     let model = unsafe { &*model };
+    let init_sol = unsafe { &*initial_solution };
 
     let mut meta_inner = meta_config.build_metaheuristic();
 
@@ -832,25 +835,29 @@ pub unsafe extern "C" fn talos_engine_run(
 
     let monitor = mon_config.build_monitor();
 
-    let berths = unsafe { slice::from_raw_parts(berths_ptr as *const BerthIndex, num_vessels) };
-    let start_times = unsafe { slice::from_raw_parts(start_times_ptr, num_vessels) };
+    let berths = init_sol.berths();
+    let start_times = init_sol.start_times();
+    let objective_value = init_sol.objective_value();
 
-    // Build evaluator closure.
+    // Evaluator: use the provided C function pointer, or fall back to the
+    // built-in weighted turnaround time (direct call, no dynamic dispatch).
     let model_ptr = model as *const Model<i64>;
-    let eval = move |_m: &Model<i64>, v: VesselIndex, b: BerthIndex, t: i64| -> Option<i64> {
-        let result = unsafe { evaluator(model_ptr, v.get(), b.get(), t) };
-        if result < 0 { None } else { Some(result) }
+    let eval = move |m: &Model<i64>, v: VesselIndex, b: BerthIndex, t: i64| -> Option<i64> {
+        match evaluator {
+            Some(f) => {
+                let result = unsafe { f(model_ptr, v.get(), b.get(), t) };
+                if result < 0 { None } else { Some(result) }
+            }
+            None => unsafe { calculate_weighted_turnaround_time_unchecked(m, v, b, t) },
+        }
     };
 
     // Build callback closure.
     let cb = move |view: SolutionView<'_, i64>| unsafe {
-        callback(
-            view.num_vessels(),
-            view.berths().as_ptr() as *const usize,
-            view.start_times().as_ptr(),
-            view.objective_value(),
-            user_data,
-        );
+        // Transmute lifetime to 'static for the C function pointer signature.
+        // Safe: the pointer is only valid for the duration of this call.
+        let view_ptr: *const SolutionView<'static, i64> = std::ptr::from_ref(&view).cast();
+        callback(view_ptr, user_data);
     };
 
     // Dispatch on compound strategy, construct the concrete operator,
@@ -908,8 +915,7 @@ pub unsafe extern "C" fn talos_engine_run(
 mod tests {
     use super::*;
     use crate::model::talos_model_new;
-    use crate::solution::talos_solution_free;
-    use talos_ls::eval::calculate_weighted_completion_time;
+    use crate::solution::{talos_solution_free, talos_solution_view_free, talos_solution_view_new};
 
     /// Builds a minimal 2-vessel / 2-berth model via the FFI.
     /// V0: arrival=0, deadline=100, weight=1, p(B0)=5, p(B1)=5
@@ -955,26 +961,10 @@ mod tests {
 
     // ---- Engine lifecycle ----
 
-    /// WCT evaluator for tests.
-    unsafe extern "C" fn test_evaluator(
-        model: *const Model<i64>,
-        vessel: usize,
-        berth: usize,
-        start_time: i64,
-    ) -> i64 {
-        let model = unsafe { &*model };
-        let v = VesselIndex::new(vessel);
-        let b = BerthIndex::new(berth);
-        calculate_weighted_completion_time(model, v, b, start_time).unwrap_or(-1)
-    }
-
     /// No-op callback for tests.
     unsafe extern "C" fn noop_callback(
-        _num_vessels: usize,
-        _berths: *const usize,
-        _starts: *const i64,
-        _obj: i64,
-        _user_data: *mut libc::c_void,
+        _view: *const SolutionView<'static, i64>,
+        _user_data: *mut c_void,
     ) {
     }
 
@@ -1215,6 +1205,9 @@ mod tests {
         // Initial solution: V0→B0, V1→B1, start at 0
         let berths: [usize; 2] = [0, 1];
         let starts: [i64; 2] = [0, 0];
+        let init_sol =
+            unsafe { talos_solution_view_new(2, berths.as_ptr(), starts.as_ptr(), i64::MAX) };
+        assert!(!init_sol.is_null());
 
         let outcome = unsafe {
             talos_engine_run(
@@ -1223,11 +1216,8 @@ mod tests {
                 meta_config,
                 op_config,
                 mon_config,
-                berths.as_ptr(),
-                starts.as_ptr(),
-                2,
-                i64::MAX,
-                test_evaluator,
+                init_sol,
+                None,
                 noop_callback,
                 ptr::null_mut(),
             )
@@ -1239,6 +1229,7 @@ mod tests {
         // Clean up
         unsafe {
             talos_solution_free(outcome.solution);
+            talos_solution_view_free(init_sol);
             talos_engine_free(engine);
             crate::model::talos_model_free(model);
         }
@@ -1274,10 +1265,7 @@ mod tests {
                 op_config,
                 mon_config,
                 ptr::null(),
-                ptr::null(),
-                0,
-                0,
-                test_evaluator,
+                None,
                 noop_callback,
                 ptr::null_mut(),
             )
@@ -1320,17 +1308,17 @@ mod tests {
         CALL_COUNT.store(0, Ordering::SeqCst);
 
         unsafe extern "C" fn on_new_best(
-            _num_vessels: usize,
-            _berths: *const usize,
-            _starts: *const i64,
-            _obj: i64,
-            _user_data: *mut libc::c_void,
+            _view: *const SolutionView<'static, i64>,
+            _user_data: *mut c_void,
         ) {
             CALL_COUNT.fetch_add(1, Ordering::SeqCst);
         }
 
         let berths: [usize; 2] = [0, 1];
         let starts: [i64; 2] = [0, 0];
+        let init_sol =
+            unsafe { talos_solution_view_new(2, berths.as_ptr(), starts.as_ptr(), i64::MAX) };
+        assert!(!init_sol.is_null());
 
         let outcome = unsafe {
             talos_engine_run(
@@ -1339,11 +1327,8 @@ mod tests {
                 meta_config,
                 op_config,
                 mon_config,
-                berths.as_ptr(),
-                starts.as_ptr(),
-                2,
-                i64::MAX,
-                test_evaluator,
+                init_sol,
+                None,
                 on_new_best,
                 ptr::null_mut(),
             )
@@ -1353,6 +1338,7 @@ mod tests {
 
         unsafe {
             talos_solution_free(outcome.solution);
+            talos_solution_view_free(init_sol);
             talos_engine_free(engine);
             crate::model::talos_model_free(model);
         }
@@ -1388,6 +1374,8 @@ mod tests {
 
         let berths: [usize; 2] = [0, 1];
         let starts: [i64; 2] = [0, 0];
+        let init_sol = unsafe { talos_solution_view_new(2, berths.as_ptr(), starts.as_ptr(), 0) };
+        assert!(!init_sol.is_null());
 
         let outcome = unsafe {
             talos_engine_run(
@@ -1396,11 +1384,8 @@ mod tests {
                 meta_config,
                 op_config,
                 mon_config,
-                berths.as_ptr(),
-                starts.as_ptr(),
-                2,
-                0,
-                test_evaluator,
+                init_sol,
+                None,
                 noop_callback,
                 ptr::null_mut(),
             )
@@ -1410,6 +1395,7 @@ mod tests {
         assert_eq!(outcome.termination_reason, FfiTerminationReason::Aborted);
 
         unsafe {
+            talos_solution_view_free(init_sol);
             talos_engine_free(engine);
             crate::model::talos_model_free(model);
         }
