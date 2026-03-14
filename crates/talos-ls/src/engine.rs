@@ -133,8 +133,8 @@ impl<T> Engine<T> {
             topology_graph,
             buffered_topology_graph,
             schedule_graph_undo_log: ScheduleGraphUndoLog::preallocated(num_vessels),
-            schedule_graph_diff: ScheduleGraphDiff::new(num_vessels),
-            buffered_schedule_graph_diff: ScheduleGraphDiff::new(num_vessels),
+            schedule_graph_diff: ScheduleGraphDiff::new(),
+            buffered_schedule_graph_diff: ScheduleGraphDiff::new(),
             touched: TouchedBerths::new(num_berths),
         }
     }

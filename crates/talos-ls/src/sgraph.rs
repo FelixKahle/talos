@@ -121,30 +121,6 @@ impl std::fmt::Display for ScheduleGraphEdge {
 }
 
 // ----------------------------------------------------------------
-// ScheduleGraphFullEdge
-// ----------------------------------------------------------------
-
-/// A directed edge between two vessels, annotated with the berth.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ScheduleGraphFullEdge {
-    pub from: VesselIndex,
-    pub to: VesselIndex,
-    pub on_berth: BerthIndex,
-}
-
-impl std::fmt::Display for ScheduleGraphFullEdge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Edge(V{} -> V{} on Berth {})",
-            self.from.get(),
-            self.to.get(),
-            self.on_berth.get()
-        )
-    }
-}
-
-// ----------------------------------------------------------------
 // BerthEdgeIter
 // ----------------------------------------------------------------
 
@@ -172,45 +148,6 @@ impl<'a> Iterator for BerthEdgeIter<'a> {
 }
 
 impl FusedIterator for BerthEdgeIter<'_> {}
-
-// ----------------------------------------------------------------
-// AllEdgeIter
-// ----------------------------------------------------------------
-
-/// Iterator over all vessel-to-vessel edges across all berths.
-#[derive(Clone, Debug)]
-pub struct AllEdgeIter<'a> {
-    arena: &'a RingArena,
-    vessel_berth: &'a [BerthIndex],
-    num_vessels: usize,
-    current_vessel: usize,
-}
-
-impl<'a> Iterator for AllEdgeIter<'a> {
-    type Item = ScheduleGraphFullEdge;
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.current_vessel < self.num_vessels {
-            let from = self.current_vessel;
-            self.current_vessel += 1;
-
-            let to = unsafe { self.arena.next_unchecked(Node::new(from)) };
-
-            if to.get() < self.num_vessels {
-                let on_berth = *unsafe { self.vessel_berth.get_unchecked(from) };
-                return Some(ScheduleGraphFullEdge {
-                    from: VesselIndex::new(from),
-                    to: VesselIndex::new(to.get()),
-                    on_berth,
-                });
-            }
-        }
-        None
-    }
-}
-
-impl FusedIterator for AllEdgeIter<'_> {}
 
 // ----------------------------------------------------------------
 // ScheduleGraph
@@ -500,6 +437,30 @@ impl ScheduleGraph {
     #[inline(always)]
     pub fn vessel_node(&self, vessel: VesselIndex) -> Node {
         vessel.map()
+    }
+
+    /// Returns the vessel index corresponding to the given node, if it represents a vessel.
+    #[inline(always)]
+    pub fn node_vessel(&self, node: Node) -> Option<VesselIndex> {
+        let raw = node.get();
+        if raw < self.num_vessels {
+            Some(VesselIndex::new(raw))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the berth index corresponding to the given node, if it represents a berth.
+    #[inline(always)]
+    pub fn node_berth(&self, node: Node) -> Option<BerthIndex> {
+        let raw = node.get();
+        if raw < self.num_vessels {
+            Some(self.vessel_berth[raw])
+        } else if raw < self.num_vessels + self.num_berths {
+            Some(BerthIndex::new(raw - self.num_vessels))
+        } else {
+            None
+        }
     }
 
     /// Returns the node following `node`.
@@ -812,17 +773,6 @@ impl ScheduleGraph {
         BerthEdgeIter {
             inner: unsafe { self.arena.edge_iter_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
-        }
-    }
-
-    /// Returns an iterator over all vessel-to-vessel edges across all berths.
-    #[inline(always)]
-    pub fn all_edges(&self) -> AllEdgeIter<'_> {
-        AllEdgeIter {
-            arena: &self.arena,
-            vessel_berth: &self.vessel_berth,
-            num_vessels: self.num_vessels,
-            current_vessel: 0,
         }
     }
 
@@ -1475,26 +1425,19 @@ impl ScheduleGraph {
 // ScheduleGraphDiffEdge
 // ----------------------------------------------------------------
 
-/// A high-level representation of a link change.
+/// A raw link change between two nodes in the schedule graph.
 ///
-/// `None` represents a Sentinel (the boundary of the berth).
+/// Both `from` and `to` are raw arena nodes. They may refer to real vessels
+/// or berth sentinels; interpretation is left to the consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScheduleGraphDiffEdge {
-    pub from: Option<VesselIndex>,
-    pub to: Option<VesselIndex>,
+    pub from: Node,
+    pub to: Node,
 }
 
 impl std::fmt::Display for ScheduleGraphDiffEdge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.from {
-            Some(v) => write!(f, "Vessel({})", v.get())?,
-            None => write!(f, "Sentinel")?,
-        }
-        write!(f, " -> ")?;
-        match self.to {
-            Some(v) => write!(f, "Vessel({})", v.get()),
-            None => write!(f, "Sentinel"),
-        }
+        write!(f, "Node({}) -> Node({})", self.from.get(), self.to.get())
     }
 }
 
@@ -1505,23 +1448,6 @@ impl std::fmt::Display for ScheduleGraphDiffEdge {
 /// Iterator over broken or created links in a `ScheduleGraphDiff`.
 pub struct DiffEdgeIter<'a> {
     inner: std::iter::Zip<std::slice::Iter<'a, Node>, std::slice::Iter<'a, Node>>,
-    num_vessels: usize,
-}
-
-impl<'a> DiffEdgeIter<'a> {
-    #[inline(always)]
-    fn is_sentinel(&self, index: Node) -> bool {
-        index.get() >= self.num_vessels
-    }
-
-    #[inline(always)]
-    fn to_option(&self, index: Node) -> Option<VesselIndex> {
-        if self.is_sentinel(index) {
-            None
-        } else {
-            Some(VesselIndex::new(index.get()))
-        }
-    }
 }
 
 impl<'a> Iterator for DiffEdgeIter<'a> {
@@ -1529,10 +1455,9 @@ impl<'a> Iterator for DiffEdgeIter<'a> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|(&f, &t)| ScheduleGraphDiffEdge {
-            from: self.to_option(f),
-            to: self.to_option(t),
-        })
+        self.inner
+            .next()
+            .map(|(&f, &t)| ScheduleGraphDiffEdge { from: f, to: t })
     }
 
     #[inline(always)]
@@ -1541,57 +1466,7 @@ impl<'a> Iterator for DiffEdgeIter<'a> {
     }
 }
 
-// ----------------------------------------------------------------
-// DiffEdgeContextIter
-// ----------------------------------------------------------------
-
-/// Iterator over created links with their associated berth context.
-pub struct DiffEdgeContextIter<'a> {
-    inner: std::iter::Zip<std::slice::Iter<'a, Node>, std::slice::Iter<'a, Node>>,
-    num_vessels: usize,
-}
-
-impl<'a> DiffEdgeContextIter<'a> {
-    #[inline(always)]
-    fn is_sentinel(&self, index: Node) -> bool {
-        index.get() >= self.num_vessels
-    }
-
-    #[inline(always)]
-    fn to_option(&self, index: Node) -> Option<VesselIndex> {
-        if self.is_sentinel(index) {
-            None
-        } else {
-            Some(VesselIndex::new(index.get()))
-        }
-    }
-
-    #[inline(always)]
-    fn to_berth(&self, index: Node) -> Option<BerthIndex> {
-        if self.is_sentinel(index) {
-            Some(BerthIndex::new(index.get() - self.num_vessels))
-        } else {
-            None
-        }
-    }
-}
-
-impl<'a> Iterator for DiffEdgeContextIter<'a> {
-    type Item = (Option<VesselIndex>, Option<VesselIndex>, Option<BerthIndex>);
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next().map(|(&f, &t)| {
-            let b = self.to_berth(f).or_else(|| self.to_berth(t));
-            (self.to_option(f), self.to_option(t), b)
-        })
-    }
-
-    #[inline(always)]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
+impl FusedIterator for DiffEdgeIter<'_> {}
 
 // ----------------------------------------------------------------
 // DiffReallocationIter
@@ -1637,12 +1512,17 @@ pub struct ScheduleGraphDiff {
     reallocated_vessels: Vec<VesselIndex>,
     original_berths: Vec<BerthIndex>,
     target_berths: Vec<BerthIndex>,
-    num_vessels: usize,
+}
+
+impl Default for ScheduleGraphDiff {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ScheduleGraphDiff {
     #[inline(always)]
-    pub fn new(num_vessels: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             broken_from: Vec::new(),
             broken_to: Vec::new(),
@@ -1651,7 +1531,6 @@ impl ScheduleGraphDiff {
             reallocated_vessels: Vec::new(),
             original_berths: Vec::new(),
             target_berths: Vec::new(),
-            num_vessels,
         }
     }
 
@@ -1670,8 +1549,6 @@ impl ScheduleGraphDiff {
     /// existing heap allocations.
     #[inline(always)]
     pub fn overwrite_from_graph_diff(&mut self, other: &Self) {
-        self.num_vessels = other.num_vessels;
-
         self.broken_from.clear();
         self.broken_from.extend_from_slice(&other.broken_from);
         self.broken_to.clear();
@@ -1725,7 +1602,6 @@ impl ScheduleGraphDiff {
     pub fn broken_links(&self) -> DiffEdgeIter<'_> {
         DiffEdgeIter {
             inner: self.broken_from.iter().zip(self.broken_to.iter()),
-            num_vessels: self.num_vessels,
         }
     }
 
@@ -1733,15 +1609,6 @@ impl ScheduleGraphDiff {
     pub fn created_links(&self) -> DiffEdgeIter<'_> {
         DiffEdgeIter {
             inner: self.created_from.iter().zip(self.created_to.iter()),
-            num_vessels: self.num_vessels,
-        }
-    }
-
-    #[inline(always)]
-    pub fn created_links_with_context(&self) -> DiffEdgeContextIter<'_> {
-        DiffEdgeContextIter {
-            inner: self.created_from.iter().zip(self.created_to.iter()),
-            num_vessels: self.num_vessels,
         }
     }
 
@@ -2024,39 +1891,6 @@ mod tests {
         check_berth(&graph, 1, &[4]);
         check_berth(&graph, 2, &[0]);
         check_berth(&graph, 3, &[3, 5]);
-    }
-
-    #[test]
-    fn test_all_edges() {
-        let graph = standard_fixture();
-        let mut edges: Vec<ScheduleGraphFullEdge> = graph.all_edges().collect();
-        edges.sort_by_key(|e| e.from.get());
-
-        assert_eq!(edges.len(), 3);
-        assert_eq!(
-            edges[0],
-            ScheduleGraphFullEdge {
-                from: vessel(0),
-                to: vessel(2),
-                on_berth: berth(0)
-            }
-        );
-        assert_eq!(
-            edges[1],
-            ScheduleGraphFullEdge {
-                from: vessel(2),
-                to: vessel(1),
-                on_berth: berth(0)
-            }
-        );
-        assert_eq!(
-            edges[2],
-            ScheduleGraphFullEdge {
-                from: vessel(3),
-                to: vessel(4),
-                on_berth: berth(1)
-            }
-        );
     }
 
     #[test]

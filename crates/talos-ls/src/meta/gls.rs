@@ -108,7 +108,7 @@ use crate::{
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use num_traits::ToPrimitive;
-use talos_core::utils::num::SolverNumeric;
+use talos_core::{container::rarena::Node, utils::num::SolverNumeric};
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::Model,
@@ -130,10 +130,9 @@ use talos_model::{
 /// current penalty count. Features with high cost and low penalty
 /// are penalized first.
 pub trait FeatureCost: std::fmt::Debug {
-    /// Returns the cost of an edge feature (vessel `a` directly preceding
-    /// vessel `b`). Sentinel edges (where one end is `None`) may return 0
-    /// if they should not be penalized.
-    fn edge_cost(&self, a: Option<VesselIndex>, b: Option<VesselIndex>) -> f64;
+    /// Returns the cost of an edge feature between two nodes.
+    /// Either node may be a vessel or a berth sentinel.
+    fn edge_cost(&self, a: Node, b: Node) -> f64;
 
     /// Returns the cost of a berth-assignment feature (vessel `v` assigned
     /// to berth `b`).
@@ -149,7 +148,7 @@ pub struct UniformCost;
 
 impl FeatureCost for UniformCost {
     #[inline]
-    fn edge_cost(&self, _a: Option<VesselIndex>, _b: Option<VesselIndex>) -> f64 {
+    fn edge_cost(&self, _a: Node, _b: Node) -> f64 {
         1.0
     }
 
@@ -219,23 +218,12 @@ impl PenalizationStrategy for MaxUtilityPenalization {
             let mut prev_node = sentinel;
             loop {
                 let next = graph.next_node(prev_node);
-                // Determine vessel indices (None for sentinel).
-                let from = if prev_node.get() < num_vessels {
-                    Some(VesselIndex::new(prev_node.get()))
-                } else {
-                    None
-                };
-                let to = if next.get() < num_vessels {
-                    Some(VesselIndex::new(next.get()))
-                } else {
-                    None
-                };
 
                 // Only consider edges where at least one end is a vessel.
-                if from.is_some() || to.is_some() {
-                    let c = cost.edge_cost(from, to);
+                if prev_node.get() < num_vessels || next.get() < num_vessels {
+                    let c = cost.edge_cost(prev_node, next);
                     if c > 0.0 {
-                        let idx = edge_flat_index(from, to, num_vessels);
+                        let idx = edge_flat_index(prev_node, next, num_vessels);
                         debug_assert!(idx < memory.edge.len());
 
                         // SAFETY: idx < (num_vessels+1)^2, the edge allocation size.
@@ -330,8 +318,8 @@ pub struct PenaltyMemory {
     num_berths: usize,
 }
 
-/// Computes the flat index for an edge feature, mapping `None` (sentinel)
-/// to the index `num_vessels`.
+/// Computes the flat index for an edge feature. Sentinel nodes
+/// (index >= `num_vessels`) are mapped to column/row `num_vessels`.
 ///
 /// The resulting index is guaranteed to be less than
 /// $(\text{num\_vessels} + 1)^2$ — the allocation size of
@@ -339,21 +327,13 @@ pub struct PenaltyMemory {
 ///
 /// # Arguments
 ///
-/// * `from` — Source vessel index, or `None` for the berth sentinel.
-/// * `to` — Destination vessel index, or `None` for the berth sentinel.
+/// * `from` — Source node (vessel or sentinel).
+/// * `to` — Destination node (vessel or sentinel).
 /// * `num_vessels` — Total number of vessels in the problem.
 #[inline]
-fn edge_flat_index(
-    from: Option<VesselIndex>,
-    to: Option<VesselIndex>,
-    num_vessels: usize,
-) -> usize {
-    let a = from.map_or(num_vessels, |v| v.get());
-    let b = to.map_or(num_vessels, |v| v.get());
-
-    debug_assert!(a <= num_vessels);
-    debug_assert!(b <= num_vessels);
-
+fn edge_flat_index(from: Node, to: Node, num_vessels: usize) -> usize {
+    let a = from.get().min(num_vessels);
+    let b = to.get().min(num_vessels);
     a * (num_vessels + 1) + b
 }
 
@@ -400,10 +380,10 @@ impl PenaltyMemory {
     ///
     /// # Arguments
     ///
-    /// * `from` — The source vessel, or `None` for the berth sentinel.
-    /// * `to` — The destination vessel, or `None` for the berth sentinel.
+    /// * `from` — The source node (vessel or sentinel).
+    /// * `to` — The destination node (vessel or sentinel).
     #[inline]
-    pub fn edge_penalty(&self, from: Option<VesselIndex>, to: Option<VesselIndex>) -> u64 {
+    pub fn edge_penalty(&self, from: Node, to: Node) -> u64 {
         let idx = edge_flat_index(from, to, self.num_vessels);
         debug_assert!(idx < self.edge.len());
 
@@ -931,18 +911,8 @@ where
             let mut prev_node = sentinel;
             loop {
                 let next = graph.next_node(prev_node);
-                let from = if prev_node.get() < num_vessels {
-                    Some(VesselIndex::new(prev_node.get()))
-                } else {
-                    None
-                };
-                let to = if next.get() < num_vessels {
-                    Some(VesselIndex::new(next.get()))
-                } else {
-                    None
-                };
-                if from.is_some() || to.is_some() {
-                    let idx = edge_flat_index(from, to, num_vessels);
+                if prev_node.get() < num_vessels || next.get() < num_vessels {
+                    let idx = edge_flat_index(prev_node, next, num_vessels);
                     debug_assert!(idx < self.memory.edge.len());
 
                     // SAFETY: idx < (num_vessels+1)^2, the edge allocation size.
@@ -1211,8 +1181,8 @@ mod tests {
     #[test]
     fn test_penalty_memory_edge_lookup() {
         let mut mem = PenaltyMemory::new(3, 2);
-        let a = Some(VesselIndex::new(0));
-        let b = Some(VesselIndex::new(1));
+        let a = Node::new(0);
+        let b = Node::new(1);
         assert_eq!(mem.edge_penalty(a, b), 0);
         let idx = edge_flat_index(a, b, 3);
         mem.edge[idx] = 7;
@@ -1233,8 +1203,8 @@ mod tests {
     fn test_penalty_memory_sentinel_edge() {
         let mem = PenaltyMemory::new(3, 2);
         // Sentinel -> vessel edge uses index num_vessels for the sentinel.
-        let sentinel = None;
-        let v = Some(VesselIndex::new(2));
+        let sentinel = Node::new(3); // sentinel index = num_vessels
+        let v = Node::new(2);
         let idx = edge_flat_index(sentinel, v, 3);
         // Should map to row=3, col=2 -> 3*4+2 = 14
         assert_eq!(idx, 14);
@@ -1246,11 +1216,8 @@ mod tests {
     #[test]
     fn test_uniform_cost_always_one() {
         let cost = UniformCost;
-        assert_eq!(
-            cost.edge_cost(Some(VesselIndex::new(0)), Some(VesselIndex::new(1))),
-            1.0
-        );
-        assert_eq!(cost.edge_cost(None, Some(VesselIndex::new(0))), 1.0);
+        assert_eq!(cost.edge_cost(Node::new(0), Node::new(1)), 1.0);
+        assert_eq!(cost.edge_cost(Node::new(3), Node::new(0)), 1.0);
         assert_eq!(
             cost.berth_cost(VesselIndex::new(0), BerthIndex::new(0)),
             1.0
@@ -1261,24 +1228,26 @@ mod tests {
 
     #[test]
     fn test_edge_flat_index_vessel_to_vessel() {
-        let a = Some(VesselIndex::new(1));
-        let b = Some(VesselIndex::new(2));
+        let a = Node::new(1);
+        let b = Node::new(2);
         // With num_vessels=4, stride = 5. Index = 1*5 + 2 = 7.
         assert_eq!(edge_flat_index(a, b, 4), 7);
     }
 
     #[test]
     fn test_edge_flat_index_sentinel_to_vessel() {
-        let b = Some(VesselIndex::new(0));
+        let sentinel = Node::new(3); // sentinel index >= num_vessels
+        let b = Node::new(0);
         // Sentinel maps to 3. Index = 3 * 4 + 0 = 12.
-        assert_eq!(edge_flat_index(None, b, 3), 12);
+        assert_eq!(edge_flat_index(sentinel, b, 3), 12);
     }
 
     #[test]
     fn test_edge_flat_index_vessel_to_sentinel() {
-        let a = Some(VesselIndex::new(0));
+        let a = Node::new(0);
+        let sentinel = Node::new(3); // sentinel index >= num_vessels
         // Sentinel maps to 3. Index = 0 * 4 + 3 = 3.
-        assert_eq!(edge_flat_index(a, None, 3), 3);
+        assert_eq!(edge_flat_index(a, sentinel, 3), 3);
     }
 
     // ── GuidedLocalSearch construction ───────────────────────
@@ -1330,7 +1299,7 @@ mod tests {
     #[test]
     fn test_penalty_delta_empty_diff() {
         let mem = PenaltyMemory::new(3, 2);
-        let diff = ScheduleGraphDiff::new(3);
+        let diff = ScheduleGraphDiff::new();
         assert_eq!(mem.penalty_delta(&diff), 0);
     }
 

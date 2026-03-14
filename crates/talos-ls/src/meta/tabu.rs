@@ -268,10 +268,10 @@ impl TabuMemory {
         unsafe {
             // Forbid re-creating the broken edges.
             for edge in diff.broken_links() {
-                if let (Some(a), Some(b)) = (edge.from, edge.to) {
-                    *self
-                        .edge
-                        .get_unchecked_mut(a.get() * self.num_vessels + b.get()) = expire_iter;
+                let a = edge.from.get();
+                let b = edge.to.get();
+                if a < self.num_vessels && b < self.num_vessels {
+                    *self.edge.get_unchecked_mut(a * self.num_vessels + b) = expire_iter;
                 }
             }
 
@@ -293,11 +293,11 @@ impl TabuMemory {
         unsafe {
             // Check created edges.
             for edge in diff.created_links() {
-                if let (Some(a), Some(b)) = (edge.from, edge.to)
-                    && *self
-                        .edge
-                        .get_unchecked(a.get() * self.num_vessels + b.get())
-                        > current_iter
+                let a = edge.from.get();
+                let b = edge.to.get();
+                if a < self.num_vessels
+                    && b < self.num_vessels
+                    && *self.edge.get_unchecked(a * self.num_vessels + b) > current_iter
                 {
                     return true;
                 }

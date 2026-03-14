@@ -1615,7 +1615,7 @@ mod tests {
     fn test_swap_vessels_same_berth() {
         let mut graph = setup_graph();
         let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new(graph.num_vessels());
+        let mut diff = ScheduleGraphDiff::new();
 
         {
             let mut touched = TouchedBerths::new(graph.num_berths());
@@ -1632,7 +1632,7 @@ mod tests {
     fn test_relocate_to_head_cross_berth() {
         let mut graph = setup_graph();
         let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new(graph.num_vessels());
+        let mut diff = ScheduleGraphDiff::new();
 
         {
             let mut touched = TouchedBerths::new(graph.num_berths());
@@ -1657,7 +1657,7 @@ mod tests {
     fn test_relocate_segment_after_cross_berth() {
         let mut graph = setup_graph();
         let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new(graph.num_vessels());
+        let mut diff = ScheduleGraphDiff::new();
 
         {
             let mut touched = TouchedBerths::new(graph.num_berths());
@@ -1682,7 +1682,7 @@ mod tests {
     fn test_reverse_segment() {
         let mut graph = setup_graph();
         let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new(graph.num_vessels());
+        let mut diff = ScheduleGraphDiff::new();
 
         {
             let mut touched = TouchedBerths::new(graph.num_berths());
@@ -1701,7 +1701,7 @@ mod tests {
     fn test_swap_segments_cross_berth() {
         let mut graph = setup_graph();
         let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new(graph.num_vessels());
+        let mut diff = ScheduleGraphDiff::new();
 
         {
             let mut touched = TouchedBerths::new(graph.num_berths());
@@ -1728,7 +1728,7 @@ mod tests {
     fn test_relocate_segment_to_tail_empty_berth() {
         let mut graph = setup_graph();
         let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new(graph.num_vessels());
+        let mut diff = ScheduleGraphDiff::new();
 
         {
             let mut touched = TouchedBerths::new(graph.num_berths());
@@ -1751,8 +1751,7 @@ mod tests {
         let mut graph = setup_graph();
         let original = graph.clone();
         let mut undo = ScheduleGraphUndoLog::new(20);
-        let mut diff = ScheduleGraphDiff::new(graph.num_vessels());
-
+        let mut diff = ScheduleGraphDiff::new();
         {
             let mut touched = TouchedBerths::new(graph.num_berths());
             let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
