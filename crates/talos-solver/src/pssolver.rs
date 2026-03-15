@@ -29,9 +29,7 @@
 
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::Solution};
-use talos_search::{
-    monitor::psmonitor::PortfolioMonitor, oracle::GlobalOracle, portfolio::PortfolioSolver,
-};
+use talos_search::{oracle::GlobalOracle, portfolio::PortfolioSolver};
 
 /// A portfolio runner that executes multiple [`PortfolioSolver`]s in
 /// parallel using scoped threads.
@@ -45,29 +43,25 @@ use talos_search::{
 /// * `T` — numeric type (e.g. `i64`)
 /// * `G` — shared oracle (`Sync` required for cross-thread access)
 /// * `M` — portfolio monitor (`Clone + Send` — cloned once per solver)
-pub struct ParallelPortfolioSolver<T, G, M>
+pub struct ParallelPortfolioSolver<T, G>
 where
     T: SolverNumeric,
     G: GlobalOracle<T>,
-    M: PortfolioMonitor<T>,
 {
-    solvers: Vec<Box<dyn PortfolioSolver<T, G, M> + Send>>,
+    solvers: Vec<Box<dyn PortfolioSolver<T, G> + Send>>,
     oracle: G,
-    _marker: std::marker::PhantomData<M>,
 }
 
-impl<T, G, M> ParallelPortfolioSolver<T, G, M>
+impl<T, G> ParallelPortfolioSolver<T, G>
 where
     T: SolverNumeric,
     G: GlobalOracle<T> + Sync,
-    M: PortfolioMonitor<T> + Clone + Send,
 {
     /// Creates an empty portfolio backed by the given oracle.
     pub fn new(oracle: G) -> Self {
         Self {
             solvers: Vec::new(),
             oracle,
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -76,7 +70,6 @@ where
         Self {
             solvers: Vec::with_capacity(capacity),
             oracle,
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -85,24 +78,24 @@ where
     // ----------------------------------------------------------------
 
     /// Adds a solver to the portfolio (consuming builder).
-    pub fn with_solver(mut self, solver: impl PortfolioSolver<T, G, M> + Send + 'static) -> Self {
+    pub fn with_solver(mut self, solver: impl PortfolioSolver<T, G> + Send + 'static) -> Self {
         self.solvers.push(Box::new(solver));
         self
     }
 
     /// Adds a pre-boxed solver to the portfolio (consuming builder).
-    pub fn with_solver_boxed(mut self, solver: Box<dyn PortfolioSolver<T, G, M> + Send>) -> Self {
+    pub fn with_solver_boxed(mut self, solver: Box<dyn PortfolioSolver<T, G> + Send>) -> Self {
         self.solvers.push(solver);
         self
     }
 
     /// Adds a solver to the portfolio.
-    pub fn add_solver(&mut self, solver: impl PortfolioSolver<T, G, M> + Send + 'static) {
+    pub fn add_solver(&mut self, solver: impl PortfolioSolver<T, G> + Send + 'static) {
         self.solvers.push(Box::new(solver));
     }
 
     /// Adds a pre-boxed solver to the portfolio.
-    pub fn add_solver_boxed(&mut self, solver: Box<dyn PortfolioSolver<T, G, M> + Send>) {
+    pub fn add_solver_boxed(&mut self, solver: Box<dyn PortfolioSolver<T, G> + Send>) {
         self.solvers.push(solver);
     }
 
@@ -137,10 +130,13 @@ where
     /// * Panics if the portfolio contains no solvers.
     /// * Panics if **all** solvers panic (individual panics are ignored
     ///   as long as at least one solver succeeds).
-    pub fn solve(&mut self, model: &Model<T>, mut monitor: M) -> Solution<T> {
+    pub fn solve(
+        &mut self,
+        model: &Model<T>,
+        time_limit: std::time::Duration,
+        non_improving: std::time::Duration,
+    ) -> Solution<T> {
         assert!(!self.solvers.is_empty(), "portfolio has no solvers");
-
-        monitor.on_start(model);
 
         let oracle = &self.oracle;
 
@@ -148,9 +144,14 @@ where
             let handles: Vec<_> = self
                 .solvers
                 .iter_mut()
-                .map(|solver| {
-                    let mon = monitor.clone();
-                    s.spawn(move || solver.solve(model, oracle, mon))
+                .enumerate()
+                .map(|(i, solver)| {
+                    std::thread::Builder::new()
+                        .name(format!("solver-{}-{}", i, solver.name()))
+                        .spawn_scoped(s, move || {
+                            solver.solve(model, oracle, time_limit, non_improving)
+                        })
+                        .expect("failed to spawn solver thread")
                 })
                 .collect();
 
@@ -162,13 +163,9 @@ where
             results.push(oracle_best);
         }
 
-        let best = results
+        results
             .into_iter()
             .min_by_key(|s| s.objective_value())
-            .expect("all portfolio solvers panicked");
-
-        monitor.on_end(best.as_view());
-
-        best
+            .expect("all portfolio solvers panicked")
     }
 }

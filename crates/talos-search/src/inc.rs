@@ -266,4 +266,15 @@ where
     {
         self.with_best(f)
     }
+
+    fn pool_len(&self) -> usize {
+        self.len()
+    }
+
+    fn with_ranked<F, R>(&self, rank: usize, f: F) -> Option<R>
+    where
+        F: FnOnce(&Solution<T>) -> R,
+    {
+        self.with_get(rank, f)
+    }
 }

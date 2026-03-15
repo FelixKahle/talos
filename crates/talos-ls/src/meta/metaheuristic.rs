@@ -30,10 +30,7 @@ use crate::{
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use talos_core::utils::num::SolverNumeric;
-use talos_model::{
-    model::Model,
-    solution::{Solution, SolutionView},
-};
+use talos_model::{model::Model, solution::SolutionView};
 use talos_search::oracle::GlobalOracle;
 
 // ----------------------------------------------------------------
@@ -66,33 +63,55 @@ impl std::fmt::Display for AcceptanceOutcome {
 }
 
 // ----------------------------------------------------------------
+// TeleportTarget
+// ----------------------------------------------------------------
+
+/// Specifies which solution in the oracle pool the engine should teleport to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TeleportTarget {
+    /// Teleport to the best (rank 0) solution in the pool.
+    Best,
+
+    /// Teleport to the solution at the given rank (0 = best).
+    /// Falls back to the best solution if the rank is out of bounds.
+    Rank(usize),
+}
+
+impl std::fmt::Display for TeleportTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TeleportTarget::Best => write!(f, "Best"),
+            TeleportTarget::Rank(r) => write!(f, "Rank({})", r),
+        }
+    }
+}
+
+// ----------------------------------------------------------------
 // NeighborhoodExhaustionOutcome
 // ----------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum NeighborhoodExhaustionOutcome<T>
-where
-    T: Copy,
-{
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NeighborhoodExhaustionOutcome {
     /// Restart the search with a new neighborhood exploration sequence.
     Restart,
 
     /// Terminate the search.
     Terminate,
 
-    /// Teleport to a new solution.
-    Teleport(Solution<T>),
+    /// Signal the engine to teleport to the specified oracle solution.
+    ///
+    /// The engine is responsible for extracting the solution from the
+    /// oracle and writing it directly into its internal buffers,
+    /// avoiding an intermediate heap allocation.
+    Teleport(TeleportTarget),
 }
 
-impl<T> std::fmt::Display for NeighborhoodExhaustionOutcome<T>
-where
-    T: Copy,
-{
+impl std::fmt::Display for NeighborhoodExhaustionOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NeighborhoodExhaustionOutcome::Restart => write!(f, "Restart"),
             NeighborhoodExhaustionOutcome::Terminate => write!(f, "Terminate"),
-            NeighborhoodExhaustionOutcome::Teleport(_) => write!(f, "Teleport"),
+            NeighborhoodExhaustionOutcome::Teleport(target) => write!(f, "Teleport({})", target),
         }
     }
 }
@@ -137,7 +156,7 @@ where
         buffered_solution: Option<SolutionView<'_, T>>,
         graph: &ScheduleGraph,
         oracle: &G,
-    ) -> NeighborhoodExhaustionOutcome<T>;
+    ) -> NeighborhoodExhaustionOutcome;
 
     /// Called when an operator has finished scanning a full neighborhood.
     ///

@@ -26,4 +26,3 @@ pub mod lsmonitor;
 pub mod nimpr;
 pub mod solution;
 pub mod time;
-pub mod wrapper;

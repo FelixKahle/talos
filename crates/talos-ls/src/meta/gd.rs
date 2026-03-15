@@ -73,9 +73,11 @@
 use crate::{
     exec::SearchCommand,
     meta::{
-        metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
+        metaheuristic::{
+            AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome, TeleportTarget,
+        },
         tabu::SelectionStrategy,
-        teleport::{NoTeleport, TeleportPolicy, try_teleport},
+        teleport::{NoTeleport, TeleportPolicy, should_attempt_teleport},
         tie::{KeepFirst, TieBreakingStrategy},
     },
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
@@ -225,13 +227,13 @@ where
         _buffered_solution: Option<SolutionView<'_, T>>,
         _graph: &ScheduleGraph,
         oracle: &G,
-    ) -> NeighborhoodExhaustionOutcome<T> {
-        if let Some(solution) = try_teleport(
+    ) -> NeighborhoodExhaustionOutcome {
+        if should_attempt_teleport(
             &mut self.teleport_policy,
             oracle,
             _best_solution.objective_value(),
         ) {
-            return NeighborhoodExhaustionOutcome::Teleport(solution);
+            return NeighborhoodExhaustionOutcome::Teleport(TeleportTarget::Best);
         }
 
         match self.selection {
@@ -354,6 +356,7 @@ where
         _new_solution: SolutionView<'_, T>,
         _graph: &ScheduleGraph,
     ) {
+        self.teleport_policy.on_teleport();
     }
 
     fn on_iteration(

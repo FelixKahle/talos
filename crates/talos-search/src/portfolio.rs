@@ -19,7 +19,7 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-use crate::{monitor::psmonitor::PortfolioMonitor, oracle::GlobalOracle};
+use crate::oracle::GlobalOracle;
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::Solution};
 
@@ -31,10 +31,16 @@ use talos_model::{model::Model, solution::Solution};
 ///
 /// A [`GlobalOracle`] is provided so that solvers running in a portfolio
 /// can share and receive improving solutions from other threads.
-pub trait PortfolioSolver<T: SolverNumeric, G: GlobalOracle<T>, M: PortfolioMonitor<T>> {
+pub trait PortfolioSolver<T: SolverNumeric, G: GlobalOracle<T>> {
     /// Returns the name of this solver (for logging / identification).
     fn name(&self) -> &str;
 
     /// Solves the given model and returns the best solution found.
-    fn solve(&mut self, model: &Model<T>, oracle: &G, monitor: M) -> Solution<T>;
+    fn solve(
+        &mut self,
+        model: &Model<T>,
+        oracle: &G,
+        time_limit: std::time::Duration,
+        non_improving_limit: std::time::Duration,
+    ) -> Solution<T>;
 }

@@ -37,7 +37,6 @@
 use std::time::{Duration, Instant};
 
 use talos_core::utils::num::SolverNumeric;
-use talos_model::solution::Solution;
 use talos_search::oracle::GlobalOracle;
 
 // ----------------------------------------------------------------
@@ -181,6 +180,10 @@ impl ExhaustionTeleport {
             current_stagnation: 0,
         }
     }
+
+    pub fn instant() -> Self {
+        Self::new(1)
+    }
 }
 
 impl TeleportPolicy for ExhaustionTeleport {
@@ -214,15 +217,20 @@ impl TeleportPolicy for ExhaustionTeleport {
 // Helper
 // ----------------------------------------------------------------
 
-/// Attempts to teleport by querying the oracle for a solution better
-/// than the current local best.
+/// Checks whether the metaheuristic should attempt a teleport.
 ///
-/// Returns `Some(solution)` if the policy says to teleport AND the
-/// oracle holds a strictly better solution. Returns `None` otherwise.
+/// Calls [`TeleportPolicy::on_exhaustion`] to advance the stagnation
+/// counter, then returns `true` if:
 ///
-/// On success, calls [`TeleportPolicy::on_teleport`] to reset the
-/// policy's stagnation tracking.
-pub fn try_teleport<T, G, Tp>(policy: &mut Tp, oracle: &G, best_objective: T) -> Option<Solution<T>>
+/// 1. The policy says to teleport ([`TeleportPolicy::should_teleport`]).
+/// 2. The oracle holds a solution strictly better than `best_objective`
+///    (lock-free check).
+///
+/// Does *not* extract a solution or reset the policy. The engine is
+/// responsible for fetching the solution directly into its internal
+/// buffers and then calling [`TeleportPolicy::on_teleport`] (via
+/// [`Metaheuristic::on_teleport`]) on success.
+pub fn should_attempt_teleport<T, G, Tp>(policy: &mut Tp, oracle: &G, best_objective: T) -> bool
 where
     T: SolverNumeric,
     G: GlobalOracle<T>,
@@ -230,13 +238,10 @@ where
 {
     policy.on_exhaustion();
     if !policy.should_teleport() {
-        return None;
+        return false;
     }
-    let oracle_best = oracle.best_objective()?;
-    if oracle_best >= best_objective {
-        return None;
-    }
-    let solution = oracle.with_best(|sol| sol.clone())?;
-    policy.on_teleport();
-    Some(solution)
+    let Some(oracle_best) = oracle.best_objective() else {
+        return false;
+    };
+    oracle_best < best_objective
 }

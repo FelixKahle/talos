@@ -28,6 +28,15 @@ pub trait GlobalOracle<T> {
     fn with_best<F, R>(&self, f: F) -> Option<R>
     where
         F: FnOnce(&Solution<T>) -> R;
+
+    /// Returns the number of solutions currently held in the pool.
+    fn pool_len(&self) -> usize;
+
+    /// Applies `f` to the solution at the given rank (0 = best).
+    /// Returns `None` if the rank is out of bounds or the pool is empty.
+    fn with_ranked<F, R>(&self, rank: usize, f: F) -> Option<R>
+    where
+        F: FnOnce(&Solution<T>) -> R;
 }
 
 pub struct NoOracle;
@@ -46,6 +55,17 @@ impl<T> GlobalOracle<T> for NoOracle {
     }
 
     fn with_best<F, R>(&self, _f: F) -> Option<R>
+    where
+        F: FnOnce(&Solution<T>) -> R,
+    {
+        None
+    }
+
+    fn pool_len(&self) -> usize {
+        0
+    }
+
+    fn with_ranked<F, R>(&self, _rank: usize, _f: F) -> Option<R>
     where
         F: FnOnce(&Solution<T>) -> R,
     {

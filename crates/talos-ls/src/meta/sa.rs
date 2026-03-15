@@ -84,8 +84,10 @@
 use crate::{
     exec::SearchCommand,
     meta::{
-        metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
-        teleport::{NoTeleport, TeleportPolicy, try_teleport},
+        metaheuristic::{
+            AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome, TeleportTarget,
+        },
+        teleport::{NoTeleport, TeleportPolicy, should_attempt_teleport},
     },
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
@@ -764,13 +766,13 @@ where
         _buffered_solution: Option<SolutionView<'_, T>>,
         _graph: &ScheduleGraph,
         oracle: &G,
-    ) -> NeighborhoodExhaustionOutcome<T> {
-        if let Some(solution) = try_teleport(
+    ) -> NeighborhoodExhaustionOutcome {
+        if should_attempt_teleport(
             &mut self.teleport_policy,
             oracle,
             _best_solution.objective_value(),
         ) {
-            return NeighborhoodExhaustionOutcome::Teleport(solution);
+            return NeighborhoodExhaustionOutcome::Teleport(TeleportTarget::Best);
         }
 
         if self.cooling_trigger == CoolingTrigger::Cycle {
@@ -906,6 +908,7 @@ where
         _new_solution: SolutionView<'_, T>,
         _graph: &ScheduleGraph,
     ) {
+        self.teleport_policy.on_teleport();
         self.cooling.reset();
     }
 

@@ -24,7 +24,9 @@
 use crate::{
     decoding::{decode_full_unchecked, decode_unchecked},
     exec::{SearchCommand, TerminationReason},
-    meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
+    meta::metaheuristic::{
+        AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome, TeleportTarget,
+    },
     monitor::lsmonitor::LocalSearchMonitor,
     mutator::Mutator,
     operator::lsoperator::LocalSearchOperator,
@@ -380,12 +382,49 @@ impl<T> Engine<T> {
                             termination_reason = TerminationReason::NeighborhoodExhausted;
                             break 'outer;
                         }
-                        NeighborhoodExhaustionOutcome::Teleport(solution) => {
-                            self.topology_graph.overwrite_from_slices(
-                                solution.berths(),
-                                solution.start_times(),
-                                model.num_berths(),
-                            );
+                        NeighborhoodExhaustionOutcome::Teleport(target) => {
+                            // Write the targeted oracle solution directly into
+                            // the topology graph, avoiding an intermediate
+                            // heap allocation. The oracle lock is held only
+                            // for the duration of the copy.
+                            let teleported = match target {
+                                TeleportTarget::Best => oracle.with_best(|sol| {
+                                    self.topology_graph.overwrite_from_slices(
+                                        sol.berths(),
+                                        sol.start_times(),
+                                        model.num_berths(),
+                                    );
+                                }),
+                                TeleportTarget::Rank(rank) => {
+                                    // Try the requested rank; fall back to best
+                                    // if out of bounds.
+                                    oracle
+                                        .with_ranked(rank, |sol| {
+                                            self.topology_graph.overwrite_from_slices(
+                                                sol.berths(),
+                                                sol.start_times(),
+                                                model.num_berths(),
+                                            );
+                                        })
+                                        .or_else(|| {
+                                            oracle.with_best(|sol| {
+                                                self.topology_graph.overwrite_from_slices(
+                                                    sol.berths(),
+                                                    sol.start_times(),
+                                                    model.num_berths(),
+                                                );
+                                            })
+                                        })
+                                }
+                            };
+
+                            if teleported.is_none() {
+                                // Race: oracle was emptied between the
+                                // metaheuristic's check and this fetch.
+                                // Fall back to a restart.
+                                operator.reset();
+                                continue 'outer;
+                            }
 
                             unsafe {
                                 decode_full_unchecked(
@@ -1076,7 +1115,7 @@ mod tests {
             _buffered: Option<SolutionView<'_, i64>>,
             _graph: &ScheduleGraph,
             _oracle: &G,
-        ) -> NeighborhoodExhaustionOutcome<i64> {
+        ) -> NeighborhoodExhaustionOutcome {
             NeighborhoodExhaustionOutcome::Terminate
         }
 
@@ -1215,7 +1254,7 @@ mod tests {
             _buffered: Option<SolutionView<'_, i64>>,
             _graph: &ScheduleGraph,
             _oracle: &G,
-        ) -> NeighborhoodExhaustionOutcome<i64> {
+        ) -> NeighborhoodExhaustionOutcome {
             NeighborhoodExhaustionOutcome::Terminate
         }
 
@@ -1353,7 +1392,7 @@ mod tests {
             _buffered: Option<SolutionView<'_, i64>>,
             _graph: &ScheduleGraph,
             _oracle: &G,
-        ) -> NeighborhoodExhaustionOutcome<i64> {
+        ) -> NeighborhoodExhaustionOutcome {
             NeighborhoodExhaustionOutcome::Terminate
         }
 
@@ -1777,7 +1816,7 @@ mod tests {
                 bf: Option<SolutionView<'_, i64>>,
                 g: &ScheduleGraph,
                 oracle: &G,
-            ) -> NeighborhoodExhaustionOutcome<i64> {
+            ) -> NeighborhoodExhaustionOutcome {
                 self.inner
                     .on_neighbourhood_exhausted(m, b, a, bf, g, oracle)
             }

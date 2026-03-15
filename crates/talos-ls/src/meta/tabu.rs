@@ -99,13 +99,16 @@
 use crate::{
     exec::SearchCommand,
     meta::{
-        metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
-        teleport::{NoTeleport, TeleportPolicy, try_teleport},
+        metaheuristic::{
+            AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome, TeleportTarget,
+        },
+        teleport::{NoTeleport, TeleportPolicy, should_attempt_teleport},
         tie::{KeepFirst, TieBreakingStrategy},
     },
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use rand::{Rng, RngExt};
+use std::marker::PhantomData;
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 use talos_search::oracle::GlobalOracle;
@@ -363,7 +366,7 @@ where
     iteration: u64,
 
     /// What to do when the neighbourhood is exhausted.
-    exhaustion_outcome: NeighborhoodExhaustionOutcome<T>,
+    exhaustion_outcome: NeighborhoodExhaustionOutcome,
 
     /// Move selection strategy.
     selection: SelectionStrategy,
@@ -373,6 +376,9 @@ where
 
     /// Teleport policy controlling oracle-based solution injection.
     teleport_policy: Tp,
+
+    /// Marker to keep `T` as a type parameter.
+    _marker: PhantomData<T>,
 }
 
 impl<
@@ -421,6 +427,7 @@ where
             selection: SelectionStrategy::BestImprovement,
             tie_breaking: KeepFirst,
             teleport_policy: NoTeleport,
+            _marker: PhantomData,
         }
     }
 }
@@ -456,6 +463,7 @@ where
             selection: SelectionStrategy::BestImprovement,
             tie_breaking: KeepFirst,
             teleport_policy: NoTeleport,
+            _marker: PhantomData,
         }
     }
 }
@@ -486,6 +494,7 @@ where
             selection: self.selection,
             tie_breaking,
             teleport_policy: self.teleport_policy,
+            _marker: PhantomData,
         }
     }
 
@@ -501,6 +510,7 @@ where
             selection: self.selection,
             tie_breaking: self.tie_breaking,
             teleport_policy: policy,
+            _marker: PhantomData,
         }
     }
 
@@ -526,15 +536,15 @@ where
     /// the standard choice for Tabu Search — the engine re-scans the
     /// neighbourhood on each iteration.
     #[inline]
-    pub fn with_exhaustion_outcome(mut self, outcome: NeighborhoodExhaustionOutcome<T>) -> Self {
+    pub fn with_exhaustion_outcome(mut self, outcome: NeighborhoodExhaustionOutcome) -> Self {
         self.exhaustion_outcome = outcome;
         self
     }
 
     /// Returns the current exhaustion outcome setting.
     #[inline]
-    pub fn exhaustion_outcome(&self) -> NeighborhoodExhaustionOutcome<T> {
-        self.exhaustion_outcome.clone()
+    pub fn exhaustion_outcome(&self) -> NeighborhoodExhaustionOutcome {
+        self.exhaustion_outcome
     }
 
     /// Returns a reference to the tenure strategy.
@@ -629,16 +639,16 @@ where
         _buffered_solution: Option<SolutionView<'_, T>>,
         _graph: &ScheduleGraph,
         oracle: &G,
-    ) -> NeighborhoodExhaustionOutcome<T> {
-        if let Some(solution) = try_teleport(
+    ) -> NeighborhoodExhaustionOutcome {
+        if should_attempt_teleport(
             &mut self.teleport_policy,
             oracle,
             _best_solution.objective_value(),
         ) {
-            return NeighborhoodExhaustionOutcome::Teleport(solution);
+            return NeighborhoodExhaustionOutcome::Teleport(TeleportTarget::Best);
         }
 
-        self.exhaustion_outcome.clone()
+        self.exhaustion_outcome
     }
 
     /// In best-improvement mode, always commits the buffered solution.
@@ -775,6 +785,7 @@ where
         _new_solution: SolutionView<'_, T>,
         _graph: &ScheduleGraph,
     ) {
+        self.teleport_policy.on_teleport();
         self.memory.clear();
         self.iteration = 0;
     }
