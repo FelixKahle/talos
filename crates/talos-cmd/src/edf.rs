@@ -210,10 +210,9 @@ where
 
     // 3. Compute total objective function
     let mut total_objective = T::default();
-    for v in 0..num_vessels {
-        let vessel = VesselIndex::new(v);
-        let berth = final_berths[v];
-        let start = final_starts[v];
+    for vessel in model.vessel_iter() {
+        let berth = final_berths[vessel.get()];
+        let start = final_starts[vessel.get()];
 
         let weight = model.vessel_weight(vessel);
         let pt = model.vessel_processing_time(vessel, berth).unwrap();

@@ -115,9 +115,9 @@ use talos_model::{
     solution::SolutionView,
 };
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Feature Cost
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Computes the cost contribution of a single feature.
 ///
@@ -158,9 +158,9 @@ impl FeatureCost for UniformCost {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Penalization Strategy
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Controls which features are penalized when the search reaches a local
 /// optimum.
@@ -208,67 +208,48 @@ impl PenalizationStrategy for MaxUtilityPenalization {
         let num_berths = graph.num_berths();
 
         let mut best_utility = f64::NEG_INFINITY;
-        // Reuse the scratch buffer — clear but keep the allocation.
         self.buf.clear();
 
-        // Walk every berth chain: sentinel -> v1 -> v2 -> ... -> sentinel.
-        for b in 0..num_berths {
-            let berth = BerthIndex::new(b);
-            let sentinel = graph.sentinel(berth);
-            let mut prev_node = sentinel;
-            loop {
-                let next = graph.next_node(prev_node);
-
-                // Only consider edges where at least one end is a vessel.
-                if prev_node.get() < num_vessels || next.get() < num_vessels {
-                    let c = cost.edge_cost(prev_node, next);
-                    if c > 0.0 {
-                        let idx = edge_flat_index(prev_node, next, num_vessels);
-                        debug_assert!(idx < memory.edge.len());
-
-                        // SAFETY: idx < (num_vessels+1)^2, the edge allocation size.
-                        let p = unsafe { *memory.edge.get_unchecked(idx) } as f64;
-                        let utility = c / (1.0 + p);
-
-                        if utility > best_utility + f64::EPSILON {
-                            best_utility = utility;
-                            self.buf.clear();
-                            self.buf.push((true, idx));
-                        } else if (utility - best_utility).abs() <= f64::EPSILON {
-                            self.buf.push((true, idx));
-                        }
-                    }
-                }
-
-                if next == sentinel {
-                    break;
-                }
-                prev_node = next;
-            }
-        }
-
-        for v in 0..num_vessels {
-            let vessel = VesselIndex::new(v);
-            let berth = graph.vessel_berth(vessel);
-            let c = cost.berth_cost(vessel, berth);
-            if c > 0.0 {
-                let idx = v * num_berths + berth.get();
-                debug_assert!(idx < memory.berth.len());
-                // SAFETY: idx = v * num_berths + berth < num_vessels * num_berths.
-                let p = unsafe { *memory.berth.get_unchecked(idx) } as f64;
-                let utility = c / (1.0 + p);
+        let mut evaluate_feature = |is_edge: bool, idx: usize, cost_val: f64, penalty: f64| {
+            if cost_val > 0.0 {
+                let utility = cost_val / (1.0 + penalty);
 
                 if utility > best_utility + f64::EPSILON {
                     best_utility = utility;
                     self.buf.clear();
-                    self.buf.push((false, idx));
+                    self.buf.push((is_edge, idx));
                 } else if (utility - best_utility).abs() <= f64::EPSILON {
-                    self.buf.push((false, idx));
+                    self.buf.push((is_edge, idx));
                 }
+            }
+        };
+
+        for berth in graph.berth_iter() {
+            let topo_iter = graph.berth_topology_iter(berth);
+
+            for (prev_node, next_node) in topo_iter.clone().zip(topo_iter.skip(1)) {
+                if prev_node.get() < num_vessels || next_node.get() < num_vessels {
+                    let c = cost.edge_cost(prev_node, next_node);
+                    let idx = edge_flat_index(prev_node, next_node, num_vessels);
+
+                    debug_assert!(idx < memory.edge.len());
+                    let p = unsafe { *memory.edge.get_unchecked(idx) } as f64;
+
+                    evaluate_feature(true, idx, c, p);
+                }
+            }
+
+            for vessel in graph.vessel_sequence_iter(berth) {
+                let c = cost.berth_cost(vessel, berth);
+                let idx = vessel.get() * num_berths + berth.get();
+
+                debug_assert!(idx < memory.berth.len());
+                let p = unsafe { *memory.berth.get_unchecked(idx) } as f64;
+
+                evaluate_feature(false, idx, c, p);
             }
         }
 
-        // Increment penalty for all winning features.
         for &(is_edge, idx) in &self.buf {
             debug_assert!(if is_edge {
                 idx < memory.edge.len()
@@ -276,7 +257,6 @@ impl PenalizationStrategy for MaxUtilityPenalization {
                 idx < memory.berth.len()
             });
 
-            // SAFETY: idx was computed from the scan loops above and is within bounds.
             unsafe {
                 if is_edge {
                     let p = memory.edge.get_unchecked_mut(idx);
@@ -290,9 +270,9 @@ impl PenalizationStrategy for MaxUtilityPenalization {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Penalty Memory
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Long-term memory tracking how often each feature has been penalized.
 ///
@@ -307,12 +287,12 @@ pub struct PenaltyMemory {
     /// `edge[a * (num_vessels + 1) + b]` stores the penalty count for
     /// the edge feature $a \to b$. Index `num_vessels` represents the
     /// sentinel (berth boundary).
-    pub(crate) edge: Vec<u64>,
+    edge: Vec<u64>,
 
     /// Flat `num_vessels * num_berths` array.
     /// `berth[v * num_berths + b]` stores the penalty count for
     /// assigning vessel $v$ to berth $b$.
-    pub(crate) berth: Vec<u64>,
+    berth: Vec<u64>,
 
     num_vessels: usize,
     num_berths: usize,
@@ -464,11 +444,32 @@ impl PenaltyMemory {
 
         delta
     }
+
+    /// Multiplies all penalty counters by `factor`, truncating toward zero.
+    ///
+    /// This implements "forgetfulness" — old penalties gradually erode,
+    /// allowing the search to revisit previously penalized regions.
+    ///
+    /// # Arguments
+    ///
+    /// * `factor` — Multiplicative decay factor (e.g. 0.9). Must be in `[0, 1]`.
+    pub fn decay(&mut self, factor: f64) {
+        debug_assert!(
+            (0.0..=1.0).contains(&factor),
+            "PenaltyMemory::decay: factor must be in [0, 1], got {factor}"
+        );
+        for p in &mut self.edge {
+            *p = (*p as f64 * factor) as u64;
+        }
+        for p in &mut self.berth {
+            *p = (*p as f64 * factor) as u64;
+        }
+    }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Penalization Trigger
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Controls *when* GLS applies its penalization step.
 #[repr(u8)]
@@ -503,145 +504,75 @@ impl std::fmt::Display for PenalizationTrigger {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
-// Lambda Strategy
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
+// Penalty Decay
+// ----------------------------------------------------------------
 
-/// Controls the penalty weight $\lambda$ used in the augmented objective.
+/// Controls how penalty counters decay over time.
 ///
-/// Implementations range from a simple fixed value (`FixedLambda`) to
-/// fully reactive auto-tuning (`ReactiveLambda`) that adjusts $\lambda$
-/// based on search progress.
-pub trait LambdaStrategy: std::fmt::Debug {
-    /// Returns the current penalty weight.
-    fn weight(&self) -> f64;
-
-    /// Called when the engine drops a penalty (i.e. the penalization
-    /// trigger fires). Reactive strategies should *increase* $\lambda$
-    /// here to escape the local optimum more aggressively.
-    fn on_penalize(&mut self);
-
-    /// Called when the engine discovers a new all-time global best.
-    /// Reactive strategies should *decrease* $\lambda$ here to exploit
-    /// the promising region.
-    fn on_new_best(&mut self);
-}
-
-/// A fixed (static) $\lambda$ that never changes.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FixedLambda {
-    value: f64,
-}
-
-impl FixedLambda {
-    /// Creates a new fixed lambda.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `value` is not positive.
-    #[inline]
-    pub fn new(value: f64) -> Self {
-        assert!(
-            value > 0.0,
-            "FixedLambda: value must be > 0.0, got {}",
-            value
-        );
-        Self { value }
-    }
-}
-
-impl LambdaStrategy for FixedLambda {
-    #[inline]
-    fn weight(&self) -> f64 {
-        self.value
-    }
-
-    #[inline]
-    fn on_penalize(&mut self) {}
-
-    #[inline]
-    fn on_new_best(&mut self) {}
-}
-
-/// A reactive $\lambda$ that self-adjusts based on search progress.
+/// Penalty decay implements "forgetfulness" — periodically eroding
+/// old penalties so the search can revisit previously penalized regions
+/// after it has explored elsewhere.
 ///
-/// - When the search is stuck (penalization fires), $\lambda$ is
-///   multiplied by `growth_factor` to increase diversification pressure.
-/// - When a new global best is found, $\lambda$ is multiplied by
-///   `decay_factor` (< 1) to reduce diversification and exploit the area.
-///
-/// Clamped to `[min_lambda, max_lambda]`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReactiveLambda {
-    current: f64,
-    growth_factor: f64,
-    decay_factor: f64,
-    min_lambda: f64,
-    max_lambda: f64,
+/// The decay hook is called after each penalization step.
+pub trait PenaltyDecay: std::fmt::Debug {
+    /// Called after each penalization step. May modify penalty counters.
+    fn after_penalization(&mut self, memory: &mut PenaltyMemory);
 }
 
-impl ReactiveLambda {
-    /// Creates a new reactive lambda.
+/// No decay — penalty counters are never eroded.
+///
+/// This is the default and matches classic GLS behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct NoDecay;
+
+impl PenaltyDecay for NoDecay {
+    #[inline]
+    fn after_penalization(&mut self, _memory: &mut PenaltyMemory) {}
+}
+
+/// Geometric (multiplicative) decay applied every `period` penalizations.
+///
+/// Every `period` penalization steps, all penalty counters are multiplied
+/// by `factor` (e.g. 0.9), truncating toward zero. This gradually erodes
+/// old penalties, allowing the search to revisit previously sealed regions.
+///
+/// A period of 1 means decay fires on every penalization.
+#[derive(Debug, Clone)]
+pub struct GeometricDecay {
+    factor: f64,
+    period: u64,
+    counter: u64,
+}
+
+impl GeometricDecay {
+    /// Creates a new geometric decay strategy.
     ///
     /// # Arguments
     ///
-    /// * `initial` — Starting $\lambda$ (e.g. from `heuristic_lambda`).
-    /// * `growth_factor` — Multiplier when stuck (e.g. 1.2).
-    /// * `decay_factor` — Multiplier on new best (e.g. 0.8).
-    /// * `min_lambda` — Floor clamp.
-    /// * `max_lambda` — Ceiling clamp.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `initial`, `min_lambda`, or `max_lambda` are not
-    /// positive, if `growth_factor <= 1.0`, if `decay_factor >= 1.0`
-    /// or `<= 0.0`, or if `min_lambda > max_lambda`.
-    #[inline]
-    pub fn new(
-        initial: f64,
-        growth_factor: f64,
-        decay_factor: f64,
-        min_lambda: f64,
-        max_lambda: f64,
-    ) -> Self {
-        assert!(initial > 0.0, "ReactiveLambda: initial must be > 0.0");
+    /// * `factor` — Multiplicative decay factor (e.g. 0.9). Must be in `(0, 1)`.
+    /// * `period` — Apply decay every `period` penalization steps. Must be ≥ 1.
+    pub fn new(factor: f64, period: u64) -> Self {
         assert!(
-            growth_factor > 1.0,
-            "ReactiveLambda: growth_factor must be > 1.0"
+            factor > 0.0 && factor < 1.0,
+            "GeometricDecay: factor must be in (0, 1), got {factor}"
         );
-        assert!(
-            decay_factor > 0.0 && decay_factor < 1.0,
-            "ReactiveLambda: decay_factor must be in (0.0, 1.0)"
-        );
-        assert!(min_lambda > 0.0, "ReactiveLambda: min_lambda must be > 0.0");
-        assert!(
-            max_lambda >= min_lambda,
-            "ReactiveLambda: max_lambda must be >= min_lambda"
-        );
+        assert!(period >= 1, "GeometricDecay: period must be >= 1");
         Self {
-            current: initial.clamp(min_lambda, max_lambda),
-            growth_factor,
-            decay_factor,
-            min_lambda,
-            max_lambda,
+            factor,
+            period,
+            counter: 0,
         }
     }
 }
 
-impl LambdaStrategy for ReactiveLambda {
-    #[inline]
-    fn weight(&self) -> f64 {
-        self.current
-    }
-
-    #[inline]
-    fn on_penalize(&mut self) {
-        self.current = (self.current * self.growth_factor).min(self.max_lambda);
-    }
-
-    #[inline]
-    fn on_new_best(&mut self) {
-        self.current = (self.current * self.decay_factor).max(self.min_lambda);
+impl PenaltyDecay for GeometricDecay {
+    fn after_penalization(&mut self, memory: &mut PenaltyMemory) {
+        self.counter += 1;
+        if self.counter >= self.period {
+            self.counter = 0;
+            memory.decay(self.factor);
+        }
     }
 }
 
@@ -669,32 +600,379 @@ impl LambdaStrategy for ReactiveLambda {
 /// let lambda = heuristic_lambda(1000.0, 50, 0.3);
 /// assert!((lambda - 6.0).abs() < f64::EPSILON);
 /// ```
-#[inline]
+#[inline(always)]
 pub fn heuristic_lambda(objective: f64, num_features: usize, alpha: f64) -> f64 {
     let nf = num_features.max(1) as f64;
     (alpha * objective.abs() / nf).max(f64::EPSILON)
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
+// Lambda Strategy
+// ----------------------------------------------------------------
+
+/// Controls how the penalty weight $\lambda$ evolves during search.
+///
+/// Lifecycle hooks are called by GLS at the appropriate moments:
+/// - [`on_start`](LambdaStrategy::on_start) — once, when the search begins.
+/// - [`on_accept`](LambdaStrategy::on_accept) — after each accepted move.
+/// - [`on_new_best`](LambdaStrategy::on_new_best) — when a new global best is found.
+/// - [`on_penalization`](LambdaStrategy::on_penalization) — after each penalization step.
+pub trait LambdaStrategy: std::fmt::Debug {
+    /// Returns the current penalty weight $\lambda$.
+    fn lambda(&self) -> f64;
+
+    /// Called once when the search starts.
+    fn on_start(&mut self, _initial_objective: f64) {}
+
+    /// Called after an accepted move.
+    fn on_accept(&mut self, _new_objective: f64) {}
+
+    /// Called when a new global best solution is found.
+    fn on_new_best(&mut self, _new_best_objective: f64) {}
+
+    /// Called after the penalization step fires.
+    fn on_penalization(&mut self) {}
+}
+
+/// A constant $\lambda$ that never changes.
+///
+/// This is the simplest strategy and the default for
+/// [`GuidedLocalSearch`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StaticLambda(pub f64);
+
+impl LambdaStrategy for StaticLambda {
+    #[inline]
+    fn lambda(&self) -> f64 {
+        self.0
+    }
+}
+
+/// A reactive $\lambda$ that adjusts based on search progress.
+///
+/// When a new best solution is found, $\lambda$ is decreased by a
+/// factor of `(1 - step)` to allow intensification. When penalization
+/// fires (stagnation), $\lambda$ is increased by a factor of
+/// `(1 + step)` to encourage diversification.
+///
+/// The value is clamped to `[min_lambda, max_lambda]`.
+#[derive(Debug, Clone)]
+pub struct DynamicLambda {
+    current: f64,
+    initial: f64,
+    step: f64,
+    min_lambda: f64,
+    max_lambda: f64,
+    reset_on_best: bool,
+}
+
+impl DynamicLambda {
+    /// Creates a new dynamic lambda strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial` — Starting $\lambda$ value.
+    /// * `step` — Multiplicative adjustment factor (e.g. 0.1 for ±10%).
+    /// * `min_lambda` — Lower clamp bound.
+    /// * `max_lambda` — Upper clamp bound.
+    pub fn new(initial: f64, step: f64, min_lambda: f64, max_lambda: f64) -> Self {
+        assert!(initial > 0.0, "DynamicLambda: initial must be > 0.0");
+        assert!(
+            step > 0.0 && step < 1.0,
+            "DynamicLambda: step must be in (0, 1)"
+        );
+        assert!(min_lambda > 0.0, "DynamicLambda: min_lambda must be > 0.0");
+        assert!(
+            max_lambda >= min_lambda,
+            "DynamicLambda: max_lambda must be >= min_lambda"
+        );
+        Self {
+            current: initial.clamp(min_lambda, max_lambda),
+            initial,
+            step,
+            min_lambda,
+            max_lambda,
+            reset_on_best: false,
+        }
+    }
+
+    /// When enabled, finding a new global best resets $\lambda$ to
+    /// `initial` instead of scaling it down. This signals "New World"
+    /// exploration with a clean baseline.
+    #[inline]
+    pub fn with_reset_on_best(mut self, reset: bool) -> Self {
+        self.reset_on_best = reset;
+        self
+    }
+}
+
+impl LambdaStrategy for DynamicLambda {
+    #[inline]
+    fn lambda(&self) -> f64 {
+        self.current
+    }
+
+    fn on_start(&mut self, _initial_objective: f64) {
+        self.current = self.initial.clamp(self.min_lambda, self.max_lambda);
+    }
+
+    fn on_new_best(&mut self, _new_best_objective: f64) {
+        if self.reset_on_best {
+            // Reset to base lambda for "New World" exploration.
+            self.current = self.initial.clamp(self.min_lambda, self.max_lambda);
+        } else {
+            // Intensify: decrease lambda.
+            self.current =
+                (self.current * (1.0 - self.step)).clamp(self.min_lambda, self.max_lambda);
+        }
+    }
+
+    fn on_penalization(&mut self) {
+        // Diversify: increase lambda.
+        self.current = (self.current * (1.0 + self.step)).clamp(self.min_lambda, self.max_lambda);
+    }
+}
+
+/// A reactive $\lambda$ that adjusts by a fixed additive step.
+///
+/// Unlike [`DynamicLambda`] which uses multiplicative scaling,
+/// this strategy adds or subtracts a constant `step` value,
+/// giving predictable, bounded increments regardless of the
+/// current lambda magnitude.
+///
+/// - On new best → $\lambda \leftarrow \lambda - \text{step}$ (intensify).
+/// - On penalization → $\lambda \leftarrow \lambda + \text{step}$ (diversify).
+///
+/// The value is clamped to `[min_lambda, max_lambda]`.
+#[derive(Debug, Clone)]
+pub struct AdditiveDynamicLambda {
+    current: f64,
+    initial: f64,
+    step: f64,
+    min_lambda: f64,
+    max_lambda: f64,
+    reset_on_best: bool,
+}
+
+impl AdditiveDynamicLambda {
+    /// Creates a new additive dynamic lambda strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial` — Starting $\lambda$ value.
+    /// * `step` — Constant additive adjustment (e.g. 0.05).
+    /// * `min_lambda` — Lower clamp bound.
+    /// * `max_lambda` — Upper clamp bound.
+    pub fn new(initial: f64, step: f64, min_lambda: f64, max_lambda: f64) -> Self {
+        assert!(
+            initial > 0.0,
+            "AdditiveDynamicLambda: initial must be > 0.0"
+        );
+        assert!(step > 0.0, "AdditiveDynamicLambda: step must be > 0.0");
+        assert!(
+            min_lambda > 0.0,
+            "AdditiveDynamicLambda: min_lambda must be > 0.0"
+        );
+        assert!(
+            max_lambda >= min_lambda,
+            "AdditiveDynamicLambda: max_lambda must be >= min_lambda"
+        );
+        Self {
+            current: initial.clamp(min_lambda, max_lambda),
+            initial,
+            step,
+            min_lambda,
+            max_lambda,
+            reset_on_best: false,
+        }
+    }
+
+    /// When enabled, finding a new global best resets $\lambda$ to
+    /// `initial` instead of subtracting `step`. This signals "New World"
+    /// exploration with a clean baseline.
+    #[inline]
+    pub fn with_reset_on_best(mut self, reset: bool) -> Self {
+        self.reset_on_best = reset;
+        self
+    }
+}
+
+impl LambdaStrategy for AdditiveDynamicLambda {
+    #[inline]
+    fn lambda(&self) -> f64 {
+        self.current
+    }
+
+    fn on_start(&mut self, _initial_objective: f64) {
+        self.current = self.initial.clamp(self.min_lambda, self.max_lambda);
+    }
+
+    fn on_new_best(&mut self, _new_best_objective: f64) {
+        if self.reset_on_best {
+            // Reset to base lambda for "New World" exploration.
+            self.current = self.initial.clamp(self.min_lambda, self.max_lambda);
+        } else {
+            // Intensify: decrease lambda by a fixed step.
+            self.current = (self.current - self.step).clamp(self.min_lambda, self.max_lambda);
+        }
+    }
+
+    fn on_penalization(&mut self) {
+        // Diversify: increase lambda by a fixed step.
+        self.current = (self.current + self.step).clamp(self.min_lambda, self.max_lambda);
+    }
+}
+
+/// Multi-Armed Bandit (UCB1) lambda strategy that selects from a set of
+/// discrete lambda *arms*.
+///
+/// Each arm tracks its cumulative reward and pull count. After each
+/// accepted move the reward for the active arm is updated based on
+/// whether the solution improved. A new arm is selected via the UCB1
+/// formula after each penalization step (the natural decision point
+/// where GLS re-evaluates strategy).
+///
+/// $$\text{UCB1}(a) = \bar{X}_a + c \sqrt{\frac{\ln N}{n_a}}$$
+///
+/// where $\bar{X}_a$ is the average reward for arm $a$, $N$ is the
+/// total number of pulls, $n_a$ is the pull count, and $c$ is an
+/// exploration constant.
+#[derive(Debug, Clone)]
+pub struct BanditLambda {
+    arms: Vec<f64>,
+    rewards: Vec<f64>,
+    counts: Vec<u64>,
+    total_pulls: u64,
+    active_arm: usize,
+    exploration_constant: f64,
+    last_accepted_objective: f64,
+}
+
+impl BanditLambda {
+    /// Creates a new MAB lambda strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `arms` — The set of candidate $\lambda$ values. Must be non-empty
+    ///   and all positive.
+    /// * `exploration_constant` — The UCB1 exploration parameter $c$.
+    ///   Values around 0.5–2.0 are typical.
+    pub fn new(arms: Vec<f64>, exploration_constant: f64) -> Self {
+        assert!(!arms.is_empty(), "BanditLambda: arms must be non-empty");
+        assert!(
+            arms.iter().all(|&a| a > 0.0),
+            "BanditLambda: all arms must be > 0.0"
+        );
+        let n = arms.len();
+        Self {
+            arms,
+            rewards: vec![0.0; n],
+            counts: vec![0; n],
+            total_pulls: 0,
+            active_arm: 0,
+            exploration_constant,
+            last_accepted_objective: f64::INFINITY,
+        }
+    }
+
+    /// Selects the next arm using UCB1. Unpulled arms are tried first.
+    fn select_arm(&self) -> usize {
+        // Pull each arm at least once.
+        for (i, &c) in self.counts.iter().enumerate() {
+            if c == 0 {
+                return i;
+            }
+        }
+
+        let ln_total = (self.total_pulls as f64).ln();
+        let mut best_ucb = f64::NEG_INFINITY;
+        let mut best_arm = 0;
+
+        for (i, (&reward, &count)) in self.rewards.iter().zip(&self.counts).enumerate() {
+            let avg = reward / count as f64;
+            let ucb = avg + self.exploration_constant * (ln_total / count as f64).sqrt();
+            if ucb > best_ucb {
+                best_ucb = ucb;
+                best_arm = i;
+            }
+        }
+
+        best_arm
+    }
+}
+
+impl LambdaStrategy for BanditLambda {
+    #[inline]
+    fn lambda(&self) -> f64 {
+        debug_assert!(self.active_arm < self.arms.len());
+        // SAFETY: active_arm is always set via select_arm() which returns < arms.len(),
+        // or 0 in on_start() where arms is guaranteed non-empty by the constructor.
+        unsafe { *self.arms.get_unchecked(self.active_arm) }
+    }
+
+    fn on_start(&mut self, initial_objective: f64) {
+        self.rewards.fill(0.0);
+        self.counts.fill(0);
+        self.total_pulls = 0;
+        self.active_arm = 0;
+        self.last_accepted_objective = initial_objective;
+        // Pull the first arm.
+        debug_assert!(!self.counts.is_empty());
+        // SAFETY: arms (and thus counts) is guaranteed non-empty by the constructor.
+        unsafe { *self.counts.get_unchecked_mut(0) = 1 };
+        self.total_pulls = 1;
+    }
+
+    fn on_accept(&mut self, new_objective: f64) {
+        // Reward = relative improvement (positive is good).
+        if self.last_accepted_objective.is_finite() && self.last_accepted_objective != 0.0 {
+            let improvement =
+                (self.last_accepted_objective - new_objective) / self.last_accepted_objective.abs();
+            debug_assert!(self.active_arm < self.rewards.len());
+            // SAFETY: active_arm < arms.len() == rewards.len().
+            unsafe { *self.rewards.get_unchecked_mut(self.active_arm) += improvement };
+        }
+        self.last_accepted_objective = new_objective;
+    }
+
+    fn on_penalization(&mut self) {
+        // After penalization, re-evaluate which arm to use.
+        self.active_arm = self.select_arm();
+        debug_assert!(self.active_arm < self.counts.len());
+        // SAFETY: select_arm() returns < arms.len() == counts.len().
+        unsafe { *self.counts.get_unchecked_mut(self.active_arm) += 1 };
+        self.total_pulls += 1;
+    }
+}
+
+// ----------------------------------------------------------------
 // Guided Local Search
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Guided Local Search metaheuristic with pluggable penalization,
-/// feature-cost, and lambda strategies.
+/// feature-cost, lambda, and penalty-decay strategies.
 ///
 /// See the [module-level documentation](self) for algorithmic details.
-pub struct GuidedLocalSearch<P = MaxUtilityPenalization, F = UniformCost, L = FixedLambda> {
+pub struct GuidedLocalSearch<
+    P = MaxUtilityPenalization,
+    F = UniformCost,
+    L = StaticLambda,
+    D = NoDecay,
+> {
     /// The penalization strategy applied at local optima.
     penalization: P,
 
     /// The feature cost model.
     feature_cost: F,
 
+    /// The lambda strategy controlling the penalty weight.
+    lambda_strategy: L,
+
+    /// The penalty decay strategy.
+    decay: D,
+
     /// Long-term penalty memory.
     memory: PenaltyMemory,
-
-    /// The lambda strategy controlling the penalty weight.
-    lambda: L,
 
     /// Cached augmented penalty of the current accepted solution.
     /// This avoids recomputing the full penalty sum on every candidate.
@@ -708,14 +986,15 @@ pub struct GuidedLocalSearch<P = MaxUtilityPenalization, F = UniformCost, L = Fi
     trigger_counter: u64,
 }
 
-impl<P: std::fmt::Debug, F: std::fmt::Debug, L: std::fmt::Debug> std::fmt::Debug
-    for GuidedLocalSearch<P, F, L>
+impl<P: std::fmt::Debug, F: std::fmt::Debug, L: std::fmt::Debug, D: std::fmt::Debug> std::fmt::Debug
+    for GuidedLocalSearch<P, F, L, D>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GuidedLocalSearch")
             .field("penalization", &self.penalization)
             .field("feature_cost", &self.feature_cost)
-            .field("lambda", &self.lambda)
+            .field("lambda_strategy", &self.lambda_strategy)
+            .field("decay", &self.decay)
             .field("current_penalty_sum", &self.current_penalty_sum)
             .field("trigger", &self.trigger)
             .field("trigger_counter", &self.trigger_counter)
@@ -723,22 +1002,89 @@ impl<P: std::fmt::Debug, F: std::fmt::Debug, L: std::fmt::Debug> std::fmt::Debug
     }
 }
 
-impl GuidedLocalSearch<MaxUtilityPenalization, UniformCost, FixedLambda> {
-    /// Creates a new GLS with default `MaxUtilityPenalization`, `UniformCost`,
-    /// and a fixed lambda.
+impl GuidedLocalSearch<MaxUtilityPenalization, UniformCost, StaticLambda> {
+    /// Creates a new GLS with all default strategies.
+    ///
+    /// Defaults to `MaxUtilityPenalization`, `UniformCost`,
+    /// `StaticLambda(1.0)`, and `NoDecay`. Use the `.with_*()` builder
+    /// methods to customise:
+    ///
+    /// ```ignore
+    /// let gls = GuidedLocalSearch::new(num_vessels, num_berths)
+    ///     .with_lambda_strategy(DynamicLambda::new(base, 0.1, lo, hi))
+    ///     .with_decay(GeometricDecay::new(0.9, 10))
+    ///     .with_trigger(PenalizationTrigger::AfterMoves(100));
+    /// ```
     ///
     /// # Arguments
     ///
-    /// * `lambda` — The penalty weight. See `heuristic_lambda` for auto-tuning.
     /// * `num_vessels` — Number of vessels in the problem.
     /// * `num_berths` — Number of berths in the problem.
     #[inline]
-    pub fn new(lambda: f64, num_vessels: usize, num_berths: usize) -> Self {
+    pub fn new(num_vessels: usize, num_berths: usize) -> Self {
         Self {
             penalization: MaxUtilityPenalization::default(),
             feature_cost: UniformCost,
+            lambda_strategy: StaticLambda(1.0),
+            decay: NoDecay,
             memory: PenaltyMemory::new(num_vessels, num_berths),
-            lambda: FixedLambda::new(lambda),
+            current_penalty_sum: 0,
+            trigger: PenalizationTrigger::OnExhaustion,
+            trigger_counter: 0,
+        }
+    }
+
+    /// Sets a static (constant) lambda value.
+    ///
+    /// Shorthand for `.with_lambda_strategy(StaticLambda(lambda))`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `lambda` is not positive.
+    #[inline]
+    pub fn with_lambda(mut self, lambda: f64) -> Self {
+        assert!(
+            lambda > 0.0,
+            "GuidedLocalSearch: lambda must be > 0.0, got {}",
+            lambda
+        );
+        self.lambda_strategy = StaticLambda(lambda);
+        self
+    }
+}
+
+impl<P, F, L> GuidedLocalSearch<P, F, L, NoDecay>
+where
+    P: PenalizationStrategy,
+    F: FeatureCost,
+    L: LambdaStrategy,
+{
+    /// Creates a new GLS with fully custom strategies (no penalty decay).
+    ///
+    /// Use [`.with_decay()`](GuidedLocalSearch::with_decay) to add a decay
+    /// strategy afterwards.
+    ///
+    /// # Arguments
+    ///
+    /// * `penalization` — The penalization strategy.
+    /// * `feature_cost` — The feature cost model.
+    /// * `lambda_strategy` — The lambda strategy controlling the penalty weight.
+    /// * `num_vessels` — Number of vessels in the problem.
+    /// * `num_berths` — Number of berths in the problem.
+    #[inline]
+    pub fn with_strategies(
+        penalization: P,
+        feature_cost: F,
+        lambda_strategy: L,
+        num_vessels: usize,
+        num_berths: usize,
+    ) -> Self {
+        Self {
+            penalization,
+            feature_cost,
+            lambda_strategy,
+            decay: NoDecay,
+            memory: PenaltyMemory::new(num_vessels, num_berths),
             current_penalty_sum: 0,
             trigger: PenalizationTrigger::OnExhaustion,
             trigger_counter: 0,
@@ -746,51 +1092,25 @@ impl GuidedLocalSearch<MaxUtilityPenalization, UniformCost, FixedLambda> {
     }
 }
 
-impl<P, F, L> GuidedLocalSearch<P, F, L>
+impl<P, F, L, D> GuidedLocalSearch<P, F, L, D>
 where
     P: PenalizationStrategy,
     F: FeatureCost,
     L: LambdaStrategy,
+    D: PenaltyDecay,
 {
-    /// Creates a new GLS with fully custom strategies.
-    ///
-    /// # Arguments
-    ///
-    /// * `penalization` — The penalization strategy.
-    /// * `feature_cost` — The feature cost model.
-    /// * `lambda` — The lambda strategy.
-    /// * `num_vessels` — Number of vessels in the problem.
-    /// * `num_berths` — Number of berths in the problem.
-    #[inline]
-    pub fn with_strategies(
-        penalization: P,
-        feature_cost: F,
-        lambda: L,
-        num_vessels: usize,
-        num_berths: usize,
-    ) -> Self {
-        Self {
-            penalization,
-            feature_cost,
-            memory: PenaltyMemory::new(num_vessels, num_berths),
-            lambda,
-            current_penalty_sum: 0,
-            trigger: PenalizationTrigger::OnExhaustion,
-            trigger_counter: 0,
-        }
-    }
-
     /// Replaces the penalization strategy.
     #[inline]
     pub fn with_penalization<P2: PenalizationStrategy>(
         self,
         penalization: P2,
-    ) -> GuidedLocalSearch<P2, F, L> {
+    ) -> GuidedLocalSearch<P2, F, L, D> {
         GuidedLocalSearch {
             penalization,
             feature_cost: self.feature_cost,
+            lambda_strategy: self.lambda_strategy,
+            decay: self.decay,
             memory: self.memory,
-            lambda: self.lambda,
             current_penalty_sum: self.current_penalty_sum,
             trigger: self.trigger,
             trigger_counter: self.trigger_counter,
@@ -802,12 +1122,13 @@ where
     pub fn with_feature_cost<F2: FeatureCost>(
         self,
         feature_cost: F2,
-    ) -> GuidedLocalSearch<P, F2, L> {
+    ) -> GuidedLocalSearch<P, F2, L, D> {
         GuidedLocalSearch {
             penalization: self.penalization,
             feature_cost,
+            lambda_strategy: self.lambda_strategy,
+            decay: self.decay,
             memory: self.memory,
-            lambda: self.lambda,
             current_penalty_sum: self.current_penalty_sum,
             trigger: self.trigger,
             trigger_counter: self.trigger_counter,
@@ -816,12 +1137,31 @@ where
 
     /// Replaces the lambda strategy.
     #[inline]
-    pub fn with_lambda<L2: LambdaStrategy>(self, lambda: L2) -> GuidedLocalSearch<P, F, L2> {
+    pub fn with_lambda_strategy<L2: LambdaStrategy>(
+        self,
+        lambda_strategy: L2,
+    ) -> GuidedLocalSearch<P, F, L2, D> {
         GuidedLocalSearch {
             penalization: self.penalization,
             feature_cost: self.feature_cost,
+            lambda_strategy,
+            decay: self.decay,
             memory: self.memory,
-            lambda,
+            current_penalty_sum: self.current_penalty_sum,
+            trigger: self.trigger,
+            trigger_counter: self.trigger_counter,
+        }
+    }
+
+    /// Replaces the penalty decay strategy.
+    #[inline]
+    pub fn with_decay<D2: PenaltyDecay>(self, decay: D2) -> GuidedLocalSearch<P, F, L, D2> {
+        GuidedLocalSearch {
+            penalization: self.penalization,
+            feature_cost: self.feature_cost,
+            lambda_strategy: self.lambda_strategy,
+            decay,
+            memory: self.memory,
             current_penalty_sum: self.current_penalty_sum,
             trigger: self.trigger,
             trigger_counter: self.trigger_counter,
@@ -831,19 +1171,19 @@ where
     /// Returns the current penalty weight $\lambda$.
     #[inline]
     pub fn lambda(&self) -> f64 {
-        self.lambda.weight()
+        self.lambda_strategy.lambda()
     }
 
     /// Returns a reference to the lambda strategy.
     #[inline]
     pub fn lambda_strategy(&self) -> &L {
-        &self.lambda
+        &self.lambda_strategy
     }
 
     /// Returns a mutable reference to the lambda strategy.
     #[inline]
     pub fn lambda_strategy_mut(&mut self) -> &mut L {
-        &mut self.lambda
+        &mut self.lambda_strategy
     }
 
     /// Returns a reference to the penalization strategy.
@@ -868,6 +1208,18 @@ where
     #[inline]
     pub fn feature_cost_mut(&mut self) -> &mut F {
         &mut self.feature_cost
+    }
+
+    /// Returns a reference to the penalty decay strategy.
+    #[inline]
+    pub fn decay(&self) -> &D {
+        &self.decay
+    }
+
+    /// Returns a mutable reference to the penalty decay strategy.
+    #[inline]
+    pub fn decay_mut(&mut self) -> &mut D {
+        &mut self.decay
     }
 
     /// Returns a reference to the penalty memory.
@@ -904,9 +1256,7 @@ where
         let num_berths = graph.num_berths();
         let mut sum: i64 = 0;
 
-        // ── Edge penalties ──
-        for b in 0..num_berths {
-            let berth = BerthIndex::new(b);
+        for berth in graph.berth_iter() {
             let sentinel = graph.sentinel(berth);
             let mut prev_node = sentinel;
             loop {
@@ -925,11 +1275,9 @@ where
             }
         }
 
-        // ── Berth-assignment penalties ──
-        for v in 0..num_vessels {
-            let vessel = VesselIndex::new(v);
+        for vessel in graph.vessel_iter() {
             let berth = graph.vessel_berth(vessel);
-            let idx = v * num_berths + berth.get();
+            let idx = vessel.get() * num_berths + berth.get();
             debug_assert!(idx < self.memory.berth.len());
 
             // SAFETY: v < num_vessels and berth < num_berths.
@@ -939,32 +1287,28 @@ where
         sum
     }
 
-    /// Applies the penalization strategy, notifies the lambda strategy,
-    /// and recomputes the cached penalty sum.
+    /// Applies the penalization strategy and recomputes the cached
+    /// penalty sum.
     ///
     /// This is the core "kick" step of GLS: after identifying and
     /// incrementing penalties for the highest-utility features, the
-    /// lambda strategy is notified (so reactive variants can adjust
-    /// the weight), and the cached penalty sum is fully recomputed
-    /// to stay consistent.
+    /// cached penalty sum is fully recomputed to stay consistent.
     fn penalize_and_recompute(&mut self, graph: &ScheduleGraph) {
         self.penalization
             .penalize(&mut self.memory, graph, &self.feature_cost);
-        self.lambda.on_penalize();
+        self.decay.after_penalization(&mut self.memory);
         self.current_penalty_sum = self.compute_penalty_sum(graph);
+        self.lambda_strategy.on_penalization();
     }
 }
 
-// ──────────────────────────────────────────────────────────────
-// Metaheuristic Implementation
-// ──────────────────────────────────────────────────────────────
-
-impl<T, P, F, L> Metaheuristic<T> for GuidedLocalSearch<P, F, L>
+impl<T, P, F, L, D> Metaheuristic<T> for GuidedLocalSearch<P, F, L, D>
 where
     T: SolverNumeric + ToPrimitive,
     P: PenalizationStrategy,
     F: FeatureCost,
     L: LambdaStrategy,
+    D: PenaltyDecay,
 {
     fn name(&self) -> &str {
         "GuidedLocalSearch"
@@ -979,6 +1323,8 @@ where
         self.memory.clear();
         self.current_penalty_sum = self.compute_penalty_sum(graph);
         self.trigger_counter = 0;
+        let obj = _initial_solution.objective_value().to_f64().unwrap_or(0.0);
+        self.lambda_strategy.on_start(obj);
     }
 
     fn on_end(
@@ -1070,9 +1416,9 @@ where
         let penalty_delta = self.memory.penalty_delta(graph_diff);
         let candidate_penalty_sum = self.current_penalty_sum + penalty_delta;
 
-        let w = self.lambda.weight();
-        let aug_candidate = cand_f64 + w * candidate_penalty_sum as f64;
-        let aug_current = curr_f64 + w * self.current_penalty_sum as f64;
+        let lambda = self.lambda_strategy.lambda();
+        let aug_candidate = cand_f64 + lambda * candidate_penalty_sum as f64;
+        let aug_current = curr_f64 + lambda * self.current_penalty_sum as f64;
 
         if aug_candidate < aug_current {
             AcceptanceOutcome::Accept
@@ -1094,6 +1440,12 @@ where
     ) {
         let penalty_delta = self.memory.penalty_delta(graph_diff);
         self.current_penalty_sum += penalty_delta;
+
+        let obj = _new_accepted_solution
+            .objective_value()
+            .to_f64()
+            .unwrap_or(0.0);
+        self.lambda_strategy.on_accept(obj);
 
         if let PenalizationTrigger::AfterMoves(n) = self.trigger {
             self.trigger_counter += 1;
@@ -1125,11 +1477,12 @@ where
         _graph: &ScheduleGraph,
         _graph_diff: &ScheduleGraphDiff,
     ) {
-        self.lambda.on_new_best();
         // Reset the non-improvement counter when a new best is found.
         if matches!(self.trigger, PenalizationTrigger::AfterNonImprovements(_)) {
             self.trigger_counter = 0;
         }
+        let obj = _new_best.objective_value().to_f64().unwrap_or(0.0);
+        self.lambda_strategy.on_new_best(obj);
     }
 
     /// Advances the non-improvement counter and, if it reaches the
@@ -1153,11 +1506,13 @@ where
     }
 }
 
+// ----------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── PenaltyMemory ────────────────────────────────────────
 
     #[test]
     fn test_penalty_memory_new_zeroed() {
@@ -1211,8 +1566,6 @@ mod tests {
         assert_eq!(mem.edge_penalty(sentinel, v), 0);
     }
 
-    // ── UniformCost ──────────────────────────────────────────
-
     #[test]
     fn test_uniform_cost_always_one() {
         let cost = UniformCost;
@@ -1223,8 +1576,6 @@ mod tests {
             1.0
         );
     }
-
-    // ── edge_flat_index ──────────────────────────────────────
 
     #[test]
     fn test_edge_flat_index_vessel_to_vessel() {
@@ -1250,35 +1601,25 @@ mod tests {
         assert_eq!(edge_flat_index(a, sentinel, 3), 3);
     }
 
-    // ── GuidedLocalSearch construction ───────────────────────
-
     #[test]
     fn test_gls_new() {
-        let gls = GuidedLocalSearch::new(0.5, 10, 3);
+        let gls = GuidedLocalSearch::new(10, 3).with_lambda(0.5);
         assert_eq!(gls.lambda(), 0.5);
         assert_eq!(gls.memory().num_vessels(), 10);
         assert_eq!(gls.memory().num_berths(), 3);
     }
 
     #[test]
-    #[should_panic(expected = "value must be > 0.0")]
+    #[should_panic(expected = "lambda must be > 0.0")]
     fn test_gls_zero_lambda_panics() {
-        let _ = GuidedLocalSearch::new(0.0, 5, 2);
+        let _ = GuidedLocalSearch::new(5, 2).with_lambda(0.0);
     }
 
     #[test]
-    #[should_panic(expected = "value must be > 0.0")]
+    #[should_panic(expected = "lambda must be > 0.0")]
     fn test_gls_negative_lambda_panics() {
-        let _ = GuidedLocalSearch::new(-1.0, 5, 2);
+        let _ = GuidedLocalSearch::new(5, 2).with_lambda(-1.0);
     }
-
-    #[test]
-    fn test_gls_with_lambda() {
-        let gls = GuidedLocalSearch::new(0.5, 5, 2).with_lambda(FixedLambda::new(1.0));
-        assert_eq!(gls.lambda(), 1.0);
-    }
-
-    // ── heuristic_lambda ─────────────────────────────────────
 
     #[test]
     fn test_heuristic_lambda_basic() {
@@ -1294,16 +1635,12 @@ mod tests {
         assert!((lambda - 300.0).abs() < f64::EPSILON);
     }
 
-    // ── PenaltyMemory::penalty_delta ─────────────────────────
-
     #[test]
     fn test_penalty_delta_empty_diff() {
         let mem = PenaltyMemory::new(3, 2);
         let diff = ScheduleGraphDiff::new();
         assert_eq!(mem.penalty_delta(&diff), 0);
     }
-
-    // ── PenalizationTrigger ──────────────────────────────────
 
     #[test]
     fn test_trigger_default_is_on_exhaustion() {
@@ -1331,90 +1668,264 @@ mod tests {
 
     #[test]
     fn test_gls_with_trigger() {
-        let gls =
-            GuidedLocalSearch::new(0.5, 5, 2).with_trigger(PenalizationTrigger::AfterMoves(20));
+        let gls = GuidedLocalSearch::new(5, 2)
+            .with_lambda(0.5)
+            .with_trigger(PenalizationTrigger::AfterMoves(20));
         assert_eq!(gls.trigger(), PenalizationTrigger::AfterMoves(20));
     }
 
     #[test]
     fn test_gls_default_trigger_is_on_exhaustion() {
-        let gls = GuidedLocalSearch::new(0.5, 5, 2);
+        let gls = GuidedLocalSearch::new(5, 2);
         assert_eq!(gls.trigger(), PenalizationTrigger::OnExhaustion);
     }
 
-    // ── LambdaStrategy ───────────────────────────────────────
+    // ---- LambdaStrategy tests -----------------------------------------
 
     #[test]
-    fn test_fixed_lambda_weight() {
-        let l = FixedLambda::new(3.0);
-        assert_eq!(l.weight(), 3.0);
+    fn test_static_lambda_constant() {
+        let s = StaticLambda(0.42);
+        assert_eq!(s.lambda(), 0.42);
     }
 
     #[test]
-    #[should_panic(expected = "value must be > 0.0")]
-    fn test_fixed_lambda_zero_panics() {
-        let _ = FixedLambda::new(0.0);
+    fn test_dynamic_lambda_decreases_on_new_best() {
+        let mut d = DynamicLambda::new(1.0, 0.1, 0.01, 10.0);
+        assert!((d.lambda() - 1.0).abs() < f64::EPSILON);
+        d.on_new_best(100.0);
+        // 1.0 * (1 - 0.1) = 0.9
+        assert!((d.lambda() - 0.9).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_fixed_lambda_unchanged_after_hooks() {
-        let mut l = FixedLambda::new(2.0);
-        l.on_penalize();
-        l.on_new_best();
-        assert_eq!(l.weight(), 2.0);
+    fn test_dynamic_lambda_increases_on_penalization() {
+        let mut d = DynamicLambda::new(1.0, 0.1, 0.01, 10.0);
+        d.on_penalization();
+        // 1.0 * (1 + 0.1) = 1.1
+        assert!((d.lambda() - 1.1).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_reactive_lambda_grows_on_penalize() {
-        let mut l = ReactiveLambda::new(1.0, 1.5, 0.5, 0.1, 100.0);
-        assert_eq!(l.weight(), 1.0);
-        l.on_penalize();
-        assert!((l.weight() - 1.5).abs() < f64::EPSILON);
-        l.on_penalize();
-        assert!((l.weight() - 2.25).abs() < f64::EPSILON);
+    fn test_dynamic_lambda_clamps() {
+        let mut d = DynamicLambda::new(0.02, 0.5, 0.01, 10.0);
+        d.on_new_best(100.0); // 0.02 * 0.5 = 0.01 → clamped at min
+        assert!((d.lambda() - 0.01).abs() < f64::EPSILON);
+
+        let mut d2 = DynamicLambda::new(9.0, 0.5, 0.01, 10.0);
+        d2.on_penalization(); // 9.0 * 1.5 = 13.5 → clamped at 10.0
+        assert!((d2.lambda() - 10.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_reactive_lambda_decays_on_new_best() {
-        let mut l = ReactiveLambda::new(4.0, 1.5, 0.5, 0.1, 100.0);
-        l.on_new_best();
-        assert!((l.weight() - 2.0).abs() < f64::EPSILON);
-        l.on_new_best();
-        assert!((l.weight() - 1.0).abs() < f64::EPSILON);
+    fn test_dynamic_lambda_resets_on_start() {
+        let mut d = DynamicLambda::new(1.0, 0.1, 0.01, 10.0);
+        d.on_penalization();
+        d.on_penalization();
+        assert!(d.lambda() > 1.0);
+        d.on_start(500.0);
+        assert!((d.lambda() - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_reactive_lambda_clamps_to_max() {
-        let mut l = ReactiveLambda::new(90.0, 1.5, 0.5, 0.1, 100.0);
-        l.on_penalize(); // 90 * 1.5 = 135, clamped to 100
-        assert!((l.weight() - 100.0).abs() < f64::EPSILON);
+    fn test_bandit_lambda_cycles_unpulled_arms() {
+        let mut b = BanditLambda::new(vec![0.1, 0.3, 0.5], 1.0);
+        b.on_start(1000.0);
+        // First arm is already pulled at start.
+        assert_eq!(b.lambda(), 0.1);
+        // After penalization, should pick arm 1 (unpulled).
+        b.on_penalization();
+        assert_eq!(b.lambda(), 0.3);
+        // After penalization, should pick arm 2 (unpulled).
+        b.on_penalization();
+        assert_eq!(b.lambda(), 0.5);
     }
 
     #[test]
-    fn test_reactive_lambda_clamps_to_min() {
-        let mut l = ReactiveLambda::new(0.2, 1.5, 0.5, 0.1, 100.0);
-        l.on_new_best(); // 0.2 * 0.5 = 0.1, exactly min
-        assert!((l.weight() - 0.1).abs() < f64::EPSILON);
-        l.on_new_best(); // 0.1 * 0.5 = 0.05, clamped to 0.1
-        assert!((l.weight() - 0.1).abs() < f64::EPSILON);
+    fn test_bandit_lambda_ucb1_after_all_pulled() {
+        let mut b = BanditLambda::new(vec![0.1, 0.5], 1.0);
+        b.on_start(1000.0);
+        // Pull arm 1 by triggering penalization.
+        b.on_penalization(); // selects arm 1 (unpulled)
+        assert_eq!(b.lambda(), 0.5);
+        // Now both arms pulled, UCB1 kicks in.
+        // Give arm 0 a reward.
+        b.active_arm = 0;
+        b.on_accept(900.0); // improvement from 1000 → 900
+        // Next penalization should use UCB1.
+        b.on_penalization();
+        // The active arm should be valid.
+        assert!(b.lambda() == 0.1 || b.lambda() == 0.5);
     }
 
     #[test]
-    #[should_panic(expected = "growth_factor must be > 1.0")]
-    fn test_reactive_lambda_bad_growth_panics() {
-        let _ = ReactiveLambda::new(1.0, 0.5, 0.8, 0.1, 10.0);
+    #[should_panic(expected = "arms must be non-empty")]
+    fn test_bandit_lambda_empty_arms_panics() {
+        let _ = BanditLambda::new(vec![], 1.0);
     }
 
     #[test]
-    #[should_panic(expected = "decay_factor must be in (0.0, 1.0)")]
-    fn test_reactive_lambda_bad_decay_panics() {
-        let _ = ReactiveLambda::new(1.0, 1.5, 1.5, 0.1, 10.0);
+    fn test_gls_with_lambda_strategy() {
+        let gls = GuidedLocalSearch::new(5, 2)
+            .with_lambda_strategy(DynamicLambda::new(0.5, 0.1, 0.01, 10.0));
+        assert!((gls.lambda() - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_gls_with_reactive_lambda() {
-        let reactive = ReactiveLambda::new(5.0, 1.2, 0.8, 0.1, 50.0);
-        let gls = GuidedLocalSearch::new(5.0, 10, 3).with_lambda(reactive);
-        assert_eq!(gls.lambda(), 5.0);
+    fn test_additive_dynamic_lambda_decreases_on_new_best() {
+        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.01, 10.0);
+        assert!((a.lambda() - 1.0).abs() < f64::EPSILON);
+        a.on_new_best(100.0);
+        // 1.0 - 0.1 = 0.9
+        assert!((a.lambda() - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_additive_dynamic_lambda_increases_on_penalization() {
+        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.01, 10.0);
+        a.on_penalization();
+        // 1.0 + 0.1 = 1.1
+        assert!((a.lambda() - 1.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_additive_dynamic_lambda_clamps() {
+        let mut a = AdditiveDynamicLambda::new(0.05, 0.1, 0.01, 10.0);
+        a.on_new_best(100.0); // 0.05 - 0.1 = -0.05 → clamped at 0.01
+        assert!((a.lambda() - 0.01).abs() < f64::EPSILON);
+
+        let mut a2 = AdditiveDynamicLambda::new(9.95, 0.1, 0.01, 10.0);
+        a2.on_penalization(); // 9.95 + 0.1 = 10.05 → clamped at 10.0
+        assert!((a2.lambda() - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_additive_dynamic_lambda_resets_on_start() {
+        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.01, 10.0);
+        a.on_penalization();
+        a.on_penalization();
+        assert!(a.lambda() > 1.0);
+        a.on_start(500.0);
+        assert!((a.lambda() - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ---- PenaltyDecay tests -------------------------------------------
+
+    #[test]
+    fn test_penalty_memory_decay() {
+        let mut mem = PenaltyMemory::new(2, 2);
+        mem.edge[0] = 100;
+        mem.edge[1] = 50;
+        mem.berth[0] = 80;
+        mem.decay(0.9);
+        assert_eq!(mem.edge[0], 90); // 100 * 0.9 = 90
+        assert_eq!(mem.edge[1], 45); // 50 * 0.9 = 45
+        assert_eq!(mem.berth[0], 72); // 80 * 0.9 = 72
+    }
+
+    #[test]
+    fn test_penalty_memory_decay_truncates() {
+        let mut mem = PenaltyMemory::new(1, 1);
+        mem.edge[0] = 1;
+        mem.decay(0.9);
+        // 1 * 0.9 = 0.9 → truncated to 0
+        assert_eq!(mem.edge[0], 0);
+    }
+
+    #[test]
+    fn test_no_decay_is_noop() {
+        let mut mem = PenaltyMemory::new(2, 2);
+        mem.edge[0] = 10;
+        mem.berth[1] = 5;
+        let mut d = NoDecay;
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 10);
+        assert_eq!(mem.berth[1], 5);
+    }
+
+    #[test]
+    fn test_geometric_decay_fires_on_period() {
+        let mut mem = PenaltyMemory::new(2, 1);
+        mem.edge[0] = 100;
+        let mut d = GeometricDecay::new(0.5, 3);
+
+        // First two calls: no decay.
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 100);
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 100);
+        // Third call: decay fires.
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 50); // 100 * 0.5
+
+        // Counter resets, next decay after 3 more calls.
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 50);
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 50);
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 25); // 50 * 0.5
+    }
+
+    #[test]
+    fn test_geometric_decay_period_one() {
+        let mut mem = PenaltyMemory::new(1, 1);
+        mem.edge[0] = 100;
+        let mut d = GeometricDecay::new(0.9, 1);
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 90);
+        d.after_penalization(&mut mem);
+        assert_eq!(mem.edge[0], 81); // 90 * 0.9
+    }
+
+    #[test]
+    #[should_panic(expected = "factor must be in (0, 1)")]
+    fn test_geometric_decay_invalid_factor_panics() {
+        let _ = GeometricDecay::new(1.0, 1);
+    }
+
+    #[test]
+    fn test_gls_with_decay() {
+        let gls = GuidedLocalSearch::new(5, 2).with_decay(GeometricDecay::new(0.9, 10));
+        // Just verify it compiles and the accessor works.
+        assert!((gls.decay().factor - 0.9).abs() < f64::EPSILON);
+    }
+
+    // ---- Lambda Reset on Best tests -----------------------------------
+
+    #[test]
+    fn test_dynamic_lambda_reset_on_best() {
+        let mut d = DynamicLambda::new(1.0, 0.1, 0.01, 10.0).with_reset_on_best(true);
+        // Drive lambda up via penalization.
+        d.on_penalization(); // 1.0 * 1.1 = 1.1
+        d.on_penalization(); // 1.1 * 1.1 = 1.21
+        assert!(d.lambda() > 1.0);
+        // New best should reset to initial (1.0), not scale down.
+        d.on_new_best(50.0);
+        assert!((d.lambda() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_dynamic_lambda_no_reset_on_best_default() {
+        let mut d = DynamicLambda::new(1.0, 0.1, 0.01, 10.0);
+        d.on_new_best(100.0);
+        // Default: scale down, not reset.
+        assert!((d.lambda() - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_additive_dynamic_lambda_reset_on_best() {
+        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.01, 10.0).with_reset_on_best(true);
+        a.on_penalization(); // 1.1
+        a.on_penalization(); // 1.2
+        assert!(a.lambda() > 1.0);
+        a.on_new_best(50.0);
+        assert!((a.lambda() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_additive_dynamic_lambda_no_reset_on_best_default() {
+        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.01, 10.0);
+        a.on_new_best(100.0);
+        assert!((a.lambda() - 0.9).abs() < f64::EPSILON);
     }
 }

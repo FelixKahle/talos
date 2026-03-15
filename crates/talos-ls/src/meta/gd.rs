@@ -82,9 +82,9 @@ use crate::{
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Greedy Descent
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Greedy Descent metaheuristic with configurable selection strategy.
 pub struct GreedyDescent<B = KeepFirst> {
@@ -163,10 +163,6 @@ impl<B: TieBreakingStrategy> GreedyDescent<B> {
         &mut self.tie_breaking
     }
 }
-
-// ──────────────────────────────────────────────────────────────
-// Metaheuristic Implementation
-// ──────────────────────────────────────────────────────────────
 
 impl<T, B> Metaheuristic<T> for GreedyDescent<B>
 where
@@ -331,13 +327,14 @@ where
     }
 }
 
+// ----------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
-    use crate::meta::tie::{KeepLast, RandomTieBreak};
-
     use super::*;
-
-    // ── GreedyDescent defaults ───────────────────────────────
+    use crate::meta::tie::{KeepLast, RandomTieBreak};
 
     #[test]
     fn test_greedy_descent_new_defaults() {
@@ -350,8 +347,6 @@ mod tests {
         let gd = GreedyDescent::default();
         assert_eq!(gd.selection(), SelectionStrategy::FirstImprovement);
     }
-
-    // ── Builder methods ──────────────────────────────────────
 
     #[test]
     fn test_greedy_descent_with_selection() {
@@ -374,16 +369,12 @@ mod tests {
             .with_tie_breaking(RandomTieBreak::new(rand::rng()));
     }
 
-    // ── Accessors ────────────────────────────────────────────
-
     #[test]
     fn test_greedy_descent_tie_breaking_accessor() {
         let mut gd = GreedyDescent::new();
         // KeepFirst always returns false.
         assert!(!gd.tie_breaking_mut().break_tie());
     }
-
-    // ── Debug ────────────────────────────────────────────────
 
     #[test]
     fn test_greedy_descent_debug_does_not_panic() {
@@ -401,15 +392,11 @@ mod tests {
         assert!(s.contains("BestImprovement"));
     }
 
-    // ── Metaheuristic name ───────────────────────────────────
-
     #[test]
     fn test_greedy_descent_name() {
         let gd = GreedyDescent::new();
         assert_eq!(Metaheuristic::<i32>::name(&gd), "GreedyDescent");
     }
-
-    // ── should_commit_buffered ───────────────────────────────
 
     #[test]
     fn test_should_commit_buffered_first_improvement() {

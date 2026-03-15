@@ -74,6 +74,7 @@
 use crate::{
     assignment::Assignment,
     index::{BerthIndex, VesselIndex},
+    model::VesselIndexIter,
 };
 use std::{hash::Hash, iter::FusedIterator};
 
@@ -403,6 +404,12 @@ impl<T> Solution<T> {
         T: Copy,
     {
         SolutionIter::new(self)
+    }
+
+    /// Returns an iterator over all vessel indices in this solution.
+    #[inline]
+    pub fn iter_vessels(&self) -> VesselIndexIter {
+        VesselIndexIter::new(VesselIndex::new(0), self.num_vessels().into())
     }
 
     /// Returns a borrowed view into this solution.

@@ -91,9 +91,9 @@ use rand::{Rng, RngExt};
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Acceptance Criteria
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Computes the acceptance probability for a worsening move.
 ///
@@ -122,9 +122,9 @@ impl AcceptanceCriterion for MetropolisCriterion {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Cooling Schedules
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Defines the thermodynamics of the annealing process.
 ///
@@ -150,9 +150,9 @@ pub trait CoolingSchedule: std::fmt::Debug {
     fn reheat(&mut self, _factor: f64) {}
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Geometric Cooling
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Geometric cooling: $T_{k+1} = \alpha \cdot T_k$.
 ///
@@ -242,9 +242,9 @@ impl CoolingSchedule for GeometricCooling {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Linear Cooling
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Linear cooling: $T_{k+1} = \max(0, T_k - \delta)$.
 ///
@@ -343,9 +343,9 @@ impl CoolingSchedule for LinearCooling {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Logarithmic Cooling
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Logarithmic cooling: $T_k = C / \ln(k \cdot s + e)$.
 ///
@@ -423,9 +423,9 @@ impl CoolingSchedule for LogarithmicCooling {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Cooling Trigger
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Controls *when* the cooling schedule is advanced.
 #[repr(u8)]
@@ -451,9 +451,9 @@ impl std::fmt::Display for CoolingTrigger {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Simulated Annealing
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Simulated Annealing metaheuristic with a pluggable cooling schedule.
 ///
@@ -664,9 +664,9 @@ where
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Metaheuristic Implementation
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 impl<T, R, C, A> Metaheuristic<T> for SimulatedAnnealing<R, C, A>
 where
@@ -770,12 +770,10 @@ where
     ) -> AcceptanceOutcome {
         let current_objective = accepted_solution.objective_value();
 
-        // ── Strict improvement: always accept ──
         if candidate_objective < current_objective {
             return AcceptanceOutcome::Accept;
         }
 
-        // ── Non-improving move: check temperature ──
         let temp = self.cooling.temperature();
         if temp <= self.frozen_threshold {
             return AcceptanceOutcome::Reject;
@@ -857,11 +855,13 @@ where
     }
 }
 
+// ----------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── MetropolisCriterion ──────────────────────────────────
 
     #[test]
     fn test_metropolis_zero_delta_returns_one() {
@@ -887,8 +887,6 @@ mod tests {
         let p = MetropolisCriterion.acceptance_probability(10.0, 100.0);
         assert!((p - (-0.1_f64).exp()).abs() < 1e-12);
     }
-
-    // ── GeometricCooling ─────────────────────────────────────
 
     #[test]
     fn test_geometric_initial_temperature() {
@@ -962,8 +960,6 @@ mod tests {
         GeometricCooling::new(0.0, 0.9, 0.0);
     }
 
-    // ── LinearCooling ────────────────────────────────────────
-
     #[test]
     fn test_linear_step_decrements() {
         let mut l = LinearCooling::new(100.0, 10.0, 0.0);
@@ -1031,8 +1027,6 @@ mod tests {
         LinearCooling::new(100.0, 0.0, 0.0);
     }
 
-    // ── LogarithmicCooling ───────────────────────────────────
-
     #[test]
     fn test_logarithmic_initial_temperature_is_c_over_one() {
         let l = LogarithmicCooling::new(100.0, 1.0, 0.0);
@@ -1087,16 +1081,12 @@ mod tests {
         LogarithmicCooling::new(100.0, 0.0, 0.0);
     }
 
-    // ── CoolingTrigger ───────────────────────────────────────
-
     #[test]
     fn test_cooling_trigger_display() {
         assert_eq!(format!("{}", CoolingTrigger::Iteration), "Iteration");
         assert_eq!(format!("{}", CoolingTrigger::Cycle), "Cycle");
         assert_eq!(format!("{}", CoolingTrigger::Acceptance), "Acceptance");
     }
-
-    // ── SimulatedAnnealing builders ──────────────────────────
 
     #[test]
     fn test_sa_default_trigger_is_iteration() {
@@ -1169,8 +1159,6 @@ mod tests {
         assert_eq!(sa.criterion().acceptance_probability(999.0, 0.001), 1.0);
     }
 
-    // ── heuristic_geometric_params ───────────────────────────
-
     #[test]
     fn test_heuristic_params_produces_valid_schedule() {
         let g = SimulatedAnnealing::<rand::rngs::ThreadRng, GeometricCooling>::heuristic_geometric_params(
@@ -1194,8 +1182,6 @@ mod tests {
         );
         assert!(g2.initial_temperature() > g1.initial_temperature());
     }
-
-    // ── Debug formatting ─────────────────────────────────────
 
     #[test]
     fn test_sa_debug_does_not_panic() {

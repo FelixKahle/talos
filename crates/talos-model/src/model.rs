@@ -22,6 +22,106 @@
 use crate::index::{BerthIndex, VesselIndex};
 use talos_core::{math::interval::ClosedOpenInterval, utils::num::SolverNumeric};
 
+// ----------------------------------------------------------------
+// BerthIndexIter
+// ----------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BerthIndexIter {
+    inner: std::ops::Range<usize>,
+}
+
+impl BerthIndexIter {
+    #[inline]
+    pub fn new(from: BerthIndex, to: BerthIndex) -> Self {
+        assert!(
+            from <= to,
+            "called `BerthIndexIter::new` with from > to: from = {}, to = {}",
+            from,
+            to
+        );
+
+        BerthIndexIter {
+            inner: from.get()..to.get(),
+        }
+    }
+}
+
+impl Iterator for BerthIndexIter {
+    type Item = BerthIndex;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(BerthIndex::new)
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for BerthIndexIter {}
+
+impl DoubleEndedIterator for BerthIndexIter {
+    #[inline(always)]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(BerthIndex::new)
+    }
+}
+
+// ----------------------------------------------------------------
+// VesselIndexIter
+// ----------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VesselIndexIter {
+    inner: std::ops::Range<usize>,
+}
+
+impl VesselIndexIter {
+    #[inline]
+    pub fn new(from: VesselIndex, to: VesselIndex) -> Self {
+        assert!(
+            from <= to,
+            "called `VesselIndexIter::new` with from > to: from = {}, to = {}",
+            from,
+            to
+        );
+
+        VesselIndexIter {
+            inner: from.get()..to.get(),
+        }
+    }
+}
+
+impl Iterator for VesselIndexIter {
+    type Item = VesselIndex;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(VesselIndex::new)
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for VesselIndexIter {}
+
+impl DoubleEndedIterator for VesselIndexIter {
+    #[inline(always)]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(VesselIndex::new)
+    }
+}
+
+// ----------------------------------------------------------------
+// ProcessingTime
+// ----------------------------------------------------------------
+
 /// A processing time that may be absent.
 ///
 /// Instead of using `Option<T>`, this type uses a sentinel encoding to avoid
@@ -331,6 +431,10 @@ where
         val.into_option()
     }
 }
+
+// ----------------------------------------------------------------
+// Model
+// ----------------------------------------------------------------
 
 #[inline(always)]
 fn flatten_index(num_berths: usize, vessel_index: VesselIndex, berth_index: BerthIndex) -> usize {
@@ -762,6 +866,18 @@ where
         let start = *unsafe { self.opening_offsets.get_unchecked(index) };
         let end = *unsafe { self.opening_offsets.get_unchecked(index + 1) };
         unsafe { self.opening_intervals.get_unchecked(start..end) }
+    }
+
+    /// Returns an iterator over all vessel indices in the model.
+    #[inline]
+    pub fn vessel_iter(&self) -> VesselIndexIter {
+        VesselIndexIter::new(VesselIndex::new(0), VesselIndex::new(self.num_vessels()))
+    }
+
+    /// Returns an iterator over all berth indices in the model.
+    #[inline]
+    pub fn berth_iter(&self) -> BerthIndexIter {
+        BerthIndexIter::new(BerthIndex::new(0), BerthIndex::new(self.num_berths()))
     }
 }
 

@@ -339,11 +339,12 @@ fn sa_medium_instance_respects_berth_constraints() {
     assert!(sol.objective_value() <= obj);
 
     // Verify feasibility: every vessel must be on an allowed berth.
-    for v in 0..model.num_vessels() {
-        let b = sol.berths()[v];
+    for vessel in model.vessel_iter() {
+        let b = sol.berths()[vessel.get()];
         assert!(
-            model.vessel_allowed_on_berth(VesselIndex::new(v), b),
-            "V{v} assigned to forbidden berth B{}",
+            model.vessel_allowed_on_berth(vessel, b),
+            "V{} assigned to forbidden berth B{}",
+            vessel.get(),
             b.get()
         );
     }
@@ -403,11 +404,12 @@ fn tabu_medium_instance_respects_berth_constraints() {
     let sol = outcome.solution();
     assert!(sol.objective_value() <= obj);
 
-    for v in 0..model.num_vessels() {
-        let b = sol.berths()[v];
+    for vessel in model.vessel_iter() {
+        let b = sol.berths()[vessel.get()];
         assert!(
-            model.vessel_allowed_on_berth(VesselIndex::new(v), b),
-            "V{v} assigned to forbidden berth B{}",
+            model.vessel_allowed_on_berth(vessel, b),
+            "V{} assigned to forbidden berth B{}",
+            vessel.get(),
             b.get()
         );
     }
@@ -420,7 +422,7 @@ fn tabu_medium_instance_respects_berth_constraints() {
 #[test]
 fn gls_tiny_instance_improves() {
     let (model, berths, starts, obj) = tiny_instance();
-    let mut gls = GuidedLocalSearch::new(0.3, model.num_vessels(), model.num_berths());
+    let mut gls = GuidedLocalSearch::new(model.num_vessels(), model.num_berths()).with_lambda(0.3);
     let mut op = build_full_operator();
     let monitor = IterationLimitMonitor::new(5_000);
 
@@ -442,7 +444,8 @@ fn gls_small_instance_finds_improvement() {
         model.num_vessels() * model.num_berths(),
         0.3,
     );
-    let mut gls = GuidedLocalSearch::new(lambda, model.num_vessels(), model.num_berths());
+    let mut gls =
+        GuidedLocalSearch::new(model.num_vessels(), model.num_berths()).with_lambda(lambda);
     let mut op = build_full_operator();
     let monitor = IterationLimitMonitor::new(10_000);
 
@@ -459,7 +462,7 @@ fn gls_small_instance_finds_improvement() {
 #[test]
 fn gls_medium_instance_respects_berth_constraints() {
     let (model, berths, starts, obj) = medium_instance();
-    let mut gls = GuidedLocalSearch::new(0.5, model.num_vessels(), model.num_berths());
+    let mut gls = GuidedLocalSearch::new(model.num_vessels(), model.num_berths()).with_lambda(0.5);
     let mut op = build_full_operator();
     let monitor = IterationLimitMonitor::new(20_000);
 
@@ -468,11 +471,12 @@ fn gls_medium_instance_respects_berth_constraints() {
     let sol = outcome.solution();
     assert!(sol.objective_value() <= obj);
 
-    for v in 0..model.num_vessels() {
-        let b = sol.berths()[v];
+    for vessel in model.vessel_iter() {
+        let b = sol.berths()[vessel.get()];
         assert!(
-            model.vessel_allowed_on_berth(VesselIndex::new(v), b),
-            "V{v} assigned to forbidden berth B{}",
+            model.vessel_allowed_on_berth(vessel, b),
+            "V{} assigned to forbidden berth B{}",
+            vessel.get(),
             b.get()
         );
     }
@@ -772,7 +776,7 @@ fn tabu_solution_feasibility_medium() {
 #[test]
 fn gls_solution_feasibility_medium() {
     let (model, berths, starts, obj) = medium_instance();
-    let mut gls = GuidedLocalSearch::new(0.5, model.num_vessels(), model.num_berths());
+    let mut gls = GuidedLocalSearch::new(model.num_vessels(), model.num_berths()).with_lambda(0.5);
     let mut op = build_full_operator();
     let monitor = IterationLimitMonitor::new(10_000);
 

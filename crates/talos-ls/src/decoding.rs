@@ -185,8 +185,7 @@ where
 {
     let mut total_obj = T::ZERO;
 
-    for b in 0..model.num_berths() {
-        let berth = BerthIndex::new(b);
+    for berth in model.berth_iter() {
         let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
 
         let berth_cost = unsafe {

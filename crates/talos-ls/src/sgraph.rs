@@ -50,7 +50,10 @@ use std::iter::FusedIterator;
 use talos_core::container::rarena::{
     Node, RingArena, RingEdgeIter, RingSequenceIter, RingSequenceRevIter,
 };
-use talos_model::index::{BerthIndex, VesselIndex};
+use talos_model::{
+    index::{BerthIndex, VesselIndex},
+    model::{BerthIndexIter, VesselIndexIter},
+};
 
 // ----------------------------------------------------------------
 // VesselSequenceIter
@@ -150,6 +153,73 @@ impl<'a> Iterator for BerthEdgeIter<'a> {
 impl FusedIterator for BerthEdgeIter<'_> {}
 
 // ----------------------------------------------------------------
+// BerthTopologyIter
+// ----------------------------------------------------------------
+
+/// Internal state for the `BerthTopologyIter` state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum BerthTopologyState {
+    StartSentinel = 0,
+    Vessels = 1,
+    EndSentinel = 2,
+    Done = 3,
+}
+
+/// Iterator that yields all nodes in a berth's ring, starting and ending
+/// with the sentinel node. Useful for evaluating all edges (including
+/// connections to the berth boundaries).
+#[derive(Clone, Debug)]
+pub struct BerthTopologyIter<'a> {
+    inner: RingSequenceIter<'a>,
+    sentinel: Node,
+    state: BerthTopologyState,
+}
+
+impl<'a> Iterator for BerthTopologyIter<'a> {
+    type Item = Node;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.state {
+            BerthTopologyState::StartSentinel => {
+                self.state = BerthTopologyState::Vessels;
+                Some(self.sentinel)
+            }
+            BerthTopologyState::Vessels => {
+                if let Some(node) = self.inner.next() {
+                    Some(node)
+                } else {
+                    self.state = BerthTopologyState::EndSentinel;
+                    Some(self.sentinel)
+                }
+            }
+            BerthTopologyState::EndSentinel => {
+                self.state = BerthTopologyState::Done;
+                None
+            }
+            BerthTopologyState::Done => None,
+        }
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (lower, upper) = self.inner.size_hint();
+        let remaining_sentinels = match self.state {
+            BerthTopologyState::StartSentinel => 2,
+            BerthTopologyState::Vessels => 1,
+            BerthTopologyState::EndSentinel | BerthTopologyState::Done => 0,
+        };
+        (
+            lower + remaining_sentinels,
+            upper.map(|u| u + remaining_sentinels),
+        )
+    }
+}
+
+impl FusedIterator for BerthTopologyIter<'_> {}
+
+// ----------------------------------------------------------------
 // ScheduleGraph
 // ----------------------------------------------------------------
 
@@ -198,8 +268,7 @@ impl PartialEq for ScheduleGraph {
         if self.num_berths != other.num_berths || self.num_vessels != other.num_vessels {
             return false;
         }
-        for berth_idx in 0..self.num_berths {
-            let berth = BerthIndex::new(berth_idx);
+        for berth in self.berth_iter() {
             if !self
                 .vessel_sequence_iter(berth)
                 .eq(other.vessel_sequence_iter(berth))
@@ -242,9 +311,8 @@ impl std::fmt::Display for ScheduleGraph {
             "ScheduleGraph (Berths: {}, Total Vessels: {})",
             self.num_berths, self.num_vessels
         )?;
-        for berth_idx in 0..self.num_berths {
-            let berth = BerthIndex::new(berth_idx);
-            write!(f, "  Berth {}: ", berth_idx)?;
+        for berth in self.berth_iter() {
+            write!(f, "  Berth {}: ", berth.get())?;
             let mut iter = self.vessel_sequence_iter(berth);
             if let Some(first) = iter.next() {
                 write!(f, "V{}", first.get())?;
@@ -263,8 +331,7 @@ impl std::fmt::Display for ScheduleGraph {
 impl std::hash::Hash for ScheduleGraph {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.num_berths.hash(state);
-        for berth_idx in 0..self.num_berths {
-            let berth = BerthIndex::new(berth_idx);
+        for berth in self.berth_iter() {
             for vessel in self.vessel_sequence_iter(berth) {
                 vessel.hash(state);
             }
@@ -363,9 +430,9 @@ impl ScheduleGraph {
             self.berth_vessel_count[berth.get()] += 1;
         }
 
-        for berth_idx in 0..self.num_berths {
-            let sentinel = self.num_vessels + berth_idx;
-            self.vessel_berth[sentinel] = BerthIndex::new(berth_idx);
+        for berth in self.berth_iter() {
+            let sentinel = self.num_vessels + berth.get();
+            self.vessel_berth[sentinel] = berth;
         }
 
         if self.num_vessels == 0 {
@@ -774,6 +841,59 @@ impl ScheduleGraph {
             inner: unsafe { self.arena.edge_iter_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
         }
+    }
+
+    /// Returns an iterator over all nodes in a berth's topology, starting and
+    /// ending with the sentinel node. This naturally forms the complete sequence
+    /// of nodes needed to evaluate all edges in the berth.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `berth` is out of bounds.
+    #[inline]
+    pub fn berth_topology_iter(&self, berth: BerthIndex) -> BerthTopologyIter<'_> {
+        assert!(berth < self.num_berths);
+
+        let sentinel = self.sentinel(berth);
+        let start = self.arena.next(sentinel);
+
+        BerthTopologyIter {
+            inner: unsafe { self.arena.sequence_iter_unchecked(start, sentinel) },
+            sentinel,
+            state: BerthTopologyState::StartSentinel,
+        }
+    }
+
+    /// Returns an iterator over all nodes in a berth's topology, starting and
+    /// ending with the sentinel node.
+    ///
+    /// # Safety
+    ///
+    /// `berth.get()` must be `< self.num_berths`.
+    #[inline(always)]
+    pub unsafe fn berth_topology_iter_unchecked(&self, berth: BerthIndex) -> BerthTopologyIter<'_> {
+        debug_assert!(berth < self.num_berths);
+
+        let sentinel = self.sentinel(berth);
+        let start = unsafe { self.arena.next_unchecked(sentinel) };
+
+        BerthTopologyIter {
+            inner: unsafe { self.arena.sequence_iter_unchecked(start, sentinel) },
+            sentinel,
+            state: BerthTopologyState::StartSentinel,
+        }
+    }
+
+    /// Returns an iterator over all berth indices.
+    #[inline(always)]
+    pub fn berth_iter(&self) -> BerthIndexIter {
+        BerthIndexIter::new(BerthIndex::new(0), self.num_berths.into())
+    }
+
+    /// Returns an iterator over all vessel indices.
+    #[inline(always)]
+    pub fn vessel_iter(&self) -> impl Iterator<Item = VesselIndex> + '_ {
+        VesselIndexIter::new(VesselIndex::new(0), self.num_vessels.into())
     }
 
     // ----------------------------------------------------------------

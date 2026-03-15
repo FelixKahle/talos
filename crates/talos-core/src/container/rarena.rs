@@ -55,7 +55,7 @@ pub type Node = TypedIndex<NodeIndexTag>;
 // ----------------------------------------------------------------
 
 /// Iterator over a sequence in the arena, starting from a specific node and ending at a stop node.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RingSequenceIter<'a> {
     /// The `next` array borrowed from the owning `RingArena`.
     next_pointers: &'a [Node],

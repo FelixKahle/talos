@@ -108,9 +108,9 @@ use rand::{Rng, RngExt};
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Tenure Strategy
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Controls how long a move attribute remains tabu.
 pub trait TenureStrategy: std::fmt::Debug {
@@ -182,9 +182,9 @@ impl<R: Rng + std::fmt::Debug> TenureStrategy for RandomTenure<R> {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Aspiration Criterion
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Decides whether a tabu move should be accepted anyway.
 ///
@@ -212,9 +212,9 @@ impl AspirationCriterion for BestObjectiveAspiration {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Tabu Memory
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Short-term memory tracking forbidden move attributes.
 ///
@@ -319,9 +319,9 @@ impl TabuMemory {
     }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Selection Strategy
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Controls how the search selects among admissible moves in a
 /// neighbourhood scan.
@@ -337,9 +337,9 @@ pub enum SelectionStrategy {
     FirstImprovement,
 }
 
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 // Tabu Search
-// ──────────────────────────────────────────────────────────────
+// ----------------------------------------------------------------
 
 /// Tabu Search metaheuristic with pluggable tenure and aspiration strategies.
 ///
@@ -554,10 +554,6 @@ where
     }
 }
 
-// ──────────────────────────────────────────────────────────────
-// Metaheuristic Implementation
-// ──────────────────────────────────────────────────────────────
-
 impl<T, S, A, B> Metaheuristic<T> for TabuSearch<S, A, B>
 where
     T: SolverNumeric,
@@ -742,13 +738,14 @@ where
     }
 }
 
+// ----------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
-    use crate::meta::tie::{KeepLast, RandomTieBreak};
-
     use super::*;
-
-    // ── FixedTenure ──────────────────────────────────────────
+    use crate::meta::tie::{KeepLast, RandomTieBreak};
 
     #[test]
     fn test_fixed_tenure_returns_constant() {
@@ -779,8 +776,6 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    // ── RandomTenure ─────────────────────────────────────────
-
     #[test]
     fn test_random_tenure_equal_bounds_returns_constant() {
         let mut t = RandomTenure::new(5, 5, rand::rng());
@@ -810,8 +805,6 @@ mod tests {
         RandomTenure::new(10, 5, rand::rng());
     }
 
-    // ── BestObjectiveAspiration ──────────────────────────────
-
     #[test]
     fn test_aspiration_accepts_strict_improvement() {
         assert!(BestObjectiveAspiration.aspires(99, 100));
@@ -827,8 +820,6 @@ mod tests {
         assert!(!BestObjectiveAspiration.aspires(101, 100));
     }
 
-    // ── KeepFirst ────────────────────────────────────────────
-
     #[test]
     fn test_keep_first_always_false() {
         let mut k = KeepFirst;
@@ -837,8 +828,6 @@ mod tests {
         }
     }
 
-    // ── KeepLast ─────────────────────────────────────────────
-
     #[test]
     fn test_keep_last_always_true() {
         let mut k = KeepLast;
@@ -846,8 +835,6 @@ mod tests {
             assert!(k.break_tie());
         }
     }
-
-    // ── RandomTieBreak ───────────────────────────────────────
 
     #[test]
     fn test_random_tie_break_produces_both_outcomes() {
@@ -867,8 +854,6 @@ mod tests {
         panic!("RandomTieBreak should produce both true and false");
     }
 
-    // ── TabuMemory ───────────────────────────────────────────
-
     #[test]
     fn test_tabu_memory_new_is_empty() {
         let mem = TabuMemory::new(5, 3);
@@ -887,8 +872,6 @@ mod tests {
         assert!(mem.edge.iter().all(|&v| v == 0));
         assert!(mem.berth.iter().all(|&v| v == 0));
     }
-
-    // ── SelectionStrategy ────────────────────────────────────
 
     #[test]
     fn test_selection_strategy_debug() {
@@ -914,8 +897,6 @@ mod tests {
         let b = a;
         assert_eq!(a, b);
     }
-
-    // ── TabuSearch defaults ──────────────────────────────────
 
     #[test]
     fn test_tabu_search_new_defaults() {
@@ -951,8 +932,6 @@ mod tests {
         assert!(ts.tie_breaking_mut().break_tie());
     }
 
-    // ── TabuSearch accessors ─────────────────────────────────
-
     #[test]
     fn test_tabu_search_tenure_accessor() {
         let ts = TabuSearch::new(FixedTenure::new(7), 4, 2);
@@ -979,8 +958,6 @@ mod tests {
         assert_eq!(ts.memory().berth.len(), 8);
     }
 
-    // ── TabuSearch with_aspiration ────────────────────────────
-
     #[test]
     fn test_tabu_search_with_custom_aspiration() {
         #[derive(Debug)]
@@ -995,8 +972,6 @@ mod tests {
         assert!(ts.aspiration().aspires(999, 1));
     }
 
-    // ── TabuSearch Debug ─────────────────────────────────────
-
     #[test]
     fn test_tabu_search_debug_does_not_panic() {
         let ts = TabuSearch::new(FixedTenure::new(5), 10, 3);
@@ -1006,8 +981,6 @@ mod tests {
         assert!(s.contains("BestImprovement"));
         assert!(s.contains("KeepFirst"));
     }
-
-    // ── TabuSearch name ──────────────────────────────────────
 
     #[test]
     fn test_tabu_search_name() {
