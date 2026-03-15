@@ -73,41 +73,33 @@
 use crate::{
     exec::SearchCommand,
     meta::{
-        metaheuristic::{
-            AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome, TeleportTarget,
-        },
+        metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
         tabu::SelectionStrategy,
-        teleport::{NoTeleport, TeleportPolicy, should_attempt_teleport},
         tie::{KeepFirst, TieBreakingStrategy},
     },
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
-use talos_search::oracle::GlobalOracle;
 
 // ----------------------------------------------------------------
 // Greedy Descent
 // ----------------------------------------------------------------
 
 /// Greedy Descent metaheuristic with configurable selection strategy.
-pub struct GreedyDescent<B = KeepFirst, Tp = NoTeleport> {
+pub struct GreedyDescent<B = KeepFirst> {
     /// Move selection strategy.
     selection: SelectionStrategy,
 
     /// Tie-breaking strategy for best-improvement mode.
     tie_breaking: B,
-
-    /// Teleport policy controlling oracle-based solution injection.
-    teleport_policy: Tp,
 }
 
-impl<B: std::fmt::Debug, Tp: std::fmt::Debug> std::fmt::Debug for GreedyDescent<B, Tp> {
+impl<B: std::fmt::Debug> std::fmt::Debug for GreedyDescent<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GreedyDescent")
             .field("selection", &self.selection)
             .field("tie_breaking", &self.tie_breaking)
-            .field("teleport_policy", &self.teleport_policy)
             .finish()
     }
 }
@@ -120,7 +112,6 @@ impl GreedyDescent<KeepFirst> {
         Self {
             selection: SelectionStrategy::FirstImprovement,
             tie_breaking: KeepFirst,
-            teleport_policy: NoTeleport,
         }
     }
 }
@@ -132,7 +123,7 @@ impl Default for GreedyDescent<KeepFirst> {
     }
 }
 
-impl<B: TieBreakingStrategy, Tp: TeleportPolicy> GreedyDescent<B, Tp> {
+impl<B: TieBreakingStrategy> GreedyDescent<B> {
     /// Sets the move selection strategy.
     ///
     /// - `FirstImprovement` (default): accept the first improving move.
@@ -147,24 +138,10 @@ impl<B: TieBreakingStrategy, Tp: TeleportPolicy> GreedyDescent<B, Tp> {
     ///
     /// Only relevant in `BestImprovement` mode. The default is `KeepFirst`.
     #[inline]
-    pub fn with_tie_breaking<B2: TieBreakingStrategy>(
-        self,
-        tie_breaking: B2,
-    ) -> GreedyDescent<B2, Tp> {
+    pub fn with_tie_breaking<B2: TieBreakingStrategy>(self, tie_breaking: B2) -> GreedyDescent<B2> {
         GreedyDescent {
             selection: self.selection,
             tie_breaking,
-            teleport_policy: self.teleport_policy,
-        }
-    }
-
-    /// Replaces the teleport policy.
-    #[inline]
-    pub fn with_teleport<Tp2: TeleportPolicy>(self, policy: Tp2) -> GreedyDescent<B, Tp2> {
-        GreedyDescent {
-            selection: self.selection,
-            tie_breaking: self.tie_breaking,
-            teleport_policy: policy,
         }
     }
 
@@ -187,12 +164,10 @@ impl<B: TieBreakingStrategy, Tp: TeleportPolicy> GreedyDescent<B, Tp> {
     }
 }
 
-impl<T, B, Tp, G> Metaheuristic<T, G> for GreedyDescent<B, Tp>
+impl<T, B> Metaheuristic<T> for GreedyDescent<B>
 where
     T: SolverNumeric,
     B: TieBreakingStrategy,
-    Tp: TeleportPolicy,
-    G: GlobalOracle<T>,
 {
     fn name(&self) -> &str {
         "GreedyDescent"
@@ -226,16 +201,7 @@ where
         _accepted_solution: SolutionView<'_, T>,
         _buffered_solution: Option<SolutionView<'_, T>>,
         _graph: &ScheduleGraph,
-        oracle: &G,
     ) -> NeighborhoodExhaustionOutcome {
-        if should_attempt_teleport(
-            &mut self.teleport_policy,
-            oracle,
-            _best_solution.objective_value(),
-        ) {
-            return NeighborhoodExhaustionOutcome::Teleport(TeleportTarget::Best);
-        }
-
         match self.selection {
             SelectionStrategy::BestImprovement => NeighborhoodExhaustionOutcome::Restart,
             SelectionStrategy::FirstImprovement => NeighborhoodExhaustionOutcome::Terminate,
@@ -347,16 +313,6 @@ where
         _graph: &ScheduleGraph,
         _graph_diff: &ScheduleGraphDiff,
     ) {
-        self.teleport_policy.on_improvement();
-    }
-
-    fn on_teleport(
-        &mut self,
-        _model: &Model<T>,
-        _new_solution: SolutionView<'_, T>,
-        _graph: &ScheduleGraph,
-    ) {
-        self.teleport_policy.on_teleport();
     }
 
     fn on_iteration(
@@ -379,7 +335,6 @@ where
 mod tests {
     use super::*;
     use crate::meta::tie::{KeepLast, RandomTieBreak};
-    use talos_search::oracle::NoOracle;
 
     #[test]
     fn test_greedy_descent_new_defaults() {
@@ -440,7 +395,7 @@ mod tests {
     #[test]
     fn test_greedy_descent_name() {
         let gd = GreedyDescent::new();
-        assert_eq!(Metaheuristic::<i32, NoOracle>::name(&gd), "GreedyDescent");
+        assert_eq!(Metaheuristic::<i32>::name(&gd), "GreedyDescent");
     }
 
     #[test]

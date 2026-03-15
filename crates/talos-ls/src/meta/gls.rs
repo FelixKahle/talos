@@ -104,12 +104,7 @@
 
 use crate::{
     exec::SearchCommand,
-    meta::{
-        metaheuristic::{
-            AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome, TeleportTarget,
-        },
-        teleport::{NoTeleport, TeleportPolicy, should_attempt_teleport},
-    },
+    meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use num_traits::ToPrimitive;
@@ -119,7 +114,6 @@ use talos_model::{
     model::Model,
     solution::SolutionView,
 };
-use talos_search::oracle::GlobalOracle;
 
 // ----------------------------------------------------------------
 // Feature Cost
@@ -964,7 +958,6 @@ pub struct GuidedLocalSearch<
     F = UniformCost,
     L = StaticLambda,
     D = NoDecay,
-    Tp = NoTeleport,
 > {
     /// The penalization strategy applied at local optima.
     penalization: P,
@@ -991,18 +984,10 @@ pub struct GuidedLocalSearch<
     /// Counter for the active trigger (iterations without improvement
     /// or accepted moves, depending on the trigger variant).
     trigger_counter: u64,
-
-    /// Teleport policy controlling oracle-based solution injection.
-    teleport_policy: Tp,
 }
 
-impl<
-    P: std::fmt::Debug,
-    F: std::fmt::Debug,
-    L: std::fmt::Debug,
-    D: std::fmt::Debug,
-    Tp: std::fmt::Debug,
-> std::fmt::Debug for GuidedLocalSearch<P, F, L, D, Tp>
+impl<P: std::fmt::Debug, F: std::fmt::Debug, L: std::fmt::Debug, D: std::fmt::Debug> std::fmt::Debug
+    for GuidedLocalSearch<P, F, L, D>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GuidedLocalSearch")
@@ -1013,7 +998,6 @@ impl<
             .field("current_penalty_sum", &self.current_penalty_sum)
             .field("trigger", &self.trigger)
             .field("trigger_counter", &self.trigger_counter)
-            .field("teleport_policy", &self.teleport_policy)
             .finish()
     }
 }
@@ -1047,7 +1031,6 @@ impl GuidedLocalSearch<MaxUtilityPenalization, UniformCost, StaticLambda> {
             current_penalty_sum: 0,
             trigger: PenalizationTrigger::OnExhaustion,
             trigger_counter: 0,
-            teleport_policy: NoTeleport,
         }
     }
 
@@ -1105,25 +1088,23 @@ where
             current_penalty_sum: 0,
             trigger: PenalizationTrigger::OnExhaustion,
             trigger_counter: 0,
-            teleport_policy: NoTeleport,
         }
     }
 }
 
-impl<P, F, L, D, Tp> GuidedLocalSearch<P, F, L, D, Tp>
+impl<P, F, L, D> GuidedLocalSearch<P, F, L, D>
 where
     P: PenalizationStrategy,
     F: FeatureCost,
     L: LambdaStrategy,
     D: PenaltyDecay,
-    Tp: TeleportPolicy,
 {
     /// Replaces the penalization strategy.
     #[inline]
     pub fn with_penalization<P2: PenalizationStrategy>(
         self,
         penalization: P2,
-    ) -> GuidedLocalSearch<P2, F, L, D, Tp> {
+    ) -> GuidedLocalSearch<P2, F, L, D> {
         GuidedLocalSearch {
             penalization,
             feature_cost: self.feature_cost,
@@ -1133,7 +1114,6 @@ where
             current_penalty_sum: self.current_penalty_sum,
             trigger: self.trigger,
             trigger_counter: self.trigger_counter,
-            teleport_policy: self.teleport_policy,
         }
     }
 
@@ -1142,7 +1122,7 @@ where
     pub fn with_feature_cost<F2: FeatureCost>(
         self,
         feature_cost: F2,
-    ) -> GuidedLocalSearch<P, F2, L, D, Tp> {
+    ) -> GuidedLocalSearch<P, F2, L, D> {
         GuidedLocalSearch {
             penalization: self.penalization,
             feature_cost,
@@ -1152,7 +1132,6 @@ where
             current_penalty_sum: self.current_penalty_sum,
             trigger: self.trigger,
             trigger_counter: self.trigger_counter,
-            teleport_policy: self.teleport_policy,
         }
     }
 
@@ -1161,7 +1140,7 @@ where
     pub fn with_lambda_strategy<L2: LambdaStrategy>(
         self,
         lambda_strategy: L2,
-    ) -> GuidedLocalSearch<P, F, L2, D, Tp> {
+    ) -> GuidedLocalSearch<P, F, L2, D> {
         GuidedLocalSearch {
             penalization: self.penalization,
             feature_cost: self.feature_cost,
@@ -1171,13 +1150,12 @@ where
             current_penalty_sum: self.current_penalty_sum,
             trigger: self.trigger,
             trigger_counter: self.trigger_counter,
-            teleport_policy: self.teleport_policy,
         }
     }
 
     /// Replaces the penalty decay strategy.
     #[inline]
-    pub fn with_decay<D2: PenaltyDecay>(self, decay: D2) -> GuidedLocalSearch<P, F, L, D2, Tp> {
+    pub fn with_decay<D2: PenaltyDecay>(self, decay: D2) -> GuidedLocalSearch<P, F, L, D2> {
         GuidedLocalSearch {
             penalization: self.penalization,
             feature_cost: self.feature_cost,
@@ -1187,26 +1165,6 @@ where
             current_penalty_sum: self.current_penalty_sum,
             trigger: self.trigger,
             trigger_counter: self.trigger_counter,
-            teleport_policy: self.teleport_policy,
-        }
-    }
-
-    /// Replaces the teleport policy.
-    #[inline]
-    pub fn with_teleport<Tp2: TeleportPolicy>(
-        self,
-        policy: Tp2,
-    ) -> GuidedLocalSearch<P, F, L, D, Tp2> {
-        GuidedLocalSearch {
-            penalization: self.penalization,
-            feature_cost: self.feature_cost,
-            lambda_strategy: self.lambda_strategy,
-            decay: self.decay,
-            memory: self.memory,
-            current_penalty_sum: self.current_penalty_sum,
-            trigger: self.trigger,
-            trigger_counter: self.trigger_counter,
-            teleport_policy: policy,
         }
     }
 
@@ -1344,15 +1302,13 @@ where
     }
 }
 
-impl<T, P, F, L, D, Tp, G> Metaheuristic<T, G> for GuidedLocalSearch<P, F, L, D, Tp>
+impl<T, P, F, L, D> Metaheuristic<T> for GuidedLocalSearch<P, F, L, D>
 where
     T: SolverNumeric + ToPrimitive,
     P: PenalizationStrategy,
     F: FeatureCost,
     L: LambdaStrategy,
     D: PenaltyDecay,
-    Tp: TeleportPolicy,
-    G: GlobalOracle<T>,
 {
     fn name(&self) -> &str {
         "GuidedLocalSearch"
@@ -1369,7 +1325,6 @@ where
         self.trigger_counter = 0;
         let obj = _initial_solution.objective_value().to_f64().unwrap_or(0.0);
         self.lambda_strategy.on_start(obj);
-        self.teleport_policy.on_start();
     }
 
     fn on_end(
@@ -1392,16 +1347,7 @@ where
         _accepted_solution: SolutionView<'_, T>,
         _buffered_solution: Option<SolutionView<'_, T>>,
         graph: &ScheduleGraph,
-        oracle: &G,
     ) -> NeighborhoodExhaustionOutcome {
-        if should_attempt_teleport(
-            &mut self.teleport_policy,
-            oracle,
-            _best_solution.objective_value(),
-        ) {
-            return NeighborhoodExhaustionOutcome::Teleport(TeleportTarget::Best);
-        }
-
         if self.trigger == PenalizationTrigger::OnExhaustion {
             self.penalize_and_recompute(graph);
         }
@@ -1537,20 +1483,6 @@ where
         }
         let obj = _new_best.objective_value().to_f64().unwrap_or(0.0);
         self.lambda_strategy.on_new_best(obj);
-        self.teleport_policy.on_improvement();
-    }
-
-    fn on_teleport(
-        &mut self,
-        _model: &Model<T>,
-        new_solution: SolutionView<'_, T>,
-        graph: &ScheduleGraph,
-    ) {
-        self.teleport_policy.on_teleport();
-        self.memory.clear();
-        self.current_penalty_sum = self.compute_penalty_sum(graph);
-        let obj = new_solution.objective_value().to_f64().unwrap_or(0.0);
-        self.lambda_strategy.on_start(obj);
     }
 
     /// Advances the non-improvement counter and, if it reaches the

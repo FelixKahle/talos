@@ -33,7 +33,6 @@ panic = "abort"
 [dependencies]
 talos_core = { path = "../talos-core" }
 talos_model = { path = "../talos-model" }
-talos_search = { path = "../talos-search" }
 num-traits = "0.2.19"
 rand = "0.10.0"
 
