@@ -43,6 +43,7 @@ use talos_model::{
     model::Model,
     solution::{Solution, SolutionView},
 };
+use talos_search::oracle::GlobalOracle;
 
 /// The core orchestration unit for the local search metaheuristic.
 ///
@@ -150,24 +151,26 @@ impl<T> Engine<T> {
     /// during decoding.
     ///
     /// Returns the best solution found, the termination reason, and statistics.
-    pub fn run<H, O, M, F, C>(
+    pub fn run<H, O, M, F, C, G>(
         &mut self,
-        params: MutableLocalSearchParams<'_, T, H, O, M>,
+        params: MutableLocalSearchParams<'_, T, H, O, M, G>,
         evaluator: F,
         mut callback: C,
     ) -> LocalSearchOutcome<T>
     where
         T: SolverNumeric,
-        H: Metaheuristic<T>,
+        H: Metaheuristic<T, G>,
         O: LocalSearchOperator<T>,
         M: LocalSearchMonitor<T>,
         F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
+        G: GlobalOracle<T>,
         C: FnMut(SolutionView<'_, T>),
     {
         let model = params.model;
         let operator = params.operator;
         let metaheuristic = params.metaheuristic;
         let mut monitor = params.monitor;
+        let oracle = params.oracle;
 
         // Initialise topology from the validated initial solution.
         self.topology_graph.overwrite_from_slices(
@@ -367,6 +370,7 @@ impl<T> Engine<T> {
                             None
                         },
                         &self.topology_graph,
+                        oracle,
                     ) {
                         NeighborhoodExhaustionOutcome::Restart => {
                             operator.reset();
@@ -375,6 +379,52 @@ impl<T> Engine<T> {
                         NeighborhoodExhaustionOutcome::Terminate => {
                             termination_reason = TerminationReason::NeighborhoodExhausted;
                             break 'outer;
+                        }
+                        NeighborhoodExhaustionOutcome::Teleport(solution) => {
+                            self.topology_graph.overwrite_from_slices(
+                                solution.berths(),
+                                solution.start_times(),
+                                model.num_berths(),
+                            );
+
+                            unsafe {
+                                decode_full_unchecked(
+                                    &self.topology_graph,
+                                    &mut self.candidate_state,
+                                    model,
+                                    &evaluator,
+                                )
+                                .expect("Teleported solution from Oracle must be decodable");
+                            }
+
+                            self.accepted_state
+                                .overwrite_from_state(&self.candidate_state);
+
+                            self.schedule_graph_undo_log.clear();
+                            self.schedule_graph_diff.clear();
+                            self.touched.reset();
+                            has_buffered = false;
+
+                            if self.accepted_state.objective() < self.best_state.objective() {
+                                self.update_best();
+
+                                callback(self.best_state.as_solution_view());
+                                metaheuristic.on_new_best(
+                                    model,
+                                    self.best_state.as_solution_view(),
+                                    &self.topology_graph,
+                                    &self.schedule_graph_diff,
+                                );
+                            }
+
+                            metaheuristic.on_teleport(
+                                model,
+                                self.accepted_state.as_solution_view(),
+                                &self.topology_graph,
+                            );
+
+                            operator.reset();
+                            continue 'outer;
                         }
                     }
                 }
@@ -513,6 +563,10 @@ impl<T> Engine<T> {
                                 &stats,
                             );
                             self.update_best();
+
+                            // Push to the oracle
+                            oracle.try_push_solution_view(self.best_state.as_solution_view());
+
                             callback(self.best_state.as_solution_view());
                             metaheuristic.on_new_best(
                                 model,
@@ -767,6 +821,7 @@ mod tests {
     use talos_model::index::{BerthIndex, VesselIndex};
     use talos_model::model::{Model, ProcessingTime};
     use talos_model::solution::SolutionView;
+    use talos_search::oracle::{GlobalOracle, NoOracle};
 
     /// Builds a minimal 2-vessel / 2-berth model.
     /// V0: arrival=0, deadline=100, weight=1, p(B0)=5, p(B1)=5
@@ -992,7 +1047,7 @@ mod tests {
         }
     }
 
-    impl Metaheuristic<i64> for AcceptAllMetaheuristic {
+    impl<G: GlobalOracle<i64>> Metaheuristic<i64, G> for AcceptAllMetaheuristic {
         fn name(&self) -> &str {
             "AcceptAll"
         }
@@ -1020,7 +1075,8 @@ mod tests {
             _accepted: SolutionView<'_, i64>,
             _buffered: Option<SolutionView<'_, i64>>,
             _graph: &ScheduleGraph,
-        ) -> NeighborhoodExhaustionOutcome {
+            _oracle: &G,
+        ) -> NeighborhoodExhaustionOutcome<i64> {
             NeighborhoodExhaustionOutcome::Terminate
         }
 
@@ -1098,6 +1154,14 @@ mod tests {
         ) {
         }
 
+        fn on_teleport(
+            &mut self,
+            _model: &Model<i64>,
+            _new_solution: SolutionView<'_, i64>,
+            _graph: &ScheduleGraph,
+        ) {
+        }
+
         fn on_iteration(
             &mut self,
             _iteration: u64,
@@ -1122,7 +1186,7 @@ mod tests {
         }
     }
 
-    impl Metaheuristic<i64> for RejectAllMetaheuristic {
+    impl<G: GlobalOracle<i64>> Metaheuristic<i64, G> for RejectAllMetaheuristic {
         fn name(&self) -> &str {
             "RejectAll"
         }
@@ -1150,7 +1214,8 @@ mod tests {
             _accepted: SolutionView<'_, i64>,
             _buffered: Option<SolutionView<'_, i64>>,
             _graph: &ScheduleGraph,
-        ) -> NeighborhoodExhaustionOutcome {
+            _oracle: &G,
+        ) -> NeighborhoodExhaustionOutcome<i64> {
             NeighborhoodExhaustionOutcome::Terminate
         }
 
@@ -1228,6 +1293,14 @@ mod tests {
         ) {
         }
 
+        fn on_teleport(
+            &mut self,
+            _model: &Model<i64>,
+            _new_solution: SolutionView<'_, i64>,
+            _graph: &ScheduleGraph,
+        ) {
+        }
+
         fn on_iteration(
             &mut self,
             _iteration: u64,
@@ -1251,7 +1324,7 @@ mod tests {
         }
     }
 
-    impl Metaheuristic<i64> for BufferAllMetaheuristic {
+    impl<G: GlobalOracle<i64>> Metaheuristic<i64, G> for BufferAllMetaheuristic {
         fn name(&self) -> &str {
             "BufferAll"
         }
@@ -1279,7 +1352,8 @@ mod tests {
             _accepted: SolutionView<'_, i64>,
             _buffered: Option<SolutionView<'_, i64>>,
             _graph: &ScheduleGraph,
-        ) -> NeighborhoodExhaustionOutcome {
+            _oracle: &G,
+        ) -> NeighborhoodExhaustionOutcome<i64> {
             NeighborhoodExhaustionOutcome::Terminate
         }
 
@@ -1357,6 +1431,14 @@ mod tests {
         ) {
         }
 
+        fn on_teleport(
+            &mut self,
+            _model: &Model<i64>,
+            _new_solution: SolutionView<'_, i64>,
+            _graph: &ScheduleGraph,
+        ) {
+        }
+
         fn on_iteration(
             &mut self,
             _iteration: u64,
@@ -1369,7 +1451,7 @@ mod tests {
         }
     }
 
-    fn run_engine<H: Metaheuristic<i64>, O: LocalSearchOperator<i64>>(
+    fn run_engine<H: Metaheuristic<i64, NoOracle>, O: LocalSearchOperator<i64>>(
         metaheuristic: &mut H,
         operator: &mut O,
         monitor: MockMonitor,
@@ -1383,11 +1465,13 @@ mod tests {
         // extract it later. Since `run` takes `M: LocalSearchMonitor` by value
         // inside `MutableLocalSearchParams`, we pass it directly and rely on
         // the return.
+        let oracle = NoOracle;
         let params = MutableLocalSearchParams {
             model: &model,
             operator,
             metaheuristic,
             monitor,
+            oracle: &oracle,
             berths: &berths,
             start_times: &start_times,
             objective_value: 5, // weight=1 * start=0 + weight=1 * start=5
@@ -1538,7 +1622,7 @@ mod tests {
         }
     }
 
-    fn run_with_cell_monitor<H: Metaheuristic<i64>, O: LocalSearchOperator<i64>>(
+    fn run_with_cell_monitor<H: Metaheuristic<i64, NoOracle>, O: LocalSearchOperator<i64>>(
         metaheuristic: &mut H,
         operator: &mut O,
         cell: &Cell<MockMonitor>,
@@ -1552,6 +1636,7 @@ mod tests {
             operator,
             metaheuristic,
             monitor: CellMonitor(cell),
+            oracle: &NoOracle,
             berths: &berths,
             start_times: &start_times,
             objective_value: 5,
@@ -1669,15 +1754,20 @@ mod tests {
             on_iteration_calls: AtomicU64,
         }
 
-        impl Metaheuristic<i64> for CountingRejectAll {
+        impl<G: GlobalOracle<i64>> Metaheuristic<i64, G> for CountingRejectAll {
             fn name(&self) -> &str {
-                self.inner.name()
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::name(&self.inner)
             }
             fn on_start(&mut self, m: &Model<i64>, s: SolutionView<'_, i64>, g: &ScheduleGraph) {
-                self.inner.on_start(m, s, g);
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::on_start(
+                    &mut self.inner,
+                    m,
+                    s,
+                    g,
+                );
             }
             fn on_end(&mut self, m: &Model<i64>, s: SolutionView<'_, i64>, g: &ScheduleGraph) {
-                self.inner.on_end(m, s, g);
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::on_end(&mut self.inner, m, s, g);
             }
             fn on_neighbourhood_exhausted(
                 &mut self,
@@ -1686,8 +1776,10 @@ mod tests {
                 a: SolutionView<'_, i64>,
                 bf: Option<SolutionView<'_, i64>>,
                 g: &ScheduleGraph,
-            ) -> NeighborhoodExhaustionOutcome {
-                self.inner.on_neighbourhood_exhausted(m, b, a, bf, g)
+                oracle: &G,
+            ) -> NeighborhoodExhaustionOutcome<i64> {
+                self.inner
+                    .on_neighbourhood_exhausted(m, b, a, bf, g, oracle)
             }
             fn should_commit_buffered(
                 &mut self,
@@ -1698,7 +1790,15 @@ mod tests {
                 l: &ScheduleGraph,
                 bl: &ScheduleGraph,
             ) -> bool {
-                self.inner.should_commit_buffered(m, b, a, bf, l, bl)
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::should_commit_buffered(
+                    &mut self.inner,
+                    m,
+                    b,
+                    a,
+                    bf,
+                    l,
+                    bl,
+                )
             }
             fn search_command(
                 &mut self,
@@ -1708,7 +1808,14 @@ mod tests {
                 a: SolutionView<'_, i64>,
                 bf: Option<SolutionView<'_, i64>>,
             ) -> SearchCommand {
-                self.inner.search_command(i, m, b, a, bf)
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::search_command(
+                    &mut self.inner,
+                    i,
+                    m,
+                    b,
+                    a,
+                    bf,
+                )
             }
             #[allow(clippy::too_many_arguments)]
             fn decide_fate(
@@ -1721,7 +1828,16 @@ mod tests {
                 g: &ScheduleGraph,
                 gd: &ScheduleGraphDiff,
             ) -> AcceptanceOutcome {
-                self.inner.decide_fate(m, b, a, bf, co, g, gd)
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::decide_fate(
+                    &mut self.inner,
+                    m,
+                    b,
+                    a,
+                    bf,
+                    co,
+                    g,
+                    gd,
+                )
             }
             fn on_accept(
                 &mut self,
@@ -1732,7 +1848,15 @@ mod tests {
                 g: &ScheduleGraph,
                 gd: &ScheduleGraphDiff,
             ) {
-                self.inner.on_accept(m, b, na, bf, g, gd);
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::on_accept(
+                    &mut self.inner,
+                    m,
+                    b,
+                    na,
+                    bf,
+                    g,
+                    gd,
+                );
             }
             #[allow(clippy::too_many_arguments)]
             fn on_reject(
@@ -1745,7 +1869,16 @@ mod tests {
                 g: &ScheduleGraph,
                 gd: &ScheduleGraphDiff,
             ) {
-                self.inner.on_reject(m, b, a, bf, co, g, gd);
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::on_reject(
+                    &mut self.inner,
+                    m,
+                    b,
+                    a,
+                    bf,
+                    co,
+                    g,
+                    gd,
+                );
             }
             fn on_new_best(
                 &mut self,
@@ -1754,7 +1887,26 @@ mod tests {
                 g: &ScheduleGraph,
                 gd: &ScheduleGraphDiff,
             ) {
-                self.inner.on_new_best(m, nb, g, gd);
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::on_new_best(
+                    &mut self.inner,
+                    m,
+                    nb,
+                    g,
+                    gd,
+                );
+            }
+            fn on_teleport(
+                &mut self,
+                m: &Model<i64>,
+                ns: SolutionView<'_, i64>,
+                g: &ScheduleGraph,
+            ) {
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::on_teleport(
+                    &mut self.inner,
+                    m,
+                    ns,
+                    g,
+                );
             }
             fn on_iteration(
                 &mut self,
@@ -1766,7 +1918,15 @@ mod tests {
                 g: &ScheduleGraph,
             ) {
                 self.on_iteration_calls.fetch_add(1, Ordering::Relaxed);
-                self.inner.on_iteration(i, m, b, a, bf, g);
+                <RejectAllMetaheuristic as Metaheuristic<i64, G>>::on_iteration(
+                    &mut self.inner,
+                    i,
+                    m,
+                    b,
+                    a,
+                    bf,
+                    g,
+                );
             }
         }
 

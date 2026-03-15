@@ -19,11 +19,36 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub mod composite;
-pub mod cycle;
-pub mod iteration;
-pub mod lsmonitor;
-pub mod nimpr;
-pub mod solution;
-pub mod time;
-pub mod wrapper;
+use talos_model::solution::{Solution, SolutionView};
+
+pub trait GlobalOracle<T> {
+    fn try_push_solution(&self, solution: &Solution<T>) -> bool;
+    fn try_push_solution_view(&self, solution: SolutionView<'_, T>) -> bool;
+    fn best_objective(&self) -> Option<T>;
+    fn with_best<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&Solution<T>) -> R;
+}
+
+pub struct NoOracle;
+
+impl<T> GlobalOracle<T> for NoOracle {
+    fn try_push_solution(&self, _solution: &Solution<T>) -> bool {
+        false
+    }
+
+    fn try_push_solution_view(&self, _solution: SolutionView<'_, T>) -> bool {
+        false
+    }
+
+    fn best_objective(&self) -> Option<T> {
+        None
+    }
+
+    fn with_best<F, R>(&self, _f: F) -> Option<R>
+    where
+        F: FnOnce(&Solution<T>) -> R,
+    {
+        None
+    }
+}

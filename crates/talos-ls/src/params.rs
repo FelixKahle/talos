@@ -182,7 +182,7 @@ impl std::error::Error for LocalSearchParamsError {
 
 /// The validated parameters required to run the local search engine.
 #[derive(Debug)]
-pub struct LocalSearchParams<'a, T, H, O, M>
+pub struct LocalSearchParams<'a, T, H, O, M, G>
 where
     T: SolverNumeric,
 {
@@ -190,12 +190,13 @@ where
     operator: &'a mut O,
     metaheuristic: &'a mut H,
     monitor: M,
+    oracle: &'a G,
     berths: &'a [BerthIndex], // len = num_vessels
     start_times: &'a [T],     // len = num_vessels
     objective_value: T,
 }
 
-impl<'a, T, H, O, M> LocalSearchParams<'a, T, H, O, M>
+impl<'a, T, H, O, M, G> LocalSearchParams<'a, T, H, O, M, G>
 where
     T: SolverNumeric,
 {
@@ -231,6 +232,7 @@ where
         operator: &'a mut O,
         metaheuristic: &'a mut H,
         monitor: M,
+        oracle: &'a G,
         berths: &'a [BerthIndex],
         start_times: &'a [T],
         objective_value: T,
@@ -287,6 +289,7 @@ where
             operator,
             metaheuristic,
             monitor,
+            oracle,
             berths,
             start_times,
             objective_value,
@@ -299,7 +302,7 @@ where
 // ----------------------------------------------------------------
 
 #[derive(Debug)]
-pub struct MutableLocalSearchParams<'a, T, H, O, M>
+pub struct MutableLocalSearchParams<'a, T, H, O, M, G>
 where
     T: SolverNumeric,
 {
@@ -307,22 +310,24 @@ where
     pub operator: &'a mut O,
     pub metaheuristic: &'a mut H,
     pub monitor: M,
+    pub oracle: &'a G,
     pub berths: &'a [BerthIndex],
     pub start_times: &'a [T],
     pub objective_value: T,
 }
 
-impl<'a, T, H, O, M> From<LocalSearchParams<'a, T, H, O, M>>
-    for MutableLocalSearchParams<'a, T, H, O, M>
+impl<'a, T, H, O, M, G> From<LocalSearchParams<'a, T, H, O, M, G>>
+    for MutableLocalSearchParams<'a, T, H, O, M, G>
 where
     T: SolverNumeric,
 {
-    fn from(params: LocalSearchParams<'a, T, H, O, M>) -> Self {
+    fn from(params: LocalSearchParams<'a, T, H, O, M, G>) -> Self {
         Self {
             model: params.model,
             operator: params.operator,
             metaheuristic: params.metaheuristic,
             monitor: params.monitor,
+            oracle: params.oracle,
             berths: params.berths,
             start_times: params.start_times,
             objective_value: params.objective_value,

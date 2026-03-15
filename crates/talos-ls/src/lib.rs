@@ -29,6 +29,7 @@ pub mod mutator;
 pub mod operator;
 pub mod outcome;
 pub mod params;
+pub mod portfolio;
 pub mod sgraph;
 pub mod sgraphundo;
 pub mod state;

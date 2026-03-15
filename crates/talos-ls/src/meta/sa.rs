@@ -83,13 +83,17 @@
 
 use crate::{
     exec::SearchCommand,
-    meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
+    meta::{
+        metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
+        teleport::{NoTeleport, TeleportPolicy, try_teleport},
+    },
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use num_traits::ToPrimitive;
 use rand::{Rng, RngExt};
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
+use talos_search::oracle::GlobalOracle;
 
 // ----------------------------------------------------------------
 // Acceptance Criteria
@@ -465,7 +469,7 @@ impl std::fmt::Display for CoolingTrigger {
 /// * `C` — Cooling schedule (implements [`CoolingSchedule`]).
 /// * `A` — Acceptance criterion (implements [`AcceptanceCriterion`],
 ///   defaults to [`MetropolisCriterion`]).
-pub struct SimulatedAnnealing<R, C, A = MetropolisCriterion> {
+pub struct SimulatedAnnealing<R, C, A = MetropolisCriterion, Tp = NoTeleport> {
     /// The cooling schedule managing temperature decay.
     cooling: C,
 
@@ -486,10 +490,13 @@ pub struct SimulatedAnnealing<R, C, A = MetropolisCriterion> {
 
     /// Determines when the cooling schedule is stepped.
     cooling_trigger: CoolingTrigger,
+
+    /// Teleport policy controlling oracle-based solution injection.
+    teleport_policy: Tp,
 }
 
-impl<R: std::fmt::Debug, C: std::fmt::Debug, A: std::fmt::Debug> std::fmt::Debug
-    for SimulatedAnnealing<R, C, A>
+impl<R: std::fmt::Debug, C: std::fmt::Debug, A: std::fmt::Debug, Tp: std::fmt::Debug>
+    std::fmt::Debug for SimulatedAnnealing<R, C, A, Tp>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SimulatedAnnealing")
@@ -498,6 +505,7 @@ impl<R: std::fmt::Debug, C: std::fmt::Debug, A: std::fmt::Debug> std::fmt::Debug
             .field("reheat_factor", &self.reheat_factor)
             .field("frozen_threshold", &self.frozen_threshold)
             .field("cooling_trigger", &self.cooling_trigger)
+            .field("teleport_policy", &self.teleport_policy)
             .finish()
     }
 }
@@ -522,6 +530,7 @@ where
             reheat_factor: None,
             frozen_threshold: Self::DEFAULT_FROZEN_THRESHOLD,
             cooling_trigger: CoolingTrigger::Iteration,
+            teleport_policy: NoTeleport,
         }
     }
 }
@@ -532,9 +541,6 @@ where
     C: CoolingSchedule,
     A: AcceptanceCriterion,
 {
-    /// Default frozen threshold used when none is specified.
-    const DEFAULT_FROZEN_THRESHOLD: f64 = 1e-12;
-
     /// Creates a new SA instance with a custom acceptance criterion.
     ///
     /// # Arguments
@@ -551,8 +557,20 @@ where
             reheat_factor: None,
             frozen_threshold: Self::DEFAULT_FROZEN_THRESHOLD,
             cooling_trigger: CoolingTrigger::Iteration,
+            teleport_policy: NoTeleport,
         }
     }
+}
+
+impl<R, C, A, Tp> SimulatedAnnealing<R, C, A, Tp>
+where
+    R: Rng,
+    C: CoolingSchedule,
+    A: AcceptanceCriterion,
+    Tp: TeleportPolicy,
+{
+    /// Default frozen threshold used when none is specified.
+    const DEFAULT_FROZEN_THRESHOLD: f64 = 1e-12;
 
     /// Enables reheating on neighbourhood exhaustion.
     ///
@@ -662,18 +680,53 @@ where
 
         GeometricCooling::new(t0, cooling_rate, t_min)
     }
+
+    /// Replaces the teleport policy.
+    ///
+    /// The default is [`NoTeleport`] — teleportation is disabled.
+    /// Use [`StagnationTeleport`](super::teleport::StagnationTeleport)
+    /// to enable oracle-based teleportation after a period of stagnation.
+    #[inline]
+    pub fn with_teleport<Tp2: TeleportPolicy>(
+        self,
+        policy: Tp2,
+    ) -> SimulatedAnnealing<R, C, A, Tp2> {
+        SimulatedAnnealing {
+            cooling: self.cooling,
+            rng: self.rng,
+            criterion: self.criterion,
+            reheat_factor: self.reheat_factor,
+            frozen_threshold: self.frozen_threshold,
+            cooling_trigger: self.cooling_trigger,
+            teleport_policy: policy,
+        }
+    }
+
+    /// Returns a reference to the teleport policy.
+    #[inline]
+    pub fn teleport_policy(&self) -> &Tp {
+        &self.teleport_policy
+    }
+
+    /// Returns a mutable reference to the teleport policy.
+    #[inline]
+    pub fn teleport_policy_mut(&mut self) -> &mut Tp {
+        &mut self.teleport_policy
+    }
 }
 
 // ----------------------------------------------------------------
 // Metaheuristic Implementation
 // ----------------------------------------------------------------
 
-impl<T, R, C, A> Metaheuristic<T> for SimulatedAnnealing<R, C, A>
+impl<T, R, C, A, Tp, G> Metaheuristic<T, G> for SimulatedAnnealing<R, C, A, Tp>
 where
     T: SolverNumeric + ToPrimitive,
     R: Rng,
     C: CoolingSchedule,
     A: AcceptanceCriterion,
+    Tp: TeleportPolicy,
+    G: GlobalOracle<T>,
 {
     fn name(&self) -> &str {
         "SimulatedAnnealing"
@@ -686,6 +739,7 @@ where
         _graph: &ScheduleGraph,
     ) {
         self.cooling.reset();
+        self.teleport_policy.on_start();
     }
 
     fn on_end(
@@ -709,7 +763,16 @@ where
         _accepted_solution: SolutionView<'_, T>,
         _buffered_solution: Option<SolutionView<'_, T>>,
         _graph: &ScheduleGraph,
-    ) -> NeighborhoodExhaustionOutcome {
+        oracle: &G,
+    ) -> NeighborhoodExhaustionOutcome<T> {
+        if let Some(solution) = try_teleport(
+            &mut self.teleport_policy,
+            oracle,
+            _best_solution.objective_value(),
+        ) {
+            return NeighborhoodExhaustionOutcome::Teleport(solution);
+        }
+
         if self.cooling_trigger == CoolingTrigger::Cycle {
             self.cooling.step();
         }
@@ -834,8 +897,16 @@ where
         _graph: &ScheduleGraph,
         _graph_diff: &ScheduleGraphDiff,
     ) {
-        // Standard SA does not react to new bests.
-        // Adaptive variants could implement reheating here.
+        self.teleport_policy.on_improvement();
+    }
+
+    fn on_teleport(
+        &mut self,
+        _model: &Model<T>,
+        _new_solution: SolutionView<'_, T>,
+        _graph: &ScheduleGraph,
+    ) {
+        self.cooling.reset();
     }
 
     /// Advances the cooling schedule by one step when

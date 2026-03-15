@@ -606,6 +606,8 @@ dependencies = [
  "talos_core",
  "talos_ls",
  "talos_model",
+ "talos_search",
+ "talos_solver",
 ]
 
 [[package]]
@@ -624,6 +626,7 @@ dependencies = [
  "rand",
  "talos_core",
  "talos_model",
+ "talos_search",
 ]
 
 [[package]]
@@ -632,6 +635,28 @@ version = "0.1.0"
 dependencies = [
  "num-traits",
  "talos_core",
+]
+
+[[package]]
+name = "talos_search"
+version = "0.1.0"
+dependencies = [
+ "num-traits",
+ "rand",
+ "talos_core",
+ "talos_model",
+]
+
+[[package]]
+name = "talos_solver"
+version = "0.1.0"
+dependencies = [
+ "num-traits",
+ "rand",
+ "talos_core",
+ "talos_ls",
+ "talos_model",
+ "talos_search",
 ]
 
 [[package]]

@@ -24,4 +24,5 @@ pub mod gls;
 pub mod metaheuristic;
 pub mod sa;
 pub mod tabu;
+pub mod teleport;
 pub mod tie;

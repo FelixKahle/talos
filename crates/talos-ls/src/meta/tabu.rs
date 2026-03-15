@@ -100,6 +100,7 @@ use crate::{
     exec::SearchCommand,
     meta::{
         metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
+        teleport::{NoTeleport, TeleportPolicy, try_teleport},
         tie::{KeepFirst, TieBreakingStrategy},
     },
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
@@ -107,6 +108,7 @@ use crate::{
 use rand::{Rng, RngExt};
 use talos_core::utils::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
+use talos_search::oracle::GlobalOracle;
 
 // ----------------------------------------------------------------
 // Tenure Strategy
@@ -344,7 +346,10 @@ pub enum SelectionStrategy {
 /// Tabu Search metaheuristic with pluggable tenure and aspiration strategies.
 ///
 /// See the [module-level documentation](self) for algorithmic details.
-pub struct TabuSearch<S, A = BestObjectiveAspiration, B = KeepFirst> {
+pub struct TabuSearch<T, S, A = BestObjectiveAspiration, B = KeepFirst, Tp = NoTeleport>
+where
+    T: Copy,
+{
     /// The tenure strategy controlling how long moves stay forbidden.
     tenure: S,
 
@@ -355,24 +360,30 @@ pub struct TabuSearch<S, A = BestObjectiveAspiration, B = KeepFirst> {
     memory: TabuMemory,
 
     /// Current TS iteration counter (incremented in `on_accept`).
-    ///
-    /// Note: this counts *accepted moves* (one TS iteration = one committed
-    /// move), not engine iterations (one engine iteration = one candidate
-    /// evaluation). The distinction matters for tenure expiration.
     iteration: u64,
 
     /// What to do when the neighbourhood is exhausted.
-    exhaustion_outcome: NeighborhoodExhaustionOutcome,
+    exhaustion_outcome: NeighborhoodExhaustionOutcome<T>,
 
     /// Move selection strategy.
     selection: SelectionStrategy,
 
     /// Tie-breaking strategy for best-improvement mode.
     tie_breaking: B,
+
+    /// Teleport policy controlling oracle-based solution injection.
+    teleport_policy: Tp,
 }
 
-impl<S: std::fmt::Debug, A: std::fmt::Debug, B: std::fmt::Debug> std::fmt::Debug
-    for TabuSearch<S, A, B>
+impl<
+    T: std::fmt::Debug,
+    S: std::fmt::Debug,
+    A: std::fmt::Debug,
+    B: std::fmt::Debug,
+    Tp: std::fmt::Debug,
+> std::fmt::Debug for TabuSearch<T, S, A, B, Tp>
+where
+    T: Copy,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TabuSearch")
@@ -381,12 +392,14 @@ impl<S: std::fmt::Debug, A: std::fmt::Debug, B: std::fmt::Debug> std::fmt::Debug
             .field("selection", &self.selection)
             .field("tie_breaking", &self.tie_breaking)
             .field("iteration", &self.iteration)
+            .field("teleport_policy", &self.teleport_policy)
             .finish()
     }
 }
 
-impl<S> TabuSearch<S, BestObjectiveAspiration, KeepFirst>
+impl<T, S> TabuSearch<T, S, BestObjectiveAspiration, KeepFirst>
 where
+    T: Copy,
     S: TenureStrategy,
 {
     /// Creates a new Tabu Search with default `BestObjectiveAspiration`
@@ -407,12 +420,14 @@ where
             exhaustion_outcome: NeighborhoodExhaustionOutcome::Restart,
             selection: SelectionStrategy::BestImprovement,
             tie_breaking: KeepFirst,
+            teleport_policy: NoTeleport,
         }
     }
 }
 
-impl<S, A> TabuSearch<S, A, KeepFirst>
+impl<T, S, A> TabuSearch<T, S, A, KeepFirst>
 where
+    T: Copy,
     S: TenureStrategy,
     A: AspirationCriterion,
 {
@@ -440,15 +455,18 @@ where
             exhaustion_outcome: NeighborhoodExhaustionOutcome::Restart,
             selection: SelectionStrategy::BestImprovement,
             tie_breaking: KeepFirst,
+            teleport_policy: NoTeleport,
         }
     }
 }
 
-impl<S, A, B> TabuSearch<S, A, B>
+impl<T, S, A, B, Tp> TabuSearch<T, S, A, B, Tp>
 where
+    T: Copy,
     S: TenureStrategy,
     A: AspirationCriterion,
     B: TieBreakingStrategy,
+    Tp: TeleportPolicy,
 {
     /// Replaces the tie-breaking strategy.
     ///
@@ -458,7 +476,7 @@ where
     pub fn with_tie_breaking<B2: TieBreakingStrategy>(
         self,
         tie_breaking: B2,
-    ) -> TabuSearch<S, A, B2> {
+    ) -> TabuSearch<T, S, A, B2, Tp> {
         TabuSearch {
             tenure: self.tenure,
             aspiration: self.aspiration,
@@ -467,6 +485,22 @@ where
             exhaustion_outcome: self.exhaustion_outcome,
             selection: self.selection,
             tie_breaking,
+            teleport_policy: self.teleport_policy,
+        }
+    }
+
+    /// Replaces the teleport policy.
+    #[inline]
+    pub fn with_teleport<Tp2: TeleportPolicy>(self, policy: Tp2) -> TabuSearch<T, S, A, B, Tp2> {
+        TabuSearch {
+            tenure: self.tenure,
+            aspiration: self.aspiration,
+            memory: self.memory,
+            iteration: self.iteration,
+            exhaustion_outcome: self.exhaustion_outcome,
+            selection: self.selection,
+            tie_breaking: self.tie_breaking,
+            teleport_policy: policy,
         }
     }
 
@@ -492,15 +526,15 @@ where
     /// the standard choice for Tabu Search — the engine re-scans the
     /// neighbourhood on each iteration.
     #[inline]
-    pub fn with_exhaustion_outcome(mut self, outcome: NeighborhoodExhaustionOutcome) -> Self {
+    pub fn with_exhaustion_outcome(mut self, outcome: NeighborhoodExhaustionOutcome<T>) -> Self {
         self.exhaustion_outcome = outcome;
         self
     }
 
     /// Returns the current exhaustion outcome setting.
     #[inline]
-    pub fn exhaustion_outcome(&self) -> NeighborhoodExhaustionOutcome {
-        self.exhaustion_outcome
+    pub fn exhaustion_outcome(&self) -> NeighborhoodExhaustionOutcome<T> {
+        self.exhaustion_outcome.clone()
     }
 
     /// Returns a reference to the tenure strategy.
@@ -554,12 +588,14 @@ where
     }
 }
 
-impl<T, S, A, B> Metaheuristic<T> for TabuSearch<S, A, B>
+impl<T, S, A, B, Tp, G> Metaheuristic<T, G> for TabuSearch<T, S, A, B, Tp>
 where
     T: SolverNumeric,
     S: TenureStrategy,
     A: AspirationCriterion,
     B: TieBreakingStrategy,
+    Tp: TeleportPolicy,
+    G: GlobalOracle<T>,
 {
     fn name(&self) -> &str {
         "TabuSearch"
@@ -573,6 +609,7 @@ where
     ) {
         self.memory.clear();
         self.iteration = 0;
+        self.teleport_policy.on_start();
     }
 
     fn on_end(
@@ -591,8 +628,17 @@ where
         _accepted_solution: SolutionView<'_, T>,
         _buffered_solution: Option<SolutionView<'_, T>>,
         _graph: &ScheduleGraph,
-    ) -> NeighborhoodExhaustionOutcome {
-        self.exhaustion_outcome
+        oracle: &G,
+    ) -> NeighborhoodExhaustionOutcome<T> {
+        if let Some(solution) = try_teleport(
+            &mut self.teleport_policy,
+            oracle,
+            _best_solution.objective_value(),
+        ) {
+            return NeighborhoodExhaustionOutcome::Teleport(solution);
+        }
+
+        self.exhaustion_outcome.clone()
     }
 
     /// In best-improvement mode, always commits the buffered solution.
@@ -720,7 +766,17 @@ where
         _graph: &ScheduleGraph,
         _graph_diff: &ScheduleGraphDiff,
     ) {
-        // Standard TS does not react to new bests.
+        self.teleport_policy.on_improvement();
+    }
+
+    fn on_teleport(
+        &mut self,
+        _model: &Model<T>,
+        _new_solution: SolutionView<'_, T>,
+        _graph: &ScheduleGraph,
+    ) {
+        self.memory.clear();
+        self.iteration = 0;
     }
 
     /// No-op. The engine calls this once per candidate evaluation, but TS
@@ -746,6 +802,7 @@ where
 mod tests {
     use super::*;
     use crate::meta::tie::{KeepLast, RandomTieBreak};
+    use talos_search::oracle::NoOracle;
 
     #[test]
     fn test_fixed_tenure_returns_constant() {
@@ -900,7 +957,7 @@ mod tests {
 
     #[test]
     fn test_tabu_search_new_defaults() {
-        let ts = TabuSearch::new(FixedTenure::new(5), 10, 3);
+        let ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(5), 10, 3);
         assert_eq!(ts.selection(), SelectionStrategy::BestImprovement);
         assert_eq!(
             ts.exhaustion_outcome(),
@@ -911,14 +968,14 @@ mod tests {
 
     #[test]
     fn test_tabu_search_with_selection() {
-        let ts = TabuSearch::new(FixedTenure::new(5), 10, 3)
+        let ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(5), 10, 3)
             .with_selection(SelectionStrategy::FirstImprovement);
         assert_eq!(ts.selection(), SelectionStrategy::FirstImprovement);
     }
 
     #[test]
     fn test_tabu_search_with_exhaustion_outcome() {
-        let ts = TabuSearch::new(FixedTenure::new(5), 10, 3)
+        let ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(5), 10, 3)
             .with_exhaustion_outcome(NeighborhoodExhaustionOutcome::Terminate);
         assert_eq!(
             ts.exhaustion_outcome(),
@@ -928,32 +985,33 @@ mod tests {
 
     #[test]
     fn test_tabu_search_with_tie_breaking() {
-        let mut ts = TabuSearch::new(FixedTenure::new(5), 10, 3).with_tie_breaking(KeepLast);
+        let mut ts: TabuSearch<i32, _, _, KeepLast> =
+            TabuSearch::new(FixedTenure::new(5), 10, 3).with_tie_breaking(KeepLast);
         assert!(ts.tie_breaking_mut().break_tie());
     }
 
     #[test]
     fn test_tabu_search_tenure_accessor() {
-        let ts = TabuSearch::new(FixedTenure::new(7), 4, 2);
+        let ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(7), 4, 2);
         assert_eq!(ts.tenure().value, 7);
     }
 
     #[test]
     fn test_tabu_search_tenure_mut_accessor() {
-        let mut ts = TabuSearch::new(FixedTenure::new(7), 4, 2);
+        let mut ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(7), 4, 2);
         *ts.tenure_mut() = FixedTenure::new(12);
         assert_eq!(ts.tenure().value, 12);
     }
 
     #[test]
     fn test_tabu_search_aspiration_accessor() {
-        let ts = TabuSearch::new(FixedTenure::new(5), 4, 2);
+        let ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(5), 4, 2);
         assert!(ts.aspiration().aspires(1, 2));
     }
 
     #[test]
     fn test_tabu_search_memory_accessor() {
-        let ts = TabuSearch::new(FixedTenure::new(5), 4, 2);
+        let ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(5), 4, 2);
         assert_eq!(ts.memory().edge.len(), 16);
         assert_eq!(ts.memory().berth.len(), 8);
     }
@@ -968,13 +1026,14 @@ mod tests {
             }
         }
 
-        let ts = TabuSearch::with_aspiration(FixedTenure::new(5), AlwaysAspire, 4, 2);
+        let ts: TabuSearch<i32, _, AlwaysAspire> =
+            TabuSearch::with_aspiration(FixedTenure::new(5), AlwaysAspire, 4, 2);
         assert!(ts.aspiration().aspires(999, 1));
     }
 
     #[test]
     fn test_tabu_search_debug_does_not_panic() {
-        let ts = TabuSearch::new(FixedTenure::new(5), 10, 3);
+        let ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(5), 10, 3);
         let s = format!("{:?}", ts);
         assert!(s.contains("TabuSearch"));
         assert!(s.contains("FixedTenure"));
@@ -984,7 +1043,7 @@ mod tests {
 
     #[test]
     fn test_tabu_search_name() {
-        let ts = TabuSearch::new(FixedTenure::new(5), 4, 2);
-        assert_eq!(Metaheuristic::<i32>::name(&ts), "TabuSearch");
+        let ts: TabuSearch<i32, _> = TabuSearch::new(FixedTenure::new(5), 4, 2);
+        assert_eq!(Metaheuristic::<i32, NoOracle>::name(&ts), "TabuSearch");
     }
 }

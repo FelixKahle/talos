@@ -50,6 +50,7 @@ use talos_ls::operator::swap::{InterBerthSwapOperator, IntraBerthSwapOperator};
 use talos_ls::params::MutableLocalSearchParams;
 use talos_model::index::{BerthIndex, VesselIndex};
 use talos_model::model::{Model, ProcessingTime};
+use talos_search::oracle::NoOracle;
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Artificial Instance Builders
@@ -267,16 +268,18 @@ fn run_search<H, O, M>(
     objective_value: i64,
 ) -> talos_ls::outcome::LocalSearchOutcome<i64>
 where
-    H: talos_ls::meta::metaheuristic::Metaheuristic<i64>,
+    H: talos_ls::meta::metaheuristic::Metaheuristic<i64, NoOracle>,
     O: LocalSearchOperator<i64>,
     M: talos_ls::monitor::lsmonitor::LocalSearchMonitor<i64>,
 {
     let mut engine = Engine::<i64>::new(model.num_vessels(), model.num_berths());
+    let oracle = NoOracle;
     let params = MutableLocalSearchParams {
         model,
         operator,
         metaheuristic,
         monitor,
+        oracle: &oracle,
         berths,
         start_times,
         objective_value,
@@ -798,11 +801,13 @@ fn new_best_callback_receives_improving_solutions() {
 
     let mut best_values = Vec::new();
     let mut engine = Engine::<i64>::new(model.num_vessels(), model.num_berths());
+    let oracle = NoOracle;
     let params = MutableLocalSearchParams {
         model: &model,
         operator: &mut op,
         metaheuristic: &mut sa,
         monitor,
+        oracle: &oracle,
         berths: &berths,
         start_times: &starts,
         objective_value: obj,
@@ -853,11 +858,13 @@ fn engine_can_be_reused_across_runs() {
     let cooling = GeometricCooling::new(100.0, 0.99, 0.01);
     let mut sa = SimulatedAnnealing::new(cooling, StdRng::seed_from_u64(42));
     let mut op = build_full_operator();
+    let oracle = NoOracle;
     let params = MutableLocalSearchParams {
         model: &model,
         operator: &mut op,
         metaheuristic: &mut sa,
         monitor: IterationLimitMonitor::new(1_000),
+        oracle: &oracle,
         berths: &berths,
         start_times: &starts,
         objective_value: obj,
@@ -873,6 +880,7 @@ fn engine_can_be_reused_across_runs() {
         operator: &mut op2,
         metaheuristic: &mut ts,
         monitor: CycleLimitMonitor::new(50),
+        oracle: &oracle,
         berths: &berths,
         start_times: &starts,
         objective_value: obj,
@@ -893,8 +901,9 @@ fn validated_params_run_succeeds() {
     let mut op = build_full_operator();
     let monitor = IterationLimitMonitor::new(500);
 
+    let oracle = NoOracle;
     let params = talos_ls::params::LocalSearchParams::new(
-        &model, &mut op, &mut sa, monitor, &berths, &starts, obj,
+        &model, &mut op, &mut sa, monitor, &oracle, &berths, &starts, obj,
     )
     .expect("valid params should not error");
 
@@ -916,11 +925,13 @@ fn validated_params_rejects_mismatched_dimensions() {
     let bad_berths = vec![BerthIndex::new(0); 3];
     let bad_starts = vec![0i64; 3];
 
+    let oracle = NoOracle;
     let result = talos_ls::params::LocalSearchParams::new(
         &model,
         &mut op,
         &mut sa,
         monitor,
+        &oracle,
         &bad_berths,
         &bad_starts,
         0,

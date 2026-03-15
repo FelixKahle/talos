@@ -19,11 +19,22 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub mod composite;
-pub mod cycle;
-pub mod iteration;
-pub mod lsmonitor;
-pub mod nimpr;
-pub mod solution;
-pub mod time;
-pub mod wrapper;
+use crate::{monitor::psmonitor::PortfolioMonitor, oracle::GlobalOracle};
+use talos_core::utils::num::SolverNumeric;
+use talos_model::{model::Model, solution::Solution};
+
+/// A solver that produces a solution for a given model.
+///
+/// This trait is intentionally engine-agnostic. Implementations may use
+/// local search, constructive heuristics, exact methods, or any other
+/// strategy. The only contract is: **model in, solution out**.
+///
+/// A [`GlobalOracle`] is provided so that solvers running in a portfolio
+/// can share and receive improving solutions from other threads.
+pub trait PortfolioSolver<T: SolverNumeric, G: GlobalOracle<T>, M: PortfolioMonitor<T>> {
+    /// Returns the name of this solver (for logging / identification).
+    fn name(&self) -> &str;
+
+    /// Solves the given model and returns the best solution found.
+    fn solve(&mut self, model: &Model<T>, oracle: &G, monitor: M) -> Solution<T>;
+}

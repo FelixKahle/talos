@@ -34,6 +34,8 @@ panic = "abort"
 talos_core = { path = "../talos-core" }
 talos_model = { path = "../talos-model" }
 talos_ls = { path = "../talos-ls" }
+talos_search = { path = "../talos-search" }
+talos_solver = { path = "../talos-solver" }
 num-traits = "0.2.19"
 regex = "1.12.3"
 rand = "0.10.0"

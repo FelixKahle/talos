@@ -30,7 +30,11 @@ use crate::{
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use talos_core::utils::num::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{
+    model::Model,
+    solution::{Solution, SolutionView},
+};
+use talos_search::oracle::GlobalOracle;
 
 // ----------------------------------------------------------------
 // AcceptanceOutcome
@@ -65,20 +69,30 @@ impl std::fmt::Display for AcceptanceOutcome {
 // NeighborhoodExhaustionOutcome
 // ----------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NeighborhoodExhaustionOutcome {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NeighborhoodExhaustionOutcome<T>
+where
+    T: Copy,
+{
     /// Restart the search with a new neighborhood exploration sequence.
     Restart,
 
     /// Terminate the search.
     Terminate,
+
+    /// Teleport to a new solution.
+    Teleport(Solution<T>),
 }
 
-impl std::fmt::Display for NeighborhoodExhaustionOutcome {
+impl<T> std::fmt::Display for NeighborhoodExhaustionOutcome<T>
+where
+    T: Copy,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NeighborhoodExhaustionOutcome::Restart => write!(f, "Restart"),
             NeighborhoodExhaustionOutcome::Terminate => write!(f, "Terminate"),
+            NeighborhoodExhaustionOutcome::Teleport(_) => write!(f, "Teleport"),
         }
     }
 }
@@ -88,9 +102,10 @@ impl std::fmt::Display for NeighborhoodExhaustionOutcome {
 // ----------------------------------------------------------------
 
 /// A trait governing the strategic acceptance logic and termination of the local search.
-pub trait Metaheuristic<T>
+pub trait Metaheuristic<T, G>
 where
     T: SolverNumeric,
+    G: GlobalOracle<T>,
 {
     /// Returns the name of the metaheuristic.
     fn name(&self) -> &str;
@@ -121,7 +136,8 @@ where
         accepted_solution: SolutionView<'_, T>,
         buffered_solution: Option<SolutionView<'_, T>>,
         graph: &ScheduleGraph,
-    ) -> NeighborhoodExhaustionOutcome;
+        oracle: &G,
+    ) -> NeighborhoodExhaustionOutcome<T>;
 
     /// Called when an operator has finished scanning a full neighborhood.
     ///
@@ -199,6 +215,13 @@ where
         graph_diff: &ScheduleGraphDiff,
     );
 
+    fn on_teleport(
+        &mut self,
+        model: &Model<T>,
+        new_solution: SolutionView<'_, T>,
+        graph: &ScheduleGraph,
+    );
+
     /// Called at the end of every neighborhood evaluation loop.
     fn on_iteration(
         &mut self,
@@ -211,18 +234,20 @@ where
     );
 }
 
-impl<T> std::fmt::Debug for dyn Metaheuristic<T>
+impl<T, G> std::fmt::Debug for dyn Metaheuristic<T, G>
 where
     T: SolverNumeric,
+    G: GlobalOracle<T>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Metaheuristic {{ name: {} }}", self.name())
     }
 }
 
-impl<T> std::fmt::Display for dyn Metaheuristic<T>
+impl<T, G> std::fmt::Display for dyn Metaheuristic<T, G>
 where
     T: SolverNumeric,
+    G: GlobalOracle<T>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Metaheuristic: {}", self.name())

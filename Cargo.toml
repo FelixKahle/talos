@@ -25,6 +25,8 @@ members = [
     "crates/talos-model",
     "crates/talos-ls",
     "crates/talos-cmd",
+    "crates/talos-search",
+    "crates/talos-solver",
 ]
 resolver = "3"
 
