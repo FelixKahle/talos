@@ -19,6 +19,10 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+// ----------------------------------------------------------------
+// TerminationReason
+// ----------------------------------------------------------------
+
 /// The exact reason a local search run terminated.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +76,10 @@ impl std::fmt::Display for TerminationReason {
         }
     }
 }
+
+// ----------------------------------------------------------------
+// SearchCommand
+// ----------------------------------------------------------------
 
 /// Command returned by monitors or metaheuristics to control flow.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]

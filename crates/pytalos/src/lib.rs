@@ -19,8 +19,34 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub mod gd;
-pub mod gls;
-pub mod metaheuristic;
-pub mod selec;
-pub mod tie;
+use pyo3::prelude::*;
+
+pub mod eval;
+pub mod ls;
+pub mod model;
+
+/// Talos: Dynamic Berth Allocation Problem solver
+#[pymodule]
+fn pytalos(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Model
+    m.add_class::<model::PyModel>()?;
+
+    // Local Search - Outcome
+    m.add_class::<ls::outcome::PyTerminationReason>()?;
+    m.add_class::<ls::outcome::PySearchResult>()?;
+
+    // Local Search - Engine
+    m.add_class::<ls::engine::PyOperator>()?;
+    m.add_class::<ls::engine::PyLocalSearchConfig>()?;
+
+    // Local Search - GLS
+    m.add_class::<ls::gls::PyLambdaStrategy>()?;
+    m.add_class::<ls::gls::PyTrigger>()?;
+    m.add_class::<ls::gls::PyDecay>()?;
+    m.add_class::<ls::gls::PyGlsConfig>()?;
+
+    // Solve
+    m.add_function(wrap_pyfunction!(ls::solve::solve, m)?)?;
+
+    Ok(())
+}

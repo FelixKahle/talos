@@ -19,15 +19,18 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 # WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-[workspace]
-members = [
-    "crates/talos-core",
-    "crates/talos-model",
-    "crates/talos-ls",
-    "crates/pytalos",
-    "crates/talos-cmd",
-]
-resolver = "3"
+[package]
+name = "pytalos"
+version = "0.1.0"
+edition = "2021"
 
-[workspace.package]
-edition = "2024"
+[lib]
+name = "pytalos"
+crate-type = ["cdylib"]
+
+[dependencies]
+talos_core = { path = "../talos-core" }
+talos_model = { path = "../talos-model" }
+talos_ls = { path = "../talos-ls" }
+itertools = "0.14.0"
+pyo3 = { version = "0.28.2", features = ["abi3-py38"] }

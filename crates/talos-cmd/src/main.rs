@@ -67,7 +67,7 @@ struct InstanceBenchmarkResult {
 }
 
 fn setup_benchmarks() -> Vec<InstanceBenchmarkConfig> {
-    const MAX_TIME: std::time::Duration = std::time::Duration::from_secs(600);
+    const MAX_TIME: std::time::Duration = std::time::Duration::from_secs(360);
 
     vec![
         InstanceBenchmarkConfig {
@@ -278,7 +278,8 @@ fn run_benchmark(
     let mut gls = GuidedLocalSearch::new(model.num_vessels(), model.num_berths())
         .with_lambda_strategy(DynamicLambda::new(
             lambda_02, // Initial (Alpha 0.2)
-            0.1,       // Step
+            0.1,       // Increase step
+            0.1,       // Decay step
             lambda_01, // Min (Alpha 0.1)
             lambda_03, // Max (Alpha 0.3)
         ))
@@ -304,7 +305,8 @@ fn run_benchmark(
     let mut gls = GuidedLocalSearch::new(model.num_vessels(), model.num_berths())
         .with_lambda_strategy(DynamicLambda::new(
             lambda_02, // Initial (Alpha 0.2)
-            0.1,       // Step
+            0.1,       // Increase step
+            0.1,       // Decay step
             lambda_01, // Min (Alpha 0.1)
             lambda_03, // Max (Alpha 0.3)
         ))
@@ -371,6 +373,9 @@ fn main() {
     println!("  {}", "-".repeat(124));
 
     for config in &benchmarks {
+        if config.filename != "f200x15-01.txt" {
+            continue;
+        }
         let result = run_benchmark(config, &data_dir);
 
         // Write per-instance JSON

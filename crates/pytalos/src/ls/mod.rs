@@ -19,8 +19,7 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-pub mod gd;
+pub mod engine;
 pub mod gls;
-pub mod metaheuristic;
-pub mod selec;
-pub mod tie;
+pub mod outcome;
+pub mod solve;

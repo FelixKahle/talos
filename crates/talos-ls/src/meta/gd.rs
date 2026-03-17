@@ -29,7 +29,7 @@
 //! # Selection Strategy
 //!
 //! The move selection strategy is configurable via
-//! [`SelectionStrategy`](super::tabu::SelectionStrategy):
+//! `SelectionStrategy`
 //!
 //! | Strategy             | Behaviour                                                               |
 //! |----------------------|-------------------------------------------------------------------------|
@@ -48,7 +48,7 @@
 //!
 //! When using `BestImprovement`, ties between the current buffer and a new
 //! candidate with the same objective are resolved by the
-//! [`TieBreakingStrategy`](super::tabu::TieBreakingStrategy):
+//! `TieBreakingStrategy`:
 //!
 //! | Strategy           | Behaviour                                              |
 //! |--------------------|--------------------------------------------------------|
@@ -74,7 +74,7 @@ use crate::{
     exec::SearchCommand,
     meta::{
         metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
-        tabu::SelectionStrategy,
+        selec::SelectionStrategy,
         tie::{KeepFirst, TieBreakingStrategy},
     },
     sgraph::{ScheduleGraph, ScheduleGraphDiff},

@@ -356,6 +356,19 @@ impl<T> Engine<T> {
                         }
                     }
 
+                    metaheuristic.on_iteration(
+                        stats.iterations,
+                        model,
+                        self.best_state.as_solution_view(),
+                        self.accepted_state.as_solution_view(),
+                        if has_buffered {
+                            Some(self.buffered_state.as_solution_view())
+                        } else {
+                            None
+                        },
+                        &self.topology_graph,
+                    );
+
                     // Ask the metaheuristic how to proceed after exhaustion.
                     match metaheuristic.on_neighbourhood_exhausted(
                         model,
@@ -1778,7 +1791,7 @@ mod tests {
         let (outcome, _) = run_engine(&mut meta, &mut op, MockMonitor::default());
 
         assert_eq!(outcome.stats().iterations, 3);
-        assert_eq!(meta.on_iteration_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(meta.on_iteration_calls.load(Ordering::Relaxed), 4);
     }
 
     #[test]

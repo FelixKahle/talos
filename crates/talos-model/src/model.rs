@@ -441,6 +441,7 @@ fn flatten_index(num_berths: usize, vessel_index: VesselIndex, berth_index: Bert
     vessel_index.get() * num_berths + berth_index.get()
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub struct Model<T>
 where
     T: SolverNumeric,

@@ -31,15 +31,6 @@
 //! The tracker is a thin wrapper around a `Vec<bool>` indexed by
 //! `BerthIndex::get()`. Marking and querying are both $O(1)$; resetting
 //! the entire mask is $O(B)$ via `fill(false)`.
-//!
-//! # Iterators
-//!
-//! | Iterator | Yields |
-//! |----------|--------|
-//! | `TouchedIndicesIter` | `BerthIndex` of every touched berth |
-//! | `UntouchedBerthsIter` | `BerthIndex` of every clean berth |
-//!
-//! Both scan the boolean array linearly and skip non-matching entries.
 
 use talos_model::index::BerthIndex;
 

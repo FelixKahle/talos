@@ -34,7 +34,7 @@ where
     T: SolverNumeric,
 {
     /// The best solution found during the search.
-    solution: Solution<T>,
+    solution: Solution<T>, // Local search starts from a solution, so we can guarantee that this is always populated.
     /// The exact reason the search stopped.
     termination_reason: TerminationReason,
     /// Performance and iteration statistics.
