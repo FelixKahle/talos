@@ -46,7 +46,7 @@ use talos_ls::{
     params::MutableLocalSearchParams,
     stats::LocalSearchStatistics,
 };
-use talos_model::{index::BerthIndex, solution::SolutionView};
+use talos_model::solution::SolutionView;
 
 use crate::{
     eval::{make_callback, wtt_evaluator},
@@ -56,6 +56,7 @@ use crate::{
         outcome::{PySearchResult, PyTerminationReason},
     },
     model::PyModel,
+    solution::PySolution,
 };
 
 // ----------------------------------------------------------------
@@ -307,9 +308,7 @@ fn outcome_to_py(outcome: talos_ls::outcome::LocalSearchOutcome<i64>) -> PySearc
     let (solution, reason, stats) = outcome.into_inner();
 
     PySearchResult {
-        objective: solution.objective_value(),
-        berths: solution.berths().iter().map(|b| b.get()).collect(),
-        start_times: solution.start_times().to_vec(),
+        solution: PySolution::from_inner(solution),
         termination_reason: PyTerminationReason::from(reason),
         iterations: stats.iterations,
         accepted_solutions: stats.accepted_solutions,
@@ -330,56 +329,47 @@ fn outcome_to_py(outcome: talos_ls::outcome::LocalSearchOutcome<i64>) -> PySearc
 ///     model: The DBAP model.
 ///     config: Local search configuration (operators, termination criteria).
 ///     gls_config: Optional GLS configuration. If None, uses default GLS settings.
-///     berths: Initial berth assignment per vessel (list of berth indices, len = num_vessels).
-///     start_times: Initial start time per vessel (len = num_vessels).
-///     objective: Objective value of the initial solution.
+///     solution: Initial solution (berth assignments, start times, objective).
 ///     callback: Optional Python callback invoked on each new best solution.
 ///               Receives (objective: int, berths: list[int], start_times: list[int]).
 #[pyfunction]
-#[pyo3(signature = (model, config, gls_config, berths, start_times, objective, callback = None))]
+#[pyo3(signature = (model, config, gls_config, solution, callback = None))]
 pub fn solve(
     model: &PyModel,
     config: &PyLocalSearchConfig,
     gls_config: Option<&PyGlsConfig>,
-    berths: Vec<usize>,
-    start_times: Vec<i64>,
-    objective: i64,
+    solution: &PySolution,
     callback: Option<Py<PyAny>>,
 ) -> PyResult<PySearchResult> {
     let inner_model = model.inner();
+    let inner_solution = solution.inner();
     let num_vessels = inner_model.num_vessels();
     let num_berths = inner_model.num_berths();
 
     // Validate inputs.
-    if berths.len() != num_vessels {
+    if inner_solution.num_vessels() != num_vessels {
         return Err(PyValueError::new_err(format!(
-            "berths length {} != num_vessels {num_vessels}",
-            berths.len()
-        )));
-    }
-    if start_times.len() != num_vessels {
-        return Err(PyValueError::new_err(format!(
-            "start_times length {} != num_vessels {num_vessels}",
-            start_times.len()
+            "solution has {} vessels but model has {num_vessels}",
+            inner_solution.num_vessels()
         )));
     }
     if config.operators.is_empty() {
         return Err(PyValueError::new_err("operators list must not be empty"));
     }
 
-    // Convert berth indices.
-    let berth_indices: Vec<BerthIndex> = berths
-        .iter()
-        .map(|&b| {
-            if b >= num_berths {
-                Err(PyValueError::new_err(format!(
-                    "berth index {b} out of bounds (num_berths = {num_berths})"
-                )))
-            } else {
-                Ok(BerthIndex::new(b))
-            }
-        })
-        .collect::<PyResult<Vec<_>>>()?;
+    // Validate berth indices are within bounds.
+    for (i, &berth) in inner_solution.berths().iter().enumerate() {
+        if berth.get() >= num_berths {
+            return Err(PyValueError::new_err(format!(
+                "berth index {} for vessel {i} out of bounds (num_berths = {num_berths})",
+                berth.get()
+            )));
+        }
+    }
+
+    let berth_indices = inner_solution.berths();
+    let start_times = inner_solution.start_times();
+    let objective = inner_solution.objective_value();
 
     let mut operator = build_operator(&config.operators);
     let monitor = build_monitor(config);
@@ -398,8 +388,8 @@ pub fn solve(
                 operator: &mut operator,
                 metaheuristic: &mut gls,
                 monitor,
-                berths: &berth_indices,
-                start_times: &start_times,
+                berths: berth_indices,
+                start_times,
                 objective_value: objective,
             };
             engine.run(params, wtt_evaluator, &mut *cb)
@@ -425,8 +415,8 @@ pub fn solve(
                         operator: &mut operator,
                         metaheuristic: &mut gls,
                         monitor,
-                        berths: &berth_indices,
-                        start_times: &start_times,
+                        berths: berth_indices,
+                        start_times,
                         objective_value: objective,
                     };
                     engine.run(params, wtt_evaluator, &mut *cb)
@@ -445,8 +435,8 @@ pub fn solve(
                         operator: &mut operator,
                         metaheuristic: &mut gls,
                         monitor,
-                        berths: &berth_indices,
-                        start_times: &start_times,
+                        berths: berth_indices,
+                        start_times,
                         objective_value: objective,
                     };
                     engine.run(params, wtt_evaluator, &mut *cb)
@@ -479,8 +469,8 @@ pub fn solve(
                         operator: &mut operator,
                         metaheuristic: &mut gls,
                         monitor,
-                        berths: &berth_indices,
-                        start_times: &start_times,
+                        berths: berth_indices,
+                        start_times,
                         objective_value: objective,
                     };
                     engine.run(params, wtt_evaluator, &mut *cb)
@@ -513,8 +503,8 @@ pub fn solve(
                         operator: &mut operator,
                         metaheuristic: &mut gls,
                         monitor,
-                        berths: &berth_indices,
-                        start_times: &start_times,
+                        berths: berth_indices,
+                        start_times,
                         objective_value: objective,
                     };
                     engine.run(params, wtt_evaluator, &mut *cb)
@@ -547,8 +537,8 @@ pub fn solve(
                         operator: &mut operator,
                         metaheuristic: &mut gls,
                         monitor,
-                        berths: &berth_indices,
-                        start_times: &start_times,
+                        berths: berth_indices,
+                        start_times,
                         objective_value: objective,
                     };
                     engine.run(params, wtt_evaluator, &mut *cb)
@@ -581,8 +571,8 @@ pub fn solve(
                         operator: &mut operator,
                         metaheuristic: &mut gls,
                         monitor,
-                        berths: &berth_indices,
-                        start_times: &start_times,
+                        berths: berth_indices,
+                        start_times,
                         objective_value: objective,
                     };
                     engine.run(params, wtt_evaluator, &mut *cb)

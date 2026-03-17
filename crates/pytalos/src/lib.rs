@@ -24,12 +24,14 @@ use pyo3::prelude::*;
 pub mod eval;
 pub mod ls;
 pub mod model;
+pub mod solution;
 
 /// Talos: Dynamic Berth Allocation Problem solver
 #[pymodule]
 fn pytalos(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Model
+    // Model & Solution
     m.add_class::<model::PyModel>()?;
+    m.add_class::<solution::PySolution>()?;
 
     // Local Search - Outcome
     m.add_class::<ls::outcome::PyTerminationReason>()?;

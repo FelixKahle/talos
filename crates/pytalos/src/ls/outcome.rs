@@ -19,6 +19,7 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+use crate::solution::PySolution;
 use pyo3::prelude::*;
 use talos_ls::exec::TerminationReason;
 
@@ -64,11 +65,7 @@ impl From<TerminationReason> for PyTerminationReason {
 #[derive(Clone)]
 pub struct PySearchResult {
     #[pyo3(get)]
-    pub(crate) objective: i64,
-    #[pyo3(get)]
-    pub(crate) berths: Vec<usize>,
-    #[pyo3(get)]
-    pub(crate) start_times: Vec<i64>,
+    pub(crate) solution: PySolution,
     #[pyo3(get)]
     pub(crate) termination_reason: PyTerminationReason,
     #[pyo3(get)]
@@ -90,7 +87,10 @@ impl PySearchResult {
     fn __repr__(&self) -> String {
         format!(
             "SearchResult(objective={}, iterations={}, time={:.3}s, reason={:?})",
-            self.objective, self.iterations, self.time_total_secs, self.termination_reason
+            self.solution.objective(),
+            self.iterations,
+            self.time_total_secs,
+            self.termination_reason
         )
     }
 }
