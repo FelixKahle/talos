@@ -94,3 +94,19 @@ impl PySearchResult {
         )
     }
 }
+
+#[inline(always)]
+pub fn outcome_to_py(outcome: talos_ls::outcome::LocalSearchOutcome<i64>) -> PySearchResult {
+    let (solution, reason, stats) = outcome.into_inner();
+
+    PySearchResult {
+        solution: PySolution::from_inner(solution),
+        termination_reason: PyTerminationReason::from(reason),
+        iterations: stats.iterations,
+        accepted_solutions: stats.accepted_solutions,
+        total_solutions: stats.total_solutions,
+        infeasible_moves: stats.infeasible_moves,
+        cycles: stats.cycles,
+        time_total_secs: stats.time_total.as_secs_f64(),
+    }
+}

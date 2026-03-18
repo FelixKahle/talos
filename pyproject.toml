@@ -1,0 +1,6 @@
+dependencies = [
+    "pytalos",
+]
+
+[tool.uv.sources]
+pytalos = { path = "crates/pytalos", editable = true }

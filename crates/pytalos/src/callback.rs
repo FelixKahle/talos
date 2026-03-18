@@ -20,23 +20,7 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 use pyo3::prelude::*;
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::Model,
-    solution::SolutionView,
-};
-
-/// Default evaluator using weighted turnaround time.
-pub fn wtt_evaluator(
-    model: &Model<i64>,
-    vessel: VesselIndex,
-    berth: BerthIndex,
-    start: i64,
-) -> Option<i64> {
-    unsafe {
-        talos_ls::eval::calculate_weighted_turnaround_time_unchecked(model, vessel, berth, start)
-    }
-}
+use talos_model::solution::SolutionView;
 
 /// Wraps an optional Python callback into a Rust closure.
 ///

@@ -21,7 +21,7 @@
 
 use pyo3::prelude::*;
 
-pub mod eval;
+pub mod callback;
 pub mod ls;
 pub mod model;
 pub mod solution;

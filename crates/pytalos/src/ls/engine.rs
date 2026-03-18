@@ -52,8 +52,6 @@ pub struct PyLocalSearchConfig {
     pub max_non_improving_time_secs: Option<f64>,
     #[pyo3(get)]
     pub time_limit_secs: Option<f64>,
-    #[pyo3(get)]
-    pub target_objective: Option<i64>,
 }
 
 #[pymethods]
@@ -68,7 +66,6 @@ impl PyLocalSearchConfig {
         max_non_improving_cycles = None,
         max_non_improving_time_secs = None,
         time_limit_secs = None,
-        target_objective = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -80,7 +77,6 @@ impl PyLocalSearchConfig {
         max_non_improving_cycles: Option<u64>,
         max_non_improving_time_secs: Option<f64>,
         time_limit_secs: Option<f64>,
-        target_objective: Option<i64>,
     ) -> Self {
         Self {
             operators: operators.into_iter().unique_by(|op| *op as u8).collect(),
@@ -91,7 +87,6 @@ impl PyLocalSearchConfig {
             max_non_improving_cycles,
             max_non_improving_time_secs,
             time_limit_secs,
-            target_objective,
         }
     }
 

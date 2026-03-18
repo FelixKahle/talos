@@ -23,15 +23,14 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 use std::time::Duration;
 use talos_ls::{
     engine::Engine,
-    exec::{SearchCommand, TerminationReason},
     meta::gls::{
         heuristic_lambda, AdditiveDynamicLambda, DynamicLambda, GeometricDecay, GuidedLocalSearch,
         PenalizationTrigger,
     },
     monitor::{
         composite::CompositeLocalSearchMonitor, cycle::CycleLimitMonitor,
-        iteration::IterationLimitMonitor, lsmonitor::LocalSearchMonitor,
-        nimpr::NoImprovementMonitor, solution::SolutionLimitMonitor, time::TimeLimitMonitor,
+        iteration::IterationLimitMonitor, nimpr::NoImprovementMonitor,
+        solution::SolutionLimitMonitor, time::TimeLimitMonitor,
     },
     operator::{
         composite::RoundRobinCompoundOperator,
@@ -44,144 +43,33 @@ use talos_ls::{
         swap::{InterBerthSwapOperator, IntraBerthSwapOperator},
     },
     params::MutableLocalSearchParams,
-    stats::LocalSearchStatistics,
 };
-use talos_model::solution::SolutionView;
+use talos_model::{
+    index::{BerthIndex, VesselIndex},
+    model::Model,
+};
 
 use crate::{
-    eval::{make_callback, wtt_evaluator},
+    callback::make_callback,
     ls::{
         engine::{PyLocalSearchConfig, PyOperator},
         gls::{PyDecay, PyGlsConfig, PyLambdaStrategy, PyTrigger},
-        outcome::{PySearchResult, PyTerminationReason},
+        outcome::{outcome_to_py, PySearchResult},
     },
     model::PyModel,
     solution::PySolution,
 };
 
-// ----------------------------------------------------------------
-// TargetObjectiveMonitor
-// ----------------------------------------------------------------
-
-/// A lightweight monitor that terminates when the best objective reaches a target.
-struct TargetObjectiveMonitor {
-    target: i64,
-}
-
-impl LocalSearchMonitor<i64> for TargetObjectiveMonitor {
-    fn name(&self) -> &str {
-        "TargetObjectiveMonitor"
-    }
-
-    fn on_start(
-        &mut self,
-        _model: &talos_model::model::Model<i64>,
-        _initial_solution: SolutionView<'_, i64>,
-    ) {
-    }
-
-    fn on_end(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_iteration(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: Option<SolutionView<'_, i64>>,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_candidate_generated(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: Option<SolutionView<'_, i64>>,
-        _candidate_objective: i64,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_solution_buffered(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: SolutionView<'_, i64>,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_candidate_accepted(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: Option<SolutionView<'_, i64>>,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_buffered_solution_accepted(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_candidate_rejected(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: Option<SolutionView<'_, i64>>,
-        _candidate_objective: i64,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_candidate_infeasible(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: Option<SolutionView<'_, i64>>,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_neighborhood_exhausted(
-        &mut self,
-        _best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: Option<SolutionView<'_, i64>>,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn on_best_solution_updated(
-        &mut self,
-        _prev_best: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: Option<SolutionView<'_, i64>>,
-        _new_best: SolutionView<'_, i64>,
-        _statistics: &LocalSearchStatistics,
-    ) {
-    }
-
-    fn search_command(
-        &mut self,
-        best_solution: SolutionView<'_, i64>,
-        _accepted_solution: SolutionView<'_, i64>,
-        _buffered_solution: Option<SolutionView<'_, i64>>,
-        _statistics: &LocalSearchStatistics,
-    ) -> SearchCommand {
-        if best_solution.objective_value() <= self.target {
-            SearchCommand::Terminate(TerminationReason::TargetObjectiveReached)
-        } else {
-            SearchCommand::Continue
-        }
+/// Default evaluator using weighted turnaround time.
+#[inline(always)]
+fn wtt_evaluator(
+    model: &Model<i64>,
+    vessel: VesselIndex,
+    berth: BerthIndex,
+    start: i64,
+) -> Option<i64> {
+    unsafe {
+        talos_ls::eval::calculate_weighted_turnaround_time_unchecked(model, vessel, berth, start)
     }
 }
 
@@ -244,10 +132,6 @@ fn build_monitor(config: &PyLocalSearchConfig) -> CompositeLocalSearchMonitor<'s
         composite.add_monitor(CycleLimitMonitor::new(max_cycles));
     }
 
-    if let Some(target) = config.target_objective {
-        composite.add_monitor(TargetObjectiveMonitor { target });
-    }
-
     // Non-improving termination: combine iteration, cycle and time patience
     let has_ni_iter = config.max_non_improving_iterations.is_some();
     let has_ni_cycles = config.max_non_improving_cycles.is_some();
@@ -301,22 +185,14 @@ fn build_trigger(config: &PyGlsConfig) -> PenalizationTrigger {
 }
 
 // ----------------------------------------------------------------
-// Outcome conversion
+// Heuristic lambda calculation
 // ----------------------------------------------------------------
 
-fn outcome_to_py(outcome: talos_ls::outcome::LocalSearchOutcome<i64>) -> PySearchResult {
-    let (solution, reason, stats) = outcome.into_inner();
-
-    PySearchResult {
-        solution: PySolution::from_inner(solution),
-        termination_reason: PyTerminationReason::from(reason),
-        iterations: stats.iterations,
-        accepted_solutions: stats.accepted_solutions,
-        total_solutions: stats.total_solutions,
-        infeasible_moves: stats.infeasible_moves,
-        cycles: stats.cycles,
-        time_total_secs: stats.time_total.as_secs_f64(),
-    }
+/// Heuristic lambda calculation for GLS,
+/// based on the initial objective value, problem size, and a scaling factor.
+#[pyfunction]
+pub fn heuristic_gls_lambda(objective: f64, num_features: usize, scale: f64) -> f64 {
+    talos_ls::meta::gls::heuristic_lambda(objective, num_features, scale)
 }
 
 // ----------------------------------------------------------------
@@ -324,14 +200,6 @@ fn outcome_to_py(outcome: talos_ls::outcome::LocalSearchOutcome<i64>) -> PySearc
 // ----------------------------------------------------------------
 
 /// Runs GLS-based local search on the given model and initial solution.
-///
-/// Arguments:
-///     model: The DBAP model.
-///     config: Local search configuration (operators, termination criteria).
-///     gls_config: Optional GLS configuration. If None, uses default GLS settings.
-///     solution: Initial solution (berth assignments, start times, objective).
-///     callback: Optional Python callback invoked on each new best solution.
-///               Receives (objective: int, berths: list[int], start_times: list[int]).
 #[pyfunction]
 #[pyo3(signature = (model, config, gls_config, solution, callback = None))]
 pub fn solve(
