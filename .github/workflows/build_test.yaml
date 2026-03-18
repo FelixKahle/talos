@@ -84,12 +84,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install maturin pytest pytest-cov
 
-      - name: Build and install pytalos (editable)
+      - name: Build and install pytalos
         if: matrix.profile == 'release'
-        working-directory: crates/pytalos
         run: |
           maturin build --release
-          pip install ../../target/wheels/pytalos-*.whl
+          pip install target/wheels/pytalos-*.whl
 
       - name: Run pytest
         if: matrix.profile == 'release'

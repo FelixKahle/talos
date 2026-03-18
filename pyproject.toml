@@ -1,15 +1,25 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0"]
+build-backend = "maturin"
 
 [project]
-name = "talos"
+name = "pytalos"
 version = "0.1.0"
+license = "MIT"
 requires-python = ">=3.8"
-dependencies = ["pytalos"]
+description = "Python bindings for Talos - Dynamic Berth Allocation Problem solver"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
 
-[tool.uv.sources]
-pytalos = { path = "crates/pytalos", editable = true }
+[project.optional-dependencies]
+test = ["pytest>=7.0", "pytest-cov"]
+
+[tool.maturin]
+module-name = "pytalos"
+python-source = "crates/pytalos/python"
+manifest-path = "crates/pytalos/Cargo.toml"
 
 [tool.pytest.ini_options]
 testpaths = ["crates/pytalos/tests"]
