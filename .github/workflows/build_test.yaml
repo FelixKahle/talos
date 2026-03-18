@@ -89,7 +89,7 @@ jobs:
         working-directory: crates/pytalos
         run: |
           maturin build --release
-          pip install target/wheels/pytalos-*.whl
+          pip install ../../target/wheels/pytalos-*.whl
 
       - name: Run pytest
         if: matrix.profile == 'release'
