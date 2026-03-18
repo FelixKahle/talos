@@ -8,8 +8,30 @@ packaged via [Maturin](https://www.maturin.rs).
 
 Requires Python ≥ 3.8 and a Rust toolchain.
 
+**From GitHub (another project):**
+
 ```bash
-# Inside a virtual-env, from the repository root:
+pip install "git+https://github.com/FelixKahle/talos.git@main"
+```
+
+Pin to a specific tag or commit for reproducibility:
+
+```bash
+pip install "git+https://github.com/FelixKahle/talos.git@v0.1.0"
+```
+
+Or in `pyproject.toml`:
+
+```toml
+[project]
+dependencies = [
+    "pytalos @ git+https://github.com/FelixKahle/talos.git@main",
+]
+```
+
+**Local development (from the repository root):**
+
+```bash
 pip install maturin
 maturin develop --release        # compile & install into the active venv
 ```
