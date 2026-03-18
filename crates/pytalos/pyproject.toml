@@ -1,10 +1,11 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.0"]
 build-backend = "maturin"
 
 [project]
 name = "pytalos"
 version = "0.1.0"
+license = "MIT"
 description = "Python bindings for Talos - Dynamic Berth Allocation Problem solver"
 requires-python = ">=3.8"
 classifiers = [
@@ -12,5 +13,10 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0", "pytest-cov"]
+
 [tool.maturin]
 module-name = "pytalos"
+python-source = "python"
+manifest-path = "Cargo.toml"

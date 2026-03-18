@@ -5,3 +5,12 @@
 /results*
 venv
 __pycache__
+.pytest_cache
+
+# macOS debug symbols (maturin build artifacts)
+*.dSYM/
+
+# Compiled native extensions
+*.so
+*.dylib
+*.pyd

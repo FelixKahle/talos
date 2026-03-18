@@ -1,6 +1,15 @@
-dependencies = [
-    "pytalos",
-]
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talos"
+version = "0.1.0"
+requires-python = ">=3.8"
+dependencies = ["pytalos"]
 
 [tool.uv.sources]
 pytalos = { path = "crates/pytalos", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["crates/pytalos/tests"]

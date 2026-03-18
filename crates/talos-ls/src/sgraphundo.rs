@@ -227,6 +227,7 @@ impl ScheduleGraphUndoLog {
         }
     }
 
+    /// Ensures the log has capacity for `target_ops` operations.
     #[inline(always)]
     pub fn ensure_capacity(&mut self, target_ops: usize) {
         if self.stack.capacity() < target_ops {

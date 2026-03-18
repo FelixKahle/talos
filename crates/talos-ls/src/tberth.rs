@@ -114,13 +114,6 @@ impl TouchedBerths {
         }
     }
 
-    #[inline(always)]
-    pub fn ensure_capacity(&mut self, num_berths: usize) {
-        if self.touched.len() < num_berths {
-            self.touched.resize(num_berths, false);
-        }
-    }
-
     /// Resizes the tracker to accommodate a new number of berths.
     #[inline(always)]
     pub fn resize(&mut self, num_berths: usize) {

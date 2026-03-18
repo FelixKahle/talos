@@ -155,20 +155,16 @@ impl<T: SolverNumeric> ScheduleState<T> {
         }
     }
 
-    /// Ensures internal buffers are at least large enough for `num_vessels` vessels
-    /// and `num_berths` berths. Grows with zero-fill if needed; never shrinks.
-    /// Existing data is *not* meaningful after a grow — callers must overwrite
-    /// before reading.
+    /// Resizes the internal vectors to accommodate a new number of vessels and berths.
+    /// Note that the data in this struct will be not meaningful after this operation,
+    /// and the caller is expected to overwrite it with new data.
     #[inline]
-    pub fn ensure_capacity(&mut self, num_vessels: usize, num_berths: usize) {
-        if num_vessels > self.berths.len() {
-            self.berths.resize(num_vessels, BerthIndex::new(0));
-            self.starts.resize(num_vessels, T::ZERO);
-            self.positions.resize(num_vessels, 0);
-        }
-        if num_berths > self.costs.len() {
-            self.costs.resize(num_berths, T::ZERO);
-        }
+    pub fn resize(&mut self, num_vessels: usize, num_berths: usize) {
+        self.berths.resize(num_vessels, BerthIndex::new(0));
+        self.starts.resize(num_vessels, T::zero());
+        self.positions.resize(num_vessels, 0);
+        self.costs.resize(num_berths, T::zero());
+        self.objective = T::zero();
     }
 
     /// Overwrites the current state with new data, reusing existing heap allocations.

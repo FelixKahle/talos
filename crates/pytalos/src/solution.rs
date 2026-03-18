@@ -79,13 +79,13 @@ impl PySolution {
 impl PySolution {
     /// Returns a reference to the inner solution (crate-internal).
     #[inline]
-    pub(crate) fn inner(&self) -> &Solution<i64> {
+    pub fn inner(&self) -> &Solution<i64> {
         &self.inner
     }
 
     /// Constructs a PySolution from an owned Solution (crate-internal).
     #[inline]
-    pub(crate) fn from_inner(solution: Solution<i64>) -> Self {
+    pub fn from_inner(solution: Solution<i64>) -> Self {
         Self { inner: solution }
     }
 }

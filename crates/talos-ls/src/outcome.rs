@@ -61,7 +61,7 @@ where
 
     /// Returns a reference to the best solution found.
     #[inline]
-    pub const fn solution(&self) -> &Solution<T> {
+    pub fn solution(&self) -> &Solution<T> {
         &self.solution
     }
 

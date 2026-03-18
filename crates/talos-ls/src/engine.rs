@@ -759,17 +759,23 @@ impl<T> Engine<T> {
         self.touched.reset();
     }
 
+    /// Ensures all internal buffers and data structures are large enough to handle
+    /// the given problem dimensions.
+    ///
+    /// ## Note
+    ///
+    /// This will leave most states in a partially uninitialized state,
+    /// so it should only be called at the start of `run`.
     #[inline]
     fn ensure_capacity(&mut self, num_vessels: usize, num_berths: usize)
     where
         T: SolverNumeric,
     {
-        self.accepted_state.ensure_capacity(num_vessels, num_berths);
-        self.candidate_state
-            .ensure_capacity(num_vessels, num_berths);
-        self.buffered_state.ensure_capacity(num_vessels, num_berths);
-        self.best_state.ensure_capacity(num_vessels, num_berths);
-        self.touched.ensure_capacity(num_berths);
+        self.accepted_state.resize(num_vessels, num_berths);
+        self.candidate_state.resize(num_vessels, num_berths);
+        self.buffered_state.resize(num_vessels, num_berths);
+        self.best_state.resize(num_vessels, num_berths);
+        self.touched.resize(num_berths);
         self.schedule_graph_undo_log.ensure_capacity(num_vessels);
 
         // topology_graph and buffered_topology_graph are handled by
@@ -820,6 +826,28 @@ mod tests {
                 vec![ClosedOpenInterval::new(0, 200)],
                 vec![ClosedOpenInterval::new(0, 200)],
             ],
+        )
+    }
+
+    /// Builds a model with the specified number of vessels and berths.
+    /// All vessels have arrival=0, deadline=1000, weight=1.
+    /// All processing times are 10.
+    /// All berths are open [0, 2000).
+    fn build_test_model_with_size(num_vessels: usize, num_berths: usize) -> Model<i64> {
+        let arrivals = vec![0; num_vessels];
+        let deadlines = vec![1000; num_vessels];
+        let weights = vec![1; num_vessels];
+        let processing_times = vec![ProcessingTime::some(10); num_vessels * num_berths];
+        let time_windows = vec![vec![ClosedOpenInterval::new(0, 2000)]; num_berths];
+
+        Model::new(
+            num_vessels,
+            num_berths,
+            arrivals,
+            deadlines,
+            weights,
+            processing_times,
+            time_windows,
         )
     }
 
@@ -1850,5 +1878,205 @@ mod tests {
         let (outcome, _) = run_engine(&mut meta, &mut op, MockMonitor::default());
 
         assert!(outcome.stats().time_total.as_nanos() > 0);
+    }
+
+    /// A size-aware mock operator that swaps the first two vessels if they exist.
+    struct SizeAwareMockOperator {
+        max_moves: u64,
+        cursor: u64,
+        num_vessels: usize,
+    }
+
+    impl SizeAwareMockOperator {
+        fn new(max_moves: u64) -> Self {
+            Self {
+                max_moves,
+                cursor: 0,
+                num_vessels: 0,
+            }
+        }
+    }
+
+    impl LocalSearchOperator<i64> for SizeAwareMockOperator {
+        fn name(&self) -> &str {
+            "SizeAwareMockOperator"
+        }
+
+        fn prepare(
+            &mut self,
+            _best: SolutionView<'_, i64>,
+            accepted: SolutionView<'_, i64>,
+            _buffered: Option<SolutionView<'_, i64>>,
+            _graph: &ScheduleGraph,
+        ) {
+            self.cursor = 0;
+            self.num_vessels = accepted.num_vessels();
+        }
+
+        unsafe fn next_neighbor(
+            &mut self,
+            _model: &Model<i64>,
+            _best: SolutionView<'_, i64>,
+            _accepted: SolutionView<'_, i64>,
+            _buffered: Option<SolutionView<'_, i64>>,
+            mutator: &mut Mutator<'_>,
+            _stats: &LocalSearchStatistics,
+        ) -> bool {
+            if self.cursor >= self.max_moves || self.num_vessels < 2 {
+                return false;
+            }
+            self.cursor += 1;
+            // Swap the first two vessels (safe for any model with 2+ vessels).
+            mutator.swap_vessels(VesselIndex::new(0), VesselIndex::new(1));
+            true
+        }
+
+        fn reset(&mut self) {
+            self.cursor = 0;
+        }
+    }
+
+    #[test]
+    fn test_engine_reuse_with_different_model_sizes() {
+        // Test that the same engine can be reused with models of different sizes
+        // going from small → large → small to ensure internal buffers resize correctly.
+        let mut engine = Engine::<i64>::new(2, 2);
+
+        // Test 1: Small model (2 vessels, 2 berths)
+        {
+            let model = build_test_model_with_size(2, 2);
+            let berths = [BerthIndex::new(0), BerthIndex::new(1)];
+            let start_times = [0_i64, 0_i64];
+
+            let mut meta = AcceptAllMetaheuristic::new(5);
+            let mut op = SizeAwareMockOperator::new(10);
+            let monitor = MockMonitor::default();
+
+            let params = MutableLocalSearchParams {
+                model: &model,
+                operator: &mut op,
+                metaheuristic: &mut meta,
+                monitor,
+                berths: &berths,
+                start_times: &start_times,
+                objective_value: 0,
+            };
+
+            let outcome = engine.run(params, mock_evaluator, |_| {});
+            assert_eq!(outcome.solution().num_vessels(), 2);
+            assert!(outcome.stats().iterations > 0);
+        }
+
+        // Test 2: Large model (10 vessels, 5 berths) - reuse same engine
+        {
+            let model = build_test_model_with_size(10, 5);
+            let berths = [
+                BerthIndex::new(0),
+                BerthIndex::new(1),
+                BerthIndex::new(2),
+                BerthIndex::new(3),
+                BerthIndex::new(4),
+                BerthIndex::new(0),
+                BerthIndex::new(1),
+                BerthIndex::new(2),
+                BerthIndex::new(3),
+                BerthIndex::new(4),
+            ];
+            let start_times = [0_i64, 0, 0, 0, 0, 10, 10, 10, 10, 10];
+
+            let mut meta = AcceptAllMetaheuristic::new(5);
+            let mut op = SizeAwareMockOperator::new(20);
+            let monitor = MockMonitor::default();
+
+            let params = MutableLocalSearchParams {
+                model: &model,
+                operator: &mut op,
+                metaheuristic: &mut meta,
+                monitor,
+                berths: &berths,
+                start_times: &start_times,
+                objective_value: 0,
+            };
+
+            let outcome = engine.run(params, mock_evaluator, |_| {});
+            assert_eq!(outcome.solution().num_vessels(), 10);
+            assert!(outcome.stats().iterations > 0);
+        }
+
+        // Test 3: Back to small model (3 vessels, 2 berths) - ensure no issues
+        {
+            let model = build_test_model_with_size(3, 2);
+            let berths = [BerthIndex::new(0), BerthIndex::new(1), BerthIndex::new(0)];
+            let start_times = [0_i64, 0, 10];
+
+            let mut meta = AcceptAllMetaheuristic::new(5);
+            let mut op = SizeAwareMockOperator::new(15);
+            let monitor = MockMonitor::default();
+
+            let params = MutableLocalSearchParams {
+                model: &model,
+                operator: &mut op,
+                metaheuristic: &mut meta,
+                monitor,
+                berths: &berths,
+                start_times: &start_times,
+                objective_value: 0,
+            };
+
+            let outcome = engine.run(params, mock_evaluator, |_| {});
+            assert_eq!(outcome.solution().num_vessels(), 3);
+            assert!(outcome.stats().iterations > 0);
+        }
+
+        // Test 4: Very large model (50 vessels, 10 berths)
+        {
+            let model = build_test_model_with_size(50, 10);
+            let berths: Vec<BerthIndex> = (0..50).map(|i| BerthIndex::new(i % 10)).collect();
+            let start_times: Vec<i64> = (0..50).map(|i| (i / 10) * 10).collect();
+
+            let mut meta = AcceptAllMetaheuristic::new(3);
+            let mut op = SizeAwareMockOperator::new(10);
+            let monitor = MockMonitor::default();
+
+            let params = MutableLocalSearchParams {
+                model: &model,
+                operator: &mut op,
+                metaheuristic: &mut meta,
+                monitor,
+                berths: &berths,
+                start_times: &start_times,
+                objective_value: 0,
+            };
+
+            let outcome = engine.run(params, mock_evaluator, |_| {});
+            assert_eq!(outcome.solution().num_vessels(), 50);
+            assert!(outcome.stats().iterations > 0);
+        }
+
+        // Test 5: Back to smallest (2 vessels, 1 berth)
+        // Note: We use 2 vessels since the SizeAwareMockOperator requires at least 2 vessels to swap
+        {
+            let model = build_test_model_with_size(2, 1);
+            let berths = [BerthIndex::new(0), BerthIndex::new(0)];
+            let start_times = [0_i64, 10];
+
+            let mut meta = AcceptAllMetaheuristic::new(5);
+            let mut op = SizeAwareMockOperator::new(5);
+            let monitor = MockMonitor::default();
+
+            let params = MutableLocalSearchParams {
+                model: &model,
+                operator: &mut op,
+                metaheuristic: &mut meta,
+                monitor,
+                berths: &berths,
+                start_times: &start_times,
+                objective_value: 0,
+            };
+
+            let outcome = engine.run(params, mock_evaluator, |_| {});
+            assert_eq!(outcome.solution().num_vessels(), 2);
+            assert!(outcome.stats().iterations > 0);
+        }
     }
 }
