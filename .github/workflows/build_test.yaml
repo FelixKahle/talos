@@ -87,7 +87,9 @@ jobs:
       - name: Build and install pytalos (editable)
         if: matrix.profile == 'release'
         working-directory: crates/pytalos
-        run: maturin develop --release
+        run: |
+          maturin build --release
+          pip install target/wheels/pytalos-*.whl
 
       - name: Run pytest
         if: matrix.profile == 'release'
