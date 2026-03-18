@@ -19,8 +19,6 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#![allow(dead_code)]
-
 use crate::{
     decoding::{decode_full_unchecked, decode_unchecked},
     exec::{SearchCommand, TerminationReason},
@@ -168,6 +166,9 @@ impl<T> Engine<T> {
         let operator = params.operator;
         let metaheuristic = params.metaheuristic;
         let mut monitor = params.monitor;
+
+        // Grow all buffers if this problem is larger than anything seen before.
+        self.ensure_capacity(model.num_vessels(), model.num_berths());
 
         // Initialise topology from the validated initial solution.
         self.topology_graph.overwrite_from_slices(
@@ -756,6 +757,23 @@ impl<T> Engine<T> {
             .overwrite_from_graph(&self.buffered_topology_graph);
         self.schedule_graph_undo_log.clear();
         self.touched.reset();
+    }
+
+    #[inline]
+    fn ensure_capacity(&mut self, num_vessels: usize, num_berths: usize)
+    where
+        T: SolverNumeric,
+    {
+        self.accepted_state.ensure_capacity(num_vessels, num_berths);
+        self.candidate_state
+            .ensure_capacity(num_vessels, num_berths);
+        self.buffered_state.ensure_capacity(num_vessels, num_berths);
+        self.best_state.ensure_capacity(num_vessels, num_berths);
+        self.touched.ensure_capacity(num_berths);
+        self.schedule_graph_undo_log.ensure_capacity(num_vessels);
+
+        // topology_graph and buffered_topology_graph are handled by
+        // overwrite_from_slices / overwrite_from_graph which grow internally.
     }
 }
 

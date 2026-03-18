@@ -227,6 +227,13 @@ impl ScheduleGraphUndoLog {
         }
     }
 
+    #[inline(always)]
+    pub fn ensure_capacity(&mut self, target_ops: usize) {
+        if self.stack.capacity() < target_ops {
+            self.stack.reserve(target_ops - self.stack.capacity());
+        }
+    }
+
     /// Discards all recorded operations without deallocating.
     #[inline(always)]
     pub fn clear(&mut self) {

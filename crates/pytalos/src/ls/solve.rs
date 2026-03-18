@@ -60,7 +60,10 @@ use crate::{
     solution::PySolution,
 };
 
-/// Default evaluator using weighted turnaround time.
+// ----------------------------------------------------------------
+// Evaluator
+// ----------------------------------------------------------------
+
 #[inline(always)]
 fn wtt_evaluator(
     model: &Model<i64>,
@@ -132,7 +135,6 @@ fn build_monitor(config: &PyLocalSearchConfig) -> CompositeLocalSearchMonitor<'s
         composite.add_monitor(CycleLimitMonitor::new(max_cycles));
     }
 
-    // Non-improving termination: combine iteration, cycle and time patience
     let has_ni_iter = config.max_non_improving_iterations.is_some();
     let has_ni_cycles = config.max_non_improving_cycles.is_some();
     let has_ni_time = config.max_non_improving_time_secs.is_some();
@@ -148,10 +150,6 @@ fn build_monitor(config: &PyLocalSearchConfig) -> CompositeLocalSearchMonitor<'s
             ))
         };
 
-        // Chain the remaining ones
-        if has_ni_iter && config.max_non_improving_iterations.is_some() {
-            // Already set as the primary if it was the first
-        }
         if has_ni_cycles {
             ni = ni.and_cycle_patience(config.max_non_improving_cycles.unwrap());
         }
@@ -171,7 +169,7 @@ fn build_monitor(config: &PyLocalSearchConfig) -> CompositeLocalSearchMonitor<'s
 }
 
 // ----------------------------------------------------------------
-// GLS construction
+// GLS trigger construction
 // ----------------------------------------------------------------
 
 fn build_trigger(config: &PyGlsConfig) -> PenalizationTrigger {
@@ -185,269 +183,289 @@ fn build_trigger(config: &PyGlsConfig) -> PenalizationTrigger {
 }
 
 // ----------------------------------------------------------------
-// Heuristic lambda calculation
+// Heuristic lambda (standalone utility)
 // ----------------------------------------------------------------
 
 /// Heuristic lambda calculation for GLS,
 /// based on the initial objective value, problem size, and a scaling factor.
 #[pyfunction]
 pub fn heuristic_gls_lambda(objective: f64, num_features: usize, scale: f64) -> f64 {
-    talos_ls::meta::gls::heuristic_lambda(objective, num_features, scale)
+    heuristic_lambda(objective, num_features, scale)
 }
 
 // ----------------------------------------------------------------
-// Solve entry point
+// GLS dispatch macro
 // ----------------------------------------------------------------
 
-/// Runs GLS-based local search on the given model and initial solution.
-#[pyfunction]
-#[pyo3(signature = (model, config, gls_config, solution, callback = None))]
-pub fn solve(
-    model: &PyModel,
-    config: &PyLocalSearchConfig,
-    gls_config: Option<&PyGlsConfig>,
-    solution: &PySolution,
-    callback: Option<Py<PyAny>>,
-) -> PyResult<PySearchResult> {
-    let inner_model = model.inner();
-    let inner_solution = solution.inner();
-    let num_vessels = inner_model.num_vessels();
-    let num_berths = inner_model.num_berths();
+/// Builds `MutableLocalSearchParams`, calls `engine.run`, and returns the result.
+/// Exists solely to avoid repeating the same 8-line block in every match arm.
+macro_rules! run_with_gls {
+    ($engine:expr, $gls:expr, $model:expr, $operator:expr, $monitor:expr,
+     $berths:expr, $start_times:expr, $objective:expr, $cb:expr) => {{
+        let params = MutableLocalSearchParams {
+            model: $model,
+            operator: $operator,
+            metaheuristic: &mut $gls,
+            monitor: $monitor,
+            berths: $berths,
+            start_times: $start_times,
+            objective_value: $objective,
+        };
+        $engine.run(params, wtt_evaluator, $cb)
+    }};
+}
 
-    // Validate inputs.
-    if inner_solution.num_vessels() != num_vessels {
-        return Err(PyValueError::new_err(format!(
-            "solution has {} vessels but model has {num_vessels}",
-            inner_solution.num_vessels()
-        )));
-    }
-    if config.operators.is_empty() {
-        return Err(PyValueError::new_err("operators list must not be empty"));
+// ----------------------------------------------------------------
+// PySolver
+// ----------------------------------------------------------------
+
+/// Reusable solver that keeps its internal `Engine` across calls,
+/// avoiding repeated allocation when solving multiple instances.
+///
+/// ```python
+/// solver = Solver()          # or Solver(100, 5) to pre-allocate
+/// r1 = solver.solve(model_a, config, gls_config, solution_a)
+/// r2 = solver.solve(model_b, config, gls_config, solution_b)
+/// ```
+#[pyclass(name = "Solver")]
+pub struct PySolver {
+    engine: Engine<i64>,
+}
+
+#[pymethods]
+impl PySolver {
+    /// Create a new solver, optionally pre-allocating for a given problem size.
+    /// The engine grows automatically if a larger problem is passed to `solve`.
+    #[new]
+    #[pyo3(signature = (num_vessels = 0, num_berths = 0))]
+    fn new(num_vessels: usize, num_berths: usize) -> Self {
+        Self {
+            engine: Engine::new(num_vessels, num_berths),
+        }
     }
 
-    // Validate berth indices are within bounds.
-    for (i, &berth) in inner_solution.berths().iter().enumerate() {
-        if berth.get() >= num_berths {
+    /// Run GLS-based local search on the given model and initial solution.
+    #[pyo3(signature = (model, config, gls_config, solution, callback = None))]
+    fn solve(
+        &mut self,
+        model: &PyModel,
+        config: &PyLocalSearchConfig,
+        gls_config: Option<&PyGlsConfig>,
+        solution: &PySolution,
+        callback: Option<Py<PyAny>>,
+    ) -> PyResult<PySearchResult> {
+        let inner_model = model.inner();
+        let inner_solution = solution.inner();
+        let num_vessels = inner_model.num_vessels();
+        let num_berths = inner_model.num_berths();
+
+        // Validate inputs.
+        if inner_solution.num_vessels() != num_vessels {
             return Err(PyValueError::new_err(format!(
-                "berth index {} for vessel {i} out of bounds (num_berths = {num_berths})",
-                berth.get()
+                "solution has {} vessels but model has {num_vessels}",
+                inner_solution.num_vessels()
             )));
         }
-    }
-
-    let berth_indices = inner_solution.berths();
-    let start_times = inner_solution.start_times();
-    let objective = inner_solution.objective_value();
-
-    let mut operator = build_operator(&config.operators);
-    let monitor = build_monitor(config);
-    let mut engine = Engine::<i64>::new(num_vessels, num_berths);
-    let mut cb = make_callback(callback);
-
-    // Build GLS metaheuristic with the appropriate lambda strategy and decay.
-    // We dispatch on the combination of lambda_strategy and decay to produce
-    // the correct concrete GLS type (the engine is generic over these).
-    let result = match gls_config {
-        None => {
-            // Default GLS: static lambda = 1.0, no decay.
-            let mut gls = GuidedLocalSearch::new(num_vessels, num_berths);
-            let params = MutableLocalSearchParams {
-                model: inner_model,
-                operator: &mut operator,
-                metaheuristic: &mut gls,
-                monitor,
-                berths: berth_indices,
-                start_times,
-                objective_value: objective,
-            };
-            engine.run(params, wtt_evaluator, &mut *cb)
+        if config.operators.is_empty() {
+            return Err(PyValueError::new_err("operators list must not be empty"));
         }
-        Some(gls_cfg) => {
-            let trigger = build_trigger(gls_cfg);
-
-            match (&gls_cfg.lambda_strategy, &gls_cfg.decay) {
-                // Static lambda
-                (PyLambdaStrategy::Static, PyDecay::NoDecay) => {
-                    let lambda = gls_cfg.lambda_initial.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.3)
-                    });
-                    let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
-                        .with_lambda(lambda)
-                        .with_trigger(trigger);
-                    if gls_cfg.reset_on_best {
-                        // StaticLambda doesn't have reset_on_best,
-                        // but resetting a constant is a no-op.
-                    }
-                    let params = MutableLocalSearchParams {
-                        model: inner_model,
-                        operator: &mut operator,
-                        metaheuristic: &mut gls,
-                        monitor,
-                        berths: berth_indices,
-                        start_times,
-                        objective_value: objective,
-                    };
-                    engine.run(params, wtt_evaluator, &mut *cb)
-                }
-                (PyLambdaStrategy::Static, PyDecay::Geometric) => {
-                    let lambda = gls_cfg.lambda_initial.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.3)
-                    });
-                    let decay = GeometricDecay::new(gls_cfg.decay_factor, gls_cfg.decay_period);
-                    let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
-                        .with_lambda(lambda)
-                        .with_decay(decay)
-                        .with_trigger(trigger);
-                    let params = MutableLocalSearchParams {
-                        model: inner_model,
-                        operator: &mut operator,
-                        metaheuristic: &mut gls,
-                        monitor,
-                        berths: berth_indices,
-                        start_times,
-                        objective_value: objective,
-                    };
-                    engine.run(params, wtt_evaluator, &mut *cb)
-                }
-
-                // Dynamic lambda
-                (PyLambdaStrategy::Dynamic, PyDecay::NoDecay) => {
-                    let base = gls_cfg.lambda_initial.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.2)
-                    });
-                    let lo = gls_cfg.lambda_min.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.1)
-                    });
-                    let hi = gls_cfg.lambda_max.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.3)
-                    });
-                    let strategy = DynamicLambda::new(
-                        base,
-                        gls_cfg.lambda_inc_step,
-                        gls_cfg.lambda_dec_step,
-                        lo,
-                        hi,
-                    )
-                    .with_reset_on_best(gls_cfg.reset_on_best);
-                    let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
-                        .with_lambda_strategy(strategy)
-                        .with_trigger(trigger);
-                    let params = MutableLocalSearchParams {
-                        model: inner_model,
-                        operator: &mut operator,
-                        metaheuristic: &mut gls,
-                        monitor,
-                        berths: berth_indices,
-                        start_times,
-                        objective_value: objective,
-                    };
-                    engine.run(params, wtt_evaluator, &mut *cb)
-                }
-                (PyLambdaStrategy::Dynamic, PyDecay::Geometric) => {
-                    let base = gls_cfg.lambda_initial.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.2)
-                    });
-                    let lo = gls_cfg.lambda_min.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.1)
-                    });
-                    let hi = gls_cfg.lambda_max.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.3)
-                    });
-                    let strategy = DynamicLambda::new(
-                        base,
-                        gls_cfg.lambda_inc_step,
-                        gls_cfg.lambda_dec_step,
-                        lo,
-                        hi,
-                    )
-                    .with_reset_on_best(gls_cfg.reset_on_best);
-                    let decay = GeometricDecay::new(gls_cfg.decay_factor, gls_cfg.decay_period);
-                    let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
-                        .with_lambda_strategy(strategy)
-                        .with_decay(decay)
-                        .with_trigger(trigger);
-                    let params = MutableLocalSearchParams {
-                        model: inner_model,
-                        operator: &mut operator,
-                        metaheuristic: &mut gls,
-                        monitor,
-                        berths: berth_indices,
-                        start_times,
-                        objective_value: objective,
-                    };
-                    engine.run(params, wtt_evaluator, &mut *cb)
-                }
-
-                // Additive lambda
-                (PyLambdaStrategy::Additive, PyDecay::NoDecay) => {
-                    let base = gls_cfg.lambda_initial.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.2)
-                    });
-                    let lo = gls_cfg.lambda_min.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.1)
-                    });
-                    let hi = gls_cfg.lambda_max.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.3)
-                    });
-                    let strategy = AdditiveDynamicLambda::new(
-                        base,
-                        gls_cfg.lambda_inc_step,
-                        gls_cfg.lambda_dec_step,
-                        lo,
-                        hi,
-                    )
-                    .with_reset_on_best(gls_cfg.reset_on_best);
-                    let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
-                        .with_lambda_strategy(strategy)
-                        .with_trigger(trigger);
-                    let params = MutableLocalSearchParams {
-                        model: inner_model,
-                        operator: &mut operator,
-                        metaheuristic: &mut gls,
-                        monitor,
-                        berths: berth_indices,
-                        start_times,
-                        objective_value: objective,
-                    };
-                    engine.run(params, wtt_evaluator, &mut *cb)
-                }
-                (PyLambdaStrategy::Additive, PyDecay::Geometric) => {
-                    let base = gls_cfg.lambda_initial.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.2)
-                    });
-                    let lo = gls_cfg.lambda_min.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.1)
-                    });
-                    let hi = gls_cfg.lambda_max.unwrap_or_else(|| {
-                        heuristic_lambda(objective as f64, num_vessels * num_berths, 0.3)
-                    });
-                    let strategy = AdditiveDynamicLambda::new(
-                        base,
-                        gls_cfg.lambda_inc_step,
-                        gls_cfg.lambda_dec_step,
-                        lo,
-                        hi,
-                    )
-                    .with_reset_on_best(gls_cfg.reset_on_best);
-                    let decay = GeometricDecay::new(gls_cfg.decay_factor, gls_cfg.decay_period);
-                    let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
-                        .with_lambda_strategy(strategy)
-                        .with_decay(decay)
-                        .with_trigger(trigger);
-                    let params = MutableLocalSearchParams {
-                        model: inner_model,
-                        operator: &mut operator,
-                        metaheuristic: &mut gls,
-                        monitor,
-                        berths: berth_indices,
-                        start_times,
-                        objective_value: objective,
-                    };
-                    engine.run(params, wtt_evaluator, &mut *cb)
-                }
+        for (i, &berth) in inner_solution.berths().iter().enumerate() {
+            if berth.get() >= num_berths {
+                return Err(PyValueError::new_err(format!(
+                    "berth index {} for vessel {i} out of bounds (num_berths = {num_berths})",
+                    berth.get()
+                )));
             }
         }
-    };
 
-    Ok(outcome_to_py(result))
+        let berths = inner_solution.berths();
+        let start_times = inner_solution.start_times();
+        let objective = inner_solution.objective_value();
+
+        let mut operator = build_operator(&config.operators);
+        let monitor = build_monitor(config);
+        let mut cb = make_callback(callback);
+
+        let result = match gls_config {
+            None => {
+                let mut gls = GuidedLocalSearch::new(num_vessels, num_berths);
+                run_with_gls!(
+                    self.engine,
+                    gls,
+                    inner_model,
+                    &mut operator,
+                    monitor,
+                    berths,
+                    start_times,
+                    objective,
+                    &mut *cb
+                )
+            }
+            Some(gls_cfg) => {
+                let trigger = build_trigger(gls_cfg);
+                let nv_nb = num_vessels * num_berths;
+                let obj_f64 = objective as f64;
+
+                let static_lambda = || {
+                    gls_cfg
+                        .lambda_initial
+                        .unwrap_or_else(|| heuristic_lambda(obj_f64, nv_nb, 0.3))
+                };
+                let dynamic_params = || {
+                    let base = gls_cfg
+                        .lambda_initial
+                        .unwrap_or_else(|| heuristic_lambda(obj_f64, nv_nb, 0.2));
+                    let lo = gls_cfg
+                        .lambda_min
+                        .unwrap_or_else(|| heuristic_lambda(obj_f64, nv_nb, 0.1));
+                    let hi = gls_cfg
+                        .lambda_max
+                        .unwrap_or_else(|| heuristic_lambda(obj_f64, nv_nb, 0.3));
+                    (base, lo, hi)
+                };
+                let maybe_decay =
+                    || GeometricDecay::new(gls_cfg.decay_factor, gls_cfg.decay_period);
+
+                match (&gls_cfg.lambda_strategy, &gls_cfg.decay) {
+                    (PyLambdaStrategy::Static, PyDecay::NoDecay) => {
+                        let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
+                            .with_lambda(static_lambda())
+                            .with_trigger(trigger);
+                        run_with_gls!(
+                            self.engine,
+                            gls,
+                            inner_model,
+                            &mut operator,
+                            monitor,
+                            berths,
+                            start_times,
+                            objective,
+                            &mut *cb
+                        )
+                    }
+                    (PyLambdaStrategy::Static, PyDecay::Geometric) => {
+                        let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
+                            .with_lambda(static_lambda())
+                            .with_decay(maybe_decay())
+                            .with_trigger(trigger);
+                        run_with_gls!(
+                            self.engine,
+                            gls,
+                            inner_model,
+                            &mut operator,
+                            monitor,
+                            berths,
+                            start_times,
+                            objective,
+                            &mut *cb
+                        )
+                    }
+                    (PyLambdaStrategy::Dynamic, PyDecay::NoDecay) => {
+                        let (base, lo, hi) = dynamic_params();
+                        let strategy = DynamicLambda::new(
+                            base,
+                            gls_cfg.lambda_inc_step,
+                            gls_cfg.lambda_dec_step,
+                            lo,
+                            hi,
+                        )
+                        .with_reset_on_best(gls_cfg.reset_on_best);
+                        let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
+                            .with_lambda_strategy(strategy)
+                            .with_trigger(trigger);
+                        run_with_gls!(
+                            self.engine,
+                            gls,
+                            inner_model,
+                            &mut operator,
+                            monitor,
+                            berths,
+                            start_times,
+                            objective,
+                            &mut *cb
+                        )
+                    }
+                    (PyLambdaStrategy::Dynamic, PyDecay::Geometric) => {
+                        let (base, lo, hi) = dynamic_params();
+                        let strategy = DynamicLambda::new(
+                            base,
+                            gls_cfg.lambda_inc_step,
+                            gls_cfg.lambda_dec_step,
+                            lo,
+                            hi,
+                        )
+                        .with_reset_on_best(gls_cfg.reset_on_best);
+                        let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
+                            .with_lambda_strategy(strategy)
+                            .with_decay(maybe_decay())
+                            .with_trigger(trigger);
+                        run_with_gls!(
+                            self.engine,
+                            gls,
+                            inner_model,
+                            &mut operator,
+                            monitor,
+                            berths,
+                            start_times,
+                            objective,
+                            &mut *cb
+                        )
+                    }
+                    (PyLambdaStrategy::Additive, PyDecay::NoDecay) => {
+                        let (base, lo, hi) = dynamic_params();
+                        let strategy = AdditiveDynamicLambda::new(
+                            base,
+                            gls_cfg.lambda_inc_step,
+                            gls_cfg.lambda_dec_step,
+                            lo,
+                            hi,
+                        )
+                        .with_reset_on_best(gls_cfg.reset_on_best);
+                        let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
+                            .with_lambda_strategy(strategy)
+                            .with_trigger(trigger);
+                        run_with_gls!(
+                            self.engine,
+                            gls,
+                            inner_model,
+                            &mut operator,
+                            monitor,
+                            berths,
+                            start_times,
+                            objective,
+                            &mut *cb
+                        )
+                    }
+                    (PyLambdaStrategy::Additive, PyDecay::Geometric) => {
+                        let (base, lo, hi) = dynamic_params();
+                        let strategy = AdditiveDynamicLambda::new(
+                            base,
+                            gls_cfg.lambda_inc_step,
+                            gls_cfg.lambda_dec_step,
+                            lo,
+                            hi,
+                        )
+                        .with_reset_on_best(gls_cfg.reset_on_best);
+                        let mut gls = GuidedLocalSearch::new(num_vessels, num_berths)
+                            .with_lambda_strategy(strategy)
+                            .with_decay(maybe_decay())
+                            .with_trigger(trigger);
+                        run_with_gls!(
+                            self.engine,
+                            gls,
+                            inner_model,
+                            &mut operator,
+                            monitor,
+                            berths,
+                            start_times,
+                            objective,
+                            &mut *cb
+                        )
+                    }
+                }
+            }
+        };
+
+        Ok(outcome_to_py(result))
+    }
 }

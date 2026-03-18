@@ -48,7 +48,8 @@ fn pytalos(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ls::gls::PyGlsConfig>()?;
 
     // Solve
-    m.add_function(wrap_pyfunction!(ls::solve::solve, m)?)?;
+    m.add_class::<ls::solve::PySolver>()?;
+    m.add_function(wrap_pyfunction!(ls::solve::heuristic_gls_lambda, m)?)?;
 
     Ok(())
 }

@@ -17,10 +17,10 @@ maturin develop --release        # compile & install into the active venv
 ## Quick start
 
 ```python
-import pytalos
 from pytalos import (
     Model,
     Solution,
+    Solver,
     Operator,
     LocalSearchConfig,
     GlsConfig,
@@ -83,13 +83,24 @@ gls = GlsConfig(
 def on_new_best(objective, berths, start_times):
     print(f"  new best: {objective}")
 
-# 6. Solve ---------------------------------------------------------------------
-result = pytalos.solve(
+# 6. Create a solver and solve ------------------------------------------------
+solver = Solver()  # or Solver(num_vessels, num_berths) to pre-allocate
+
+result = solver.solve(
     model=model,
     config=config,
     gls_config=gls,        # pass None for default GLS settings
     solution=initial,
     callback=on_new_best,  # or omit
+)
+
+# The solver can be reused across different models and configs.
+# Internal buffers grow as needed — no need to recreate.
+result2 = solver.solve(
+    model=another_model,
+    config=config,
+    gls_config=None,
+    solution=another_initial,
 )
 
 # 7. Inspect the result --------------------------------------------------------
@@ -124,6 +135,15 @@ print(result.time_total_secs)
 | `start_times` | `list[int]` | Start time assigned to each vessel |
 | `objective` | `int` | Objective value of the schedule |
 
+### `Solver`
+
+Reusable solver instance. Internal buffers are retained across calls and grow automatically when a larger problem is passed.
+
+| Method | Signature | Description |
+|---|---|---|
+| `__init__` | `Solver(num_vessels=0, num_berths=0)` | Create a solver, optionally pre-allocating for a given problem size |
+| `solve` | `solve(model, config, gls_config, solution, callback=None) -> SearchResult` | Run GLS-based local search |
+
 ### `LocalSearchConfig`
 
 | Parameter | Type | Default | Description |
@@ -136,7 +156,6 @@ print(result.time_total_secs)
 | `max_non_improving_iterations` | `int \| None` | `None` | Stagnation patience (iterations) |
 | `max_non_improving_cycles` | `int \| None` | `None` | Stagnation patience (cycles) |
 | `max_non_improving_time_secs` | `float \| None` | `None` | Stagnation patience (seconds) |
-| `target_objective` | `int \| None` | `None` | Stop when objective ≤ target |
 
 ### `Operator`
 
@@ -163,6 +182,14 @@ print(result.time_total_secs)
 | `decay_factor` | `float` | `0.9` | Geometric decay factor |
 | `decay_period` | `int` | `10` | Decay application period |
 | `reset_on_best` | `bool` | `False` | Reset lambda when a new best is found |
+
+### `heuristic_gls_lambda`
+
+```python
+pytalos.heuristic_gls_lambda(objective: float, num_features: int, scale: float) -> float
+```
+
+Computes a heuristic lambda value for GLS based on the initial objective, problem size, and a scaling factor.
 
 ### `SearchResult`
 
