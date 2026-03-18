@@ -14,12 +14,6 @@ Requires Python ≥ 3.8 and a Rust toolchain.
 pip install "git+https://github.com/FelixKahle/talos.git@main"
 ```
 
-Pin to a specific tag or commit for reproducibility:
-
-```bash
-pip install "git+https://github.com/FelixKahle/talos.git@v0.1.0"
-```
-
 Or in `pyproject.toml`:
 
 ```toml
@@ -212,6 +206,23 @@ pytalos.heuristic_gls_lambda(objective: float, num_features: int, scale: float) 
 ```
 
 Computes a heuristic lambda value for GLS based on the initial objective, problem size, and a scaling factor.
+
+### `edf_schedule`
+
+```python
+pytalos.edf_schedule(model: Model) -> Solution | None
+```
+
+Generates a feasible schedule using an Earliest-Deadline-First (EDF) greedy
+construction heuristic. Vessels are sorted by deadline and assigned one by one
+to the berth and start time that yields the earliest feasible placement,
+respecting arrival times, processing times, berth opening windows, and existing
+occupancy.
+
+Returns a `Solution` if a feasible schedule could be constructed, or `None` if
+the instance is too constrained for this greedy strategy.
+
+This is useful for producing an initial solution to seed the local search solver.
 
 ### `SearchResult`
 
