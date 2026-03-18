@@ -23,6 +23,7 @@ use crate::solution::PySolution;
 use pyo3::prelude::*;
 use talos_ls::exec::TerminationReason;
 
+/// The termination reason for a local search run.
 #[pyclass(name = "TerminationReason", eq, eq_int, skip_from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PyTerminationReason {
@@ -61,6 +62,7 @@ impl From<TerminationReason> for PyTerminationReason {
     }
 }
 
+/// Local search outcome: the final solution, termination reason, and various statistics.
 #[pyclass(name = "SearchResult", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PySearchResult {

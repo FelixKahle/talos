@@ -47,6 +47,7 @@ pub enum PyDecay {
     Geometric = 1,
 }
 
+/// Configuration for Guided Local Search (GLS).
 #[pyclass(name = "GlsConfig", from_py_object)]
 #[derive(Clone)]
 pub struct PyGlsConfig {
@@ -78,6 +79,7 @@ pub struct PyGlsConfig {
 
 #[pymethods]
 impl PyGlsConfig {
+    /// Creates a new PyGlsConfig with the given parameters.
     #[new]
     #[pyo3(signature = (
         lambda_strategy = PyLambdaStrategy::Dynamic,

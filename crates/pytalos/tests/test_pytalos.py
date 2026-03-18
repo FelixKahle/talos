@@ -875,3 +875,47 @@ def test_integration_termination_reasons(simple_model, simple_solution):
     assert hasattr(pytalos.TerminationReason, "IterationLimitReached")
     assert hasattr(pytalos.TerminationReason, "SolutionLimitReached")
     assert hasattr(pytalos.TerminationReason, "CycleLimitReached")
+
+
+# ----------------------------------------------------------------------------
+# EDF Schedule Tests
+# ----------------------------------------------------------------------------
+
+
+def test_edf_schedule_simple(simple_model):
+    """Test EDF scheduling on a simple feasible model."""
+    sol = pytalos.edf_schedule(simple_model)
+    assert sol is not None
+    assert isinstance(sol, pytalos.Solution)
+    assert sol.num_vessels == simple_model.num_vessels
+    assert len(sol.berths) == simple_model.num_vessels
+    assert len(sol.start_times) == simple_model.num_vessels
+
+
+def test_edf_schedule_larger(larger_model):
+    """Test EDF scheduling on a larger model with some infeasible berths."""
+    sol = pytalos.edf_schedule(larger_model)
+    # May or may not find a feasible schedule depending on the model.
+    if sol is not None:
+        assert isinstance(sol, pytalos.Solution)
+        assert sol.num_vessels == larger_model.num_vessels
+        assert len(sol.berths) == larger_model.num_vessels
+        assert len(sol.start_times) == larger_model.num_vessels
+
+
+def test_edf_schedule_returns_valid_objective(simple_model):
+    """Test that EDF returns a solution with a non-negative objective."""
+    sol = pytalos.edf_schedule(simple_model)
+    assert sol is not None
+    assert sol.objective >= 0
+
+
+def test_edf_schedule_respects_arrivals(simple_model):
+    """Test that EDF start times are at or after vessel arrival times."""
+    sol = pytalos.edf_schedule(simple_model)
+    assert sol is not None
+    arrivals = [0, 2]  # from simple_model fixture
+    for i, start in enumerate(sol.start_times):
+        assert start >= arrivals[i], (
+            f"Vessel {i}: start_time {start} < arrival {arrivals[i]}"
+        )

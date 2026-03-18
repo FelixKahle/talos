@@ -193,3 +193,7 @@ def heuristic_gls_lambda(
 ) -> float:
     """Heuristic lambda calculation for GLS."""
     ...
+
+def edf_schedule(model: Model) -> Solution | None:
+    """Tries to generate a feasible schedule using an Earliest-Deadline-First (EDF) greedy heuristic."""
+    ...

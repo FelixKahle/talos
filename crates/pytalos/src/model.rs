@@ -32,6 +32,14 @@ pub struct PyModel {
 
 #[pymethods]
 impl PyModel {
+    /// Creates a new PyModel from the given parameters.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lengths of the input vectors do not match the expected
+    /// sizes based on `num_vessels` and `num_berths`.
+    /// Also panics if any of the processing times are negative or if any of the
+    /// time windows are invalid (lo >= hi).
     #[new]
     #[pyo3(signature = (num_vessels, num_berths, arrivals, deadlines, weights, processing_times, time_windows))]
     pub fn new(
@@ -106,11 +114,13 @@ impl PyModel {
         })
     }
 
+    /// Returns the number of vessels in the model.
     #[getter]
     pub fn num_vessels(&self) -> usize {
         self.inner.num_vessels()
     }
 
+    /// Returns the number of berths in the model.
     #[getter]
     pub fn num_berths(&self) -> usize {
         self.inner.num_berths()

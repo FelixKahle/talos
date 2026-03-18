@@ -31,6 +31,7 @@ pub struct PySolution {
 
 #[pymethods]
 impl PySolution {
+    /// Creates a new PySolution from the given berth assignments, start times, and objective value.
     #[new]
     #[pyo3(signature = (berths, start_times, objective))]
     pub fn new(berths: Vec<usize>, start_times: Vec<i64>, objective: i64) -> PyResult<Self> {
@@ -47,21 +48,25 @@ impl PySolution {
         })
     }
 
+    /// Returns the objective value of the solution.
     #[getter]
     pub fn objective(&self) -> i64 {
         self.inner.objective_value()
     }
 
+    /// Returns the berth assignments as a list of usize.
     #[getter]
     pub fn berths(&self) -> Vec<usize> {
         self.inner.berths().iter().map(|b| b.get()).collect()
     }
 
+    /// Returns the start times as a list of i64.
     #[getter]
     pub fn start_times(&self) -> Vec<i64> {
         self.inner.start_times().to_vec()
     }
 
+    /// Returns the number of vessels in the solution.
     #[getter]
     pub fn num_vessels(&self) -> usize {
         self.inner.num_vessels()

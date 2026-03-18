@@ -19,6 +19,16 @@
 // OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+use crate::{
+    callback::make_callback,
+    ls::{
+        gls::{PyDecay, PyGlsConfig, PyLambdaStrategy, PyTrigger},
+        outcome::{outcome_to_py, PySearchResult},
+    },
+    model::PyModel,
+    solution::PySolution,
+};
+use itertools::Itertools;
 use pyo3::{exceptions::PyValueError, prelude::*};
 use std::time::Duration;
 use talos_ls::{
@@ -49,16 +59,80 @@ use talos_model::{
     model::Model,
 };
 
-use crate::{
-    callback::make_callback,
-    ls::{
-        engine::{PyLocalSearchConfig, PyOperator},
-        gls::{PyDecay, PyGlsConfig, PyLambdaStrategy, PyTrigger},
-        outcome::{outcome_to_py, PySearchResult},
-    },
-    model::PyModel,
-    solution::PySolution,
-};
+#[pyclass(name = "Operator", eq, eq_int, from_py_object)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PyOperator {
+    IntraSwap = 0,
+    InterSwap = 1,
+    IntraShift = 2,
+    InterShift = 3,
+}
+
+/// Configuration for the local search engine.
+#[pyclass(name = "LocalSearchConfig", from_py_object)]
+#[derive(Clone)]
+pub struct PyLocalSearchConfig {
+    #[pyo3(get)]
+    pub operators: Vec<PyOperator>,
+    #[pyo3(get)]
+    pub max_iterations: Option<u64>,
+    #[pyo3(get)]
+    pub max_solutions: Option<u64>,
+    #[pyo3(get)]
+    pub max_cycles: Option<u64>,
+    #[pyo3(get)]
+    pub max_non_improving_iterations: Option<u64>,
+    #[pyo3(get)]
+    pub max_non_improving_cycles: Option<u64>,
+    #[pyo3(get)]
+    pub max_non_improving_time_secs: Option<f64>,
+    #[pyo3(get)]
+    pub time_limit_secs: Option<f64>,
+}
+
+#[pymethods]
+impl PyLocalSearchConfig {
+    #[new]
+    #[pyo3(signature = (
+        operators,
+        max_iterations = None,
+        max_solutions = None,
+        max_cycles = None,
+        max_non_improving_iterations = None,
+        max_non_improving_cycles = None,
+        max_non_improving_time_secs = None,
+        time_limit_secs = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        operators: Vec<PyOperator>,
+        max_iterations: Option<u64>,
+        max_solutions: Option<u64>,
+        max_cycles: Option<u64>,
+        max_non_improving_iterations: Option<u64>,
+        max_non_improving_cycles: Option<u64>,
+        max_non_improving_time_secs: Option<f64>,
+        time_limit_secs: Option<f64>,
+    ) -> Self {
+        Self {
+            operators: operators.into_iter().unique_by(|op| *op as u8).collect(),
+            max_iterations,
+            max_solutions,
+            max_cycles,
+            max_non_improving_iterations,
+            max_non_improving_cycles,
+            max_non_improving_time_secs,
+            time_limit_secs,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "LocalSearchConfig(operators={:?}, time_limit={:?}s)",
+            self.operators, self.time_limit_secs
+        )
+    }
+}
 
 // ----------------------------------------------------------------
 // Evaluator
