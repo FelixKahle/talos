@@ -23,7 +23,7 @@ use crate::{
     callback::make_callback,
     ls::{
         gls::{PyDecay, PyGlsConfig, PyLambdaStrategy, PyTrigger},
-        outcome::{outcome_to_py, PySearchResult},
+        outcome::{PySearchResult, outcome_to_py},
     },
     model::PyModel,
     solution::PySolution,
@@ -34,8 +34,8 @@ use std::time::Duration;
 use talos_ls::{
     engine::Engine,
     meta::gls::{
-        heuristic_lambda, AdditiveDynamicLambda, DynamicLambda, GeometricDecay, GuidedLocalSearch,
-        PenalizationTrigger,
+        AdditiveDynamicLambda, DynamicLambda, GeometricDecay, GuidedLocalSearch,
+        PenalizationTrigger, heuristic_lambda,
     },
     monitor::{
         composite::CompositeLocalSearchMonitor, cycle::CycleLimitMonitor,
