@@ -9,10 +9,8 @@ use super::{
     outcome::{PortfolioError, PortfolioOutcome},
 };
 use crate::{
-    engine::Engine,
-    monitor::LocalSearchMonitor,
-    outcome::LocalSearchOutcome,
-    parameters::{LocalSearchError, check_run},
+    engine::Engine, monitor::LocalSearchMonitor, outcome::LocalSearchOutcome,
+    parameters::check_neighborhoods,
 };
 use rayon::{
     ThreadPool,
@@ -26,6 +24,14 @@ use talos_model::{Model, SolutionView};
 /// The members run alike wherever they run: each on an engine of its own, its outcome placed at its index, so a
 /// portfolio answers the same on the calling thread and on a pool of any size, unless a deadline or a monitor that
 /// reads the clock ends a run.
+///
+/// A deadline of a member's limits runs from the start of that member's own search, not from the call: where the
+/// members outnumber the threads, a member starts only once one before it has ended, so a portfolio whose members
+/// all have the same time limit takes about that limit times the members per thread, rounded up, on one thread
+/// and on a pool alike. Members that run side by side share the cores and the memory bandwidth of the machine, so
+/// each does less work in its time than a lone run would. A time-limited portfolio is run where
+/// [`gives_every_member_a_thread`](Self::gives_every_member_a_thread) holds, on a pool of at least as many threads
+/// as members.
 #[derive(Debug, Clone, Copy)]
 pub enum Execution<'a> {
     /// One member after another, in their order, on the calling thread.
@@ -34,23 +40,37 @@ pub enum Execution<'a> {
     Pool(&'a ThreadPool),
 }
 
+impl Execution<'_> {
+    /// Whether each of `members` members runs on a thread of its own, all of them from the start: on the calling
+    /// thread for at most one member, and on a pool of at least as many threads as members.
+    pub fn gives_every_member_a_thread(&self, members: usize) -> bool {
+        match self {
+            Self::Serial => members <= 1,
+            Self::Pool(pool) => members <= pool.current_num_threads(),
+        }
+    }
+}
+
 /// The independent portfolio: several runs of the engine from one model and one initial schedule, each with
 /// parameters and a monitor of its own, whose best outcome is the answer.
 ///
 /// Each member runs on an engine of its own and shares nothing with the others while it runs: no schedule, no
 /// penalty and no bound passes between them. A member's outcome is the one a lone [`Engine::run`] of its parameters
 /// and its monitor answers, unless a deadline ends its run; the best member is the one with the lowest objective,
-/// the lowest index among those that tie. The members differ by their parameters; [`PortfolioMember::varying_lambda`]
-/// builds members that differ by the penalty weight of their guided local search.
+/// the lowest index among those that tie. The members differ by their parameters, such as the penalty weight of
+/// their guided local search.
 ///
 /// A portfolio keeps its engines from one run to the next, as an [`Engine`] keeps its memory, and adds an engine
 /// only where a run has more members than any before: a caller that keeps the portfolio allocates no engine on a
-/// later run of as many members. A deadline shared by every member is a deadline in the limits of each.
+/// later run of as many members. The time limit of a member runs from the start of its own search; how long a
+/// time-limited portfolio takes is said at [`Execution`]. An outcome holds no time: a member's monitor, told of the
+/// start and the end of its search, reads the clock where the time of a member is wanted.
 ///
 /// ```
 /// # use talos_core::ClosedOpenInterval;
 /// # use talos_ls::{
-/// #     Execution, Lambda, LocalSearchParameters, Portfolio, PortfolioMember, SearchLimits, StaticLambda,
+/// #     Execution, GuidedLocalSearch, Lambda, LocalSearchParameters, Metaheuristic, NoMonitor, Portfolio,
+/// #     PortfolioMember, SearchLimits, StaticLambda,
 /// # };
 /// # use talos_model::{BerthIndex, Model, SolutionView};
 /// // Three vessels that take 10, 10 and 1 on either of two berths: the first two on the first berth, from 0 and
@@ -65,16 +85,22 @@ pub enum Execution<'a> {
 /// let berths = [BerthIndex::new(0), BerthIndex::new(0), BerthIndex::new(1)];
 /// let initial = SolutionView::new(&berths, &[0, 10, 0], 31);
 ///
-/// let base = LocalSearchParameters {
-///     limits: SearchLimits { iterations: Some(1000), ..SearchLimits::default() },
-///     ..LocalSearchParameters::default()
-/// };
-/// let lambdas = [0.5, 1.0, 2.0].map(|weight| Lambda::Static(StaticLambda::new(weight)));
-/// let mut members = PortfolioMember::varying_lambda(&base, lambdas);
+/// // One member per penalty weight, each under a budget of a thousand candidates.
+/// let mut members = [0.5, 1.0, 2.0].map(|weight| PortfolioMember {
+///     parameters: LocalSearchParameters {
+///         metaheuristic: Metaheuristic::GuidedLocalSearch(GuidedLocalSearch {
+///             lambda: Lambda::Static(StaticLambda::new(weight)),
+///             ..GuidedLocalSearch::default()
+///         }),
+///         limits: SearchLimits { iterations: Some(1000), ..SearchLimits::default() },
+///         ..LocalSearchParameters::default()
+///     },
+///     monitor: NoMonitor,
+/// });
 ///
 /// let mut portfolio = Portfolio::new();
 /// let outcome = portfolio.run(&model, initial, &mut members, Execution::Serial)?;
-/// assert_eq!(outcome.members().len(), 3);
+/// assert_eq!(outcome.outcomes().len(), 3);
 /// // One of the long vessels follows the short one: 10 + 1 + 11.
 /// assert_eq!(outcome.best().solution.objective_value(), 22);
 /// # Ok::<(), talos_ls::PortfolioError>(())
@@ -113,20 +139,33 @@ where
     /// holds the members' outcomes in their order, and each is the one a lone run of the member answers, unless
     /// a deadline ends it.
     ///
-    /// The checks at the door cost one pass over the vessels per member, and every member is checked before any
-    /// runs. Each run allocates what a lone run allocates, so a portfolio of `n` members holds `n` times the
-    /// memory of one run while they run side by side; a run with more members than any before also makes the
-    /// engines it lacks.
+    /// What [`Engine::run`] refuses, the portfolio refuses at its door, before any member runs, so that no member
+    /// is refused once another has started. The door checks the neighbourhoods of each member, and the initial
+    /// schedule once, in one pass over the vessels and one decode of its order; each member's run then checks and
+    /// decodes the schedule again, as a lone run does.
+    ///
+    /// The portfolio keeps an engine per member, each of memory linear in the vessels and berths, and a run adds
+    /// the engines it lacks. Each member's run allocates what a lone run allocates, and the memory of a guided
+    /// local search is quadratic in the vessels: at most one member's at a time on the calling thread, and at most
+    /// one per member that runs at once on a pool, as many as the fewer of its members and its threads.
+    ///
+    /// The monitors are `Send` on every execution, the serial one included, so that one signature serves both. On
+    /// a pool, the members' monitors are called on the threads of the pool while the calling thread waits: a
+    /// monitor that needs a lock the caller holds, such as that of a host language, has the caller release it
+    /// around the run.
     ///
     /// # Errors
     ///
-    /// [`PortfolioError::NoMember`] if `members` is empty; [`PortfolioError::Member`] with the member of lowest
-    /// index whose run [`Engine::run`] refuses, and its error.
+    /// [`PortfolioError::NoMember`] if `members` is empty; else [`PortfolioError::NoNeighborhood`] with the member
+    /// of lowest index whose parameters name no neighbourhood; else [`PortfolioError::InitialSolution`] if
+    /// [`Engine::run`] refuses `initial`, with its reason.
     ///
     /// # Panics
     ///
-    /// Panics with the panic of a member's run or monitor; where the members run on a pool, every other member
-    /// stops at its next scan or checkpoint before the panic reaches the caller.
+    /// Panics with the panic of a member's run or monitor. On the calling thread, the members after it never run.
+    /// On a pool, every other member that runs stops at its next scan or checkpoint, and one that has not yet
+    /// started does not run; the panic reaches the caller once every member has stopped, and of several members
+    /// that panic, one panic does.
     pub fn run<M>(
         &mut self,
         model: &Model<T>,
@@ -137,27 +176,35 @@ where
     where
         M: LocalSearchMonitor<T> + Send,
     {
-        check_members(model, initial, members)?;
+        check_members(members)?;
         self.provide_engines(members.len());
-        let cancellation = Cancellation::default();
         let engines = &mut self.engines[..members.len()];
-        let runs = match execution {
+        // The order decodes alike under every objective, so the first member's speaks for all.
+        engines[0].load_initial(model, initial, members[0].parameters.objective)?;
+
+        let cancellation = Cancellation::default();
+        let runs: Option<Vec<_>> = match execution {
             Execution::Serial => engines
                 .iter_mut()
                 .zip(members.iter_mut())
                 .map(|(engine, member)| run_member(engine, model, initial, member, &cancellation))
                 .collect(),
+            // One member per job, so that an idle thread takes any member that has not started.
             Execution::Pool(pool) => pool.install(|| {
                 engines
                     .par_iter_mut()
                     .zip(members.par_iter_mut())
+                    .with_max_len(1)
                     .map(|(engine, member)| {
                         run_member(engine, model, initial, member, &cancellation)
                     })
                     .collect()
             }),
         };
-        PortfolioOutcome::from_runs(runs)
+        let outcomes = runs.expect(
+            "a member should be skipped only after a sibling panicked, whose panic ends the call",
+        );
+        Ok(PortfolioOutcome::new(outcomes))
     }
 
     /// Makes engines until there is one for each of `members` members.
@@ -168,53 +215,54 @@ where
     }
 }
 
-/// Refuses a portfolio without members, or one with a member whose run [`Engine::run`] refuses at its door, the
-/// member of lowest index; it costs one pass over the vessels per member.
+/// Refuses a portfolio without members, or one with a member whose parameters name no neighbourhood, the member
+/// of lowest index; it costs one look per member.
 ///
 /// # Errors
 ///
-/// [`PortfolioError::NoMember`] if `members` is empty; [`PortfolioError::Member`] with the first member whose run
-/// is refused, and its error.
-fn check_members<T, M>(
-    model: &Model<T>,
-    initial: SolutionView<'_, T>,
-    members: &[PortfolioMember<M>],
-) -> Result<(), PortfolioError>
-where
-    T: SolverNumeric,
-{
+/// [`PortfolioError::NoMember`] if `members` is empty; [`PortfolioError::NoNeighborhood`] with the first member
+/// whose parameters name no neighbourhood.
+fn check_members<M>(members: &[PortfolioMember<M>]) -> Result<(), PortfolioError> {
     if members.is_empty() {
         return Err(PortfolioError::NoMember);
     }
     members
         .iter()
-        .enumerate()
-        .try_for_each(|(member, PortfolioMember { parameters, .. })| {
-            check_run(model, initial, parameters)
-                .map_err(|error| PortfolioError::Member { member, error })
+        .position(|member| check_neighborhoods(&member.parameters).is_err())
+        .map_or(Ok(()), |member| {
+            Err(PortfolioError::NoNeighborhood { member })
         })
 }
 
-/// The run of `member` on `engine`, which ends early once `cancellation` is raised and raises it if the run
-/// panics.
+/// The outcome of the run of `member` on `engine`, which ends early once `cancellation` is raised and raises it if
+/// the run panics; or `None`, with no run, if `cancellation` is raised before it starts.
 ///
-/// # Errors
+/// The portfolio has accepted `member` and `initial` at its door.
 ///
-/// The error of [`Engine::run`] for the member's parameters.
+/// # Panics
+///
+/// Panics with the panic of the run or of the member's monitor, and if the run is refused, which the door of the
+/// portfolio rules out.
 fn run_member<T, M>(
     engine: &mut Engine<T>,
     model: &Model<T>,
     initial: SolutionView<'_, T>,
     member: &mut PortfolioMember<M>,
     cancellation: &Cancellation,
-) -> Result<LocalSearchOutcome<T>, LocalSearchError>
+) -> Option<LocalSearchOutcome<T>>
 where
     T: SolverNumeric,
     M: LocalSearchMonitor<T>,
 {
+    if cancellation.is_raised() {
+        return None;
+    }
     let _guard = CancelOnPanic::new(cancellation);
     let mut monitor = CancellableMonitor::new(&mut member.monitor, cancellation);
-    engine.run(model, initial, &member.parameters, &mut monitor)
+    let outcome = engine
+        .run(model, initial, &member.parameters, &mut monitor)
+        .expect("the door of the portfolio should have refused what the run of a member refuses");
+    Some(outcome)
 }
 
 #[cfg(test)]
@@ -222,9 +270,10 @@ mod tests {
     use super::*;
     use crate::{
         limits::SearchLimits,
-        metaheuristic::{GreedyDescent, Lambda, Metaheuristic, StaticLambda},
+        metaheuristic::{GreedyDescent, GuidedLocalSearch, Lambda, Metaheuristic, StaticLambda},
         monitor::{NoMonitor, SearchProgress},
-        parameters::LocalSearchParameters,
+        objective::Objective,
+        parameters::{InitialSolutionError, LocalSearchParameters},
     };
     use rayon::ThreadPoolBuilder;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -283,6 +332,30 @@ mod tests {
             .take(members)
     }
 
+    /// One member per weight of `lambdas`, in their order, each with the parameters of `base` but the penalty
+    /// weight of its guided local search, and observed by `monitor`.
+    fn varying_lambda<M: Clone>(
+        base: &LocalSearchParameters,
+        lambdas: impl Iterator<Item = Lambda>,
+        monitor: &M,
+    ) -> Vec<PortfolioMember<M>> {
+        let Metaheuristic::GuidedLocalSearch(guided) = base.metaheuristic else {
+            panic!("the base of a test portfolio should run a guided local search");
+        };
+        lambdas
+            .map(|lambda| PortfolioMember {
+                parameters: LocalSearchParameters {
+                    metaheuristic: Metaheuristic::GuidedLocalSearch(GuidedLocalSearch {
+                        lambda,
+                        ..guided
+                    }),
+                    ..base.clone()
+                },
+                monitor: monitor.clone(),
+            })
+            .collect()
+    }
+
     fn pool(threads: usize) -> ThreadPool {
         ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -303,28 +376,17 @@ mod tests {
         }
     }
 
-    /// The members of `PortfolioMember::varying_lambda` on `base`, each observed by an empty trajectory.
-    fn traced(base: &LocalSearchParameters, members: usize) -> Vec<PortfolioMember<Trajectory>> {
-        PortfolioMember::varying_lambda(base, lambdas(members))
-            .into_iter()
-            .map(|member| PortfolioMember {
-                parameters: member.parameters,
-                monitor: Trajectory::default(),
-            })
-            .collect()
-    }
-
     #[test]
     fn test_each_member_answers_what_a_lone_run_of_it_answers() {
         let (model, berths, starts) = staggered_instance(16);
         let initial = SolutionView::new(&berths, &starts, 0);
         let thread_pool = pool(2);
         for execution in [Execution::Serial, Execution::Pool(&thread_pool)] {
-            let mut members = traced(&guided(4000), 5);
+            let mut members = varying_lambda(&guided(4000), lambdas(5), &Trajectory::default());
             let outcome = Portfolio::new()
                 .run(&model, initial, &mut members, execution)
                 .expect("every member should run");
-            for (member, answered) in members.iter().zip(outcome.members()) {
+            for (member, answered) in members.iter().zip(outcome.outcomes()) {
                 let mut lone = Trajectory::default();
                 let expected = Engine::new()
                     .run(&model, initial, &member.parameters, &mut lone)
@@ -354,16 +416,19 @@ mod tests {
             },
             ..LocalSearchParameters::default()
         };
-        let mut members = PortfolioMember::varying_lambda(&guided(5000), lambdas(5));
-        members.extend(PortfolioMember::varying_lambda(&by_cycles, lambdas(2)));
-        members.push(PortfolioMember::from(LocalSearchParameters {
-            metaheuristic: Metaheuristic::GreedyDescent(GreedyDescent::default()),
-            ..guided(5000)
-        }));
+        let mut members = varying_lambda(&guided(5000), lambdas(5), &NoMonitor);
+        members.extend(varying_lambda(&by_cycles, lambdas(2), &NoMonitor));
+        members.push(PortfolioMember {
+            parameters: LocalSearchParameters {
+                metaheuristic: Metaheuristic::GreedyDescent(GreedyDescent::default()),
+                ..guided(5000)
+            },
+            monitor: NoMonitor,
+        });
         let serial = Portfolio::new()
             .run(&model, initial, &mut members, Execution::Serial)
             .expect("every member should run");
-        assert_eq!(serial.members().len(), 8);
+        assert_eq!(serial.outcomes().len(), 8);
         for threads in [1, 2, 8] {
             let parallel = Portfolio::new()
                 .run(
@@ -378,16 +443,19 @@ mod tests {
         }
     }
 
-    /// A monitor that panics at the start of its run if told to, and otherwise records the candidates its run made.
-    #[derive(Debug, Default)]
+    /// A monitor that panics at the start of its run if told to, and otherwise records whether its run started and
+    /// the candidates it made when it ended.
+    #[derive(Debug, Clone, Default)]
     struct PanicProbe {
         panics: bool,
+        started: bool,
         ended_after: Option<u64>,
     }
 
     impl LocalSearchMonitor<i64> for PanicProbe {
         fn on_start(&mut self, _: &Model<i64>, _: SearchProgress<'_, i64>) {
             assert!(!self.panics, "the probe panics");
+            self.started = true;
         }
         fn on_end(&mut self, progress: SearchProgress<'_, i64>) {
             self.ended_after = Some(progress.statistics.iterations);
@@ -412,7 +480,7 @@ mod tests {
                     parameters: guided(SIBLING_BUDGET),
                     monitor: PanicProbe {
                         panics: member == 0,
-                        ended_after: None,
+                        ..PanicProbe::default()
                     },
                 })
                 .collect();
@@ -425,19 +493,35 @@ mod tests {
                 Some(&"the probe panics"),
                 "{execution:?}"
             );
-            for member in &members[1..] {
-                assert!(
-                    member
-                        .monitor
-                        .ended_after
-                        .is_none_or(|iterations| iterations < SIBLING_BUDGET),
-                    "{execution:?}: a sibling ran to its budget"
-                );
+            let siblings = members[1..].iter().map(|member| &member.monitor);
+            match execution {
+                Execution::Serial => {
+                    for sibling in siblings {
+                        assert!(!sibling.started, "a sibling after the panic started");
+                        assert_eq!(sibling.ended_after, None, "a sibling after the panic ended");
+                    }
+                }
+                Execution::Pool(_) => {
+                    // A sibling that started before the flag was raised stops at its next scan or checkpoint; one
+                    // that had not started is skipped.
+                    for sibling in siblings {
+                        match sibling.started {
+                            true => assert!(
+                                sibling
+                                    .ended_after
+                                    .is_some_and(|iterations| iterations < SIBLING_BUDGET),
+                                "{execution:?}: a sibling that started ended at {:?}",
+                                sibling.ended_after
+                            ),
+                            false => assert_eq!(sibling.ended_after, None, "{execution:?}"),
+                        }
+                    }
+                }
             }
         }
 
         // The engines of a run that panicked are loaded afresh by the next run.
-        let mut members = PortfolioMember::varying_lambda(&guided(3000), lambdas(6));
+        let mut members = varying_lambda(&guided(3000), lambdas(6), &NoMonitor);
         let fresh = Portfolio::new()
             .run(&model, initial, &mut members, Execution::Serial)
             .expect("every member should run");
@@ -463,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn test_a_refused_member_is_named_before_any_member_runs() {
+    fn test_a_member_without_a_neighborhood_is_named_before_any_member_runs() {
         let (model, berths, starts) = staggered_instance(4);
         let initial = SolutionView::new(&berths, &starts, 0);
         let without_neighborhood = LocalSearchParameters {
@@ -483,36 +567,33 @@ mod tests {
         })
         .collect();
         assert_eq!(
-            Portfolio::new().run(&model, initial, &mut members, Execution::Serial),
-            Err(PortfolioError::Member {
-                member: 2,
-                error: LocalSearchError::NoNeighborhood
-            })
+            Portfolio::new().run(&model, initial, &mut members, Execution::Pool(&pool(2))),
+            Err(PortfolioError::NoNeighborhood { member: 2 })
         );
-        assert!(
-            members
-                .iter()
-                .all(|member| member.monitor.ended_after.is_none())
-        );
+        assert!(members.iter().all(|member| !member.monitor.started));
+    }
 
+    #[test]
+    fn test_an_initial_schedule_of_another_model_is_refused_before_any_member_runs() {
+        let (model, berths, starts) = staggered_instance(4);
         let shorter = SolutionView::new(&berths[1..], &starts[1..], 0);
-        let mut members = PortfolioMember::varying_lambda(&guided(100), lambdas(2));
+        let mut members = varying_lambda(&guided(100), lambdas(2), &PanicProbe::default());
         assert_eq!(
-            Portfolio::new().run(&model, shorter, &mut members, Execution::Serial),
-            Err(PortfolioError::Member {
-                member: 0,
-                error: LocalSearchError::VesselCountMismatch {
+            Portfolio::new().run(&model, shorter, &mut members, Execution::Pool(&pool(2))),
+            Err(PortfolioError::InitialSolution(
+                InitialSolutionError::VesselCountMismatch {
                     model_vessels: 4,
                     solution_vessels: 3
                 }
-            })
+            ))
         );
+        assert!(members.iter().all(|member| !member.monitor.started));
     }
 
-    // Every member decodes the initial order when its run starts, so an order without a feasible schedule refuses
-    // every member, and the first is named.
+    // Two vessels of 8 on one berth end at 16, past the latest departure of 10, under either objective, so the
+    // portfolio refuses the order once, whatever its members minimise.
     #[test]
-    fn test_an_initial_order_without_a_feasible_schedule_refuses_the_first_member() {
+    fn test_an_initial_order_without_a_feasible_schedule_is_refused_before_any_member_runs() {
         let model = Model::new(
             vec![0, 0],
             vec![10, 10],
@@ -522,14 +603,35 @@ mod tests {
         );
         let berths = [BerthIndex::new(0), BerthIndex::new(0)];
         let initial = SolutionView::new(&berths, &[0, 8], 0);
-        let mut members = PortfolioMember::varying_lambda(&guided(100), lambdas(3));
-        assert_eq!(
-            Portfolio::new().run(&model, initial, &mut members, Execution::Pool(&pool(2))),
-            Err(PortfolioError::Member {
-                member: 0,
-                error: LocalSearchError::InfeasibleInitialSolution
-            })
-        );
+        for objective in [
+            Objective::WeightedTurnaroundTime,
+            Objective::WeightedCompletionTime,
+        ] {
+            let base = LocalSearchParameters {
+                objective,
+                ..guided(100)
+            };
+            let mut members = varying_lambda(&base, lambdas(3), &PanicProbe::default());
+            assert_eq!(
+                Portfolio::new().run(&model, initial, &mut members, Execution::Pool(&pool(2))),
+                Err(PortfolioError::InitialSolution(
+                    InitialSolutionError::InfeasibleOrder
+                ))
+            );
+            assert!(members.iter().all(|member| !member.monitor.started));
+        }
+    }
+
+    #[test]
+    fn test_execution_gives_every_member_a_thread_only_with_a_thread_per_member() {
+        assert!(Execution::Serial.gives_every_member_a_thread(0));
+        assert!(Execution::Serial.gives_every_member_a_thread(1));
+        assert!(!Execution::Serial.gives_every_member_a_thread(2));
+        let thread_pool = pool(3);
+        let on_pool = Execution::Pool(&thread_pool);
+        assert!(on_pool.gives_every_member_a_thread(1));
+        assert!(on_pool.gives_every_member_a_thread(3));
+        assert!(!on_pool.gives_every_member_a_thread(4));
     }
 
     // A kept portfolio keeps its engines and nothing else: after runs of more members on another model, it answers
@@ -540,7 +642,7 @@ mod tests {
         let initial = SolutionView::new(&berths, &starts, 0);
         let (other, other_berths, other_starts) = staggered_instance(30);
         let thread_pool = pool(2);
-        let mut members = PortfolioMember::varying_lambda(&guided(3000), lambdas(3));
+        let mut members = varying_lambda(&guided(3000), lambdas(3), &NoMonitor);
         let fresh = Portfolio::new()
             .run(&model, initial, &mut members, Execution::Serial)
             .expect("every member should run");
@@ -549,7 +651,7 @@ mod tests {
         let _ = portfolio
             .run(&model, initial, &mut members, Execution::Pool(&thread_pool))
             .expect("every member should run");
-        let mut more = PortfolioMember::varying_lambda(&guided(3000), lambdas(5));
+        let mut more = varying_lambda(&guided(3000), lambdas(5), &NoMonitor);
         let _ = portfolio
             .run(
                 &other,

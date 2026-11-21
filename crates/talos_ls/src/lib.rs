@@ -63,7 +63,7 @@ pub use monitor::{LocalSearchMonitor, NoMonitor, SearchProgress};
 pub use objective::Objective;
 pub use operator::{MultiArmedBandit, Neighborhood, NeighborhoodSelection};
 pub use outcome::LocalSearchOutcome;
-pub use parameters::{LocalSearchError, LocalSearchParameters};
+pub use parameters::{InitialSolutionError, LocalSearchError, LocalSearchParameters};
 pub use portfolio::{Execution, Portfolio, PortfolioError, PortfolioMember, PortfolioOutcome};
 pub use statistics::LocalSearchStatistics;
 pub use termination::{SearchCommand, TerminationReason};

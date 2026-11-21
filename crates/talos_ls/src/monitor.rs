@@ -33,6 +33,7 @@ pub struct SearchProgress<'a, T> {
 /// The search the monitor is told of starts once the run has loaded its schedule and set up its metaheuristic, so
 /// that the time from [`on_start`](Self::on_start) to [`on_end`](Self::on_end) is the time of the search alone, the
 /// time its deadlines are measured in.
+// The monitor of a member of a portfolio forwards every method by hand: a method added here is forwarded there.
 pub trait LocalSearchMonitor<T>
 where
     T: SolverNumeric,

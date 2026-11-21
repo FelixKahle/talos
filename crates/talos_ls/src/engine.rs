@@ -15,7 +15,10 @@ use crate::{
     objective::{CompletionCost, Objective, TurnaroundCost, VesselCost},
     operator::{AcceptedMove, CompoundOperator, LocalSearchOperator},
     outcome::LocalSearchOutcome,
-    parameters::{LocalSearchError, LocalSearchParameters, check_initial_solution, check_run},
+    parameters::{
+        InitialSolutionError, LocalSearchError, LocalSearchParameters, check_initial_solution,
+        check_neighborhoods,
+    },
     schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff},
     statistics::LocalSearchStatistics,
     termination::{SearchCommand, TerminationReason},
@@ -99,10 +102,11 @@ where
     ///
     /// # Errors
     ///
-    /// [`LocalSearchError::NoNeighborhood`] if `parameters` name no neighbourhood;
-    /// [`LocalSearchError::VesselCountMismatch`], [`LocalSearchError::BerthOutOfBounds`] or
-    /// [`LocalSearchError::IncompatibleBerth`] if `initial` is not a schedule of the vessels and berths of `model`;
-    /// [`LocalSearchError::InfeasibleInitialSolution`] if the order of `initial` decodes to no feasible schedule.
+    /// [`LocalSearchError::NoNeighborhood`] if `parameters` name no neighbourhood; else
+    /// [`LocalSearchError::InitialSolution`] with [`InitialSolutionError::VesselCountMismatch`],
+    /// [`InitialSolutionError::BerthOutOfBounds`] or [`InitialSolutionError::IncompatibleBerth`] if `initial` is
+    /// not a schedule of the vessels and berths of `model`, and with [`InitialSolutionError::InfeasibleOrder`] if
+    /// its order decodes to no feasible schedule.
     pub fn run<M>(
         &mut self,
         model: &Model<T>,
@@ -113,11 +117,8 @@ where
     where
         M: LocalSearchMonitor<T>,
     {
-        check_run(model, initial, parameters)?;
-        match parameters.objective {
-            Objective::WeightedTurnaroundTime => self.load::<TurnaroundCost>(model, initial)?,
-            Objective::WeightedCompletionTime => self.load::<CompletionCost>(model, initial)?,
-        }
+        check_neighborhoods(parameters)?;
+        self.load_initial(model, initial, parameters.objective)?;
         let seeds = RunSeeds::new(parameters.seed);
         let mut operator = CompoundOperator::new(
             &parameters.neighborhoods,
@@ -169,6 +170,29 @@ where
         Ok(outcome)
     }
 
+    /// Loads `initial`, a schedule of `model`, for a run that minimises `objective`, or refuses it as
+    /// [`Engine::run`] refuses an initial schedule; it costs one pass over the vessels and one decode of the order.
+    ///
+    /// Whether the order of `initial` decodes to a feasible schedule does not depend on `objective`: either cost
+    /// refuses exactly a service that ends after the latest departure of its vessel.
+    ///
+    /// # Errors
+    ///
+    /// The error of [`check_initial_solution`] if `initial` is not a schedule of the vessels and berths of
+    /// `model`; [`InitialSolutionError::InfeasibleOrder`] if its order decodes to no feasible schedule.
+    pub(super) fn load_initial(
+        &mut self,
+        model: &Model<T>,
+        initial: SolutionView<'_, T>,
+        objective: Objective,
+    ) -> Result<(), InitialSolutionError> {
+        check_initial_solution(model, initial)?;
+        match objective {
+            Objective::WeightedTurnaroundTime => self.load::<TurnaroundCost>(model, initial),
+            Objective::WeightedCompletionTime => self.load::<CompletionCost>(model, initial),
+        }
+    }
+
     /// Sizes the engine for `model`, builds its graphs from `initial` and decodes it with the cost `V` into every
     /// state but the buffered one.
     ///
@@ -176,12 +200,12 @@ where
     ///
     /// # Errors
     ///
-    /// [`LocalSearchError::InfeasibleInitialSolution`] if the order of `initial` decodes to no feasible schedule.
+    /// [`InitialSolutionError::InfeasibleOrder`] if the order of `initial` decodes to no feasible schedule.
     fn load<V>(
         &mut self,
         model: &Model<T>,
         initial: SolutionView<'_, T>,
-    ) -> Result<(), LocalSearchError>
+    ) -> Result<(), InitialSolutionError>
     where
         V: VesselCost<T>,
     {
@@ -205,7 +229,7 @@ where
         self.assert_loaded_for(model);
         // SAFETY: the graph, the candidate and the model count the same vessels and berths, as checked above.
         unsafe { decode_full_unchecked::<T, V>(self.mutator.graph(), &mut self.candidate, model) }
-            .ok_or(LocalSearchError::InfeasibleInitialSolution)?;
+            .ok_or(InitialSolutionError::InfeasibleOrder)?;
         self.accepted.overwrite_from_state(&self.candidate);
         self.best.overwrite_from_state(&self.candidate);
         Ok(())
@@ -917,10 +941,12 @@ mod tests {
         );
         assert_eq!(
             refusal,
-            Err(LocalSearchError::VesselCountMismatch {
-                model_vessels: 2,
-                solution_vessels: 3
-            })
+            Err(LocalSearchError::InitialSolution(
+                InitialSolutionError::VesselCountMismatch {
+                    model_vessels: 2,
+                    solution_vessels: 3
+                }
+            ))
         );
     }
 
@@ -936,7 +962,9 @@ mod tests {
         );
         assert!(matches!(
             refusal,
-            Err(LocalSearchError::BerthOutOfBounds { .. })
+            Err(LocalSearchError::InitialSolution(
+                InitialSolutionError::BerthOutOfBounds { .. }
+            ))
         ));
     }
 
@@ -959,7 +987,12 @@ mod tests {
             &LocalSearchParameters::default(),
             &mut NoMonitor,
         );
-        assert_eq!(refusal, Err(LocalSearchError::InfeasibleInitialSolution));
+        assert_eq!(
+            refusal,
+            Err(LocalSearchError::InitialSolution(
+                InitialSolutionError::InfeasibleOrder
+            ))
+        );
     }
 
     #[test]

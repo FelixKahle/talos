@@ -56,6 +56,31 @@ impl Default for LocalSearchParameters {
 pub enum LocalSearchError {
     /// The parameters name no neighbourhood to explore.
     NoNeighborhood,
+    /// The initial schedule is not one a run can start from.
+    InitialSolution(InitialSolutionError),
+}
+
+impl From<InitialSolutionError> for LocalSearchError {
+    fn from(error: InitialSolutionError) -> Self {
+        Self::InitialSolution(error)
+    }
+}
+
+// A refused initial schedule is the whole story of the refusal, so its message is the refusal's own.
+impl std::fmt::Display for LocalSearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoNeighborhood => write!(f, "the parameters name no neighborhood to explore"),
+            Self::InitialSolution(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for LocalSearchError {}
+
+/// Why an initial schedule is not one a run can start from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InitialSolutionError {
     /// The initial schedule has another number of vessels than the model.
     VesselCountMismatch {
         /// The vessels of the model.
@@ -81,13 +106,12 @@ pub enum LocalSearchError {
     },
     /// The order of the vessels on the berths of the initial schedule has no feasible schedule: a vessel fits no
     /// opening of its berth before its latest departure.
-    InfeasibleInitialSolution,
+    InfeasibleOrder,
 }
 
-impl std::fmt::Display for LocalSearchError {
+impl std::fmt::Display for InitialSolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoNeighborhood => write!(f, "the parameters name no neighborhood to explore"),
             Self::VesselCountMismatch {
                 model_vessels,
                 solution_vessels,
@@ -109,7 +133,7 @@ impl std::fmt::Display for LocalSearchError {
                     "the initial solution assigns {vessel} to {berth}, which it may not use"
                 )
             }
-            Self::InfeasibleInitialSolution => {
+            Self::InfeasibleOrder => {
                 write!(
                     f,
                     "the order of the initial solution has no feasible schedule"
@@ -119,28 +143,21 @@ impl std::fmt::Display for LocalSearchError {
     }
 }
 
-impl std::error::Error for LocalSearchError {}
+impl std::error::Error for InitialSolutionError {}
 
-/// Refuses a run of `parameters` from `initial` on `model` that [`Engine::run`](crate::Engine::run) refuses at its
-/// door: parameters that name no neighbourhood, or an initial schedule that is not a schedule of the vessels and
-/// berths of `model`. It costs one pass over the vessels.
+/// Refuses parameters that name no neighbourhood, which [`Engine::run`](crate::Engine::run) refuses before it
+/// looks at the initial schedule.
 ///
 /// # Errors
 ///
-/// [`LocalSearchError::NoNeighborhood`] if `parameters` name no neighbourhood, or else the error of
-/// [`check_initial_solution`].
-pub(super) fn check_run<T>(
-    model: &Model<T>,
-    initial: SolutionView<'_, T>,
+/// [`LocalSearchError::NoNeighborhood`] if `parameters` name no neighbourhood.
+pub(super) fn check_neighborhoods(
     parameters: &LocalSearchParameters,
-) -> Result<(), LocalSearchError>
-where
-    T: SolverNumeric,
-{
-    if parameters.neighborhoods.is_empty() {
-        return Err(LocalSearchError::NoNeighborhood);
+) -> Result<(), LocalSearchError> {
+    match parameters.neighborhoods.is_empty() {
+        true => Err(LocalSearchError::NoNeighborhood),
+        false => Ok(()),
     }
-    check_initial_solution(model, initial)
 }
 
 /// Refuses an initial schedule that is not a schedule of the vessels and berths of `model`: one berth per vessel,
@@ -148,31 +165,31 @@ where
 ///
 /// # Errors
 ///
-/// [`LocalSearchError::VesselCountMismatch`], [`LocalSearchError::BerthOutOfBounds`] or
-/// [`LocalSearchError::IncompatibleBerth`], for the first vessel that breaks its condition.
+/// [`InitialSolutionError::VesselCountMismatch`], [`InitialSolutionError::BerthOutOfBounds`] or
+/// [`InitialSolutionError::IncompatibleBerth`], for the first vessel that breaks its condition.
 pub(super) fn check_initial_solution<T>(
     model: &Model<T>,
     initial: SolutionView<'_, T>,
-) -> Result<(), LocalSearchError>
+) -> Result<(), InitialSolutionError>
 where
     T: SolverNumeric,
 {
     if initial.num_vessels() != model.num_vessels() {
-        return Err(LocalSearchError::VesselCountMismatch {
+        return Err(InitialSolutionError::VesselCountMismatch {
             model_vessels: model.num_vessels(),
             solution_vessels: initial.num_vessels(),
         });
     }
     for (vessel, &berth) in initial.assigned_berths().iter_enumerated() {
         if berth.index() >= model.num_berths() {
-            return Err(LocalSearchError::BerthOutOfBounds {
+            return Err(InitialSolutionError::BerthOutOfBounds {
                 vessel,
                 berth,
                 num_berths: model.num_berths(),
             });
         }
         if model.vessel_processing_time(vessel, berth).is_none() {
-            return Err(LocalSearchError::IncompatibleBerth { vessel, berth });
+            return Err(InitialSolutionError::IncompatibleBerth { vessel, berth });
         }
     }
     Ok(())
@@ -210,7 +227,7 @@ mod tests {
         let view = SolutionView::new(&berths, &[0], 0);
         assert_eq!(
             check_initial_solution(&model(), view),
-            Err(LocalSearchError::VesselCountMismatch {
+            Err(InitialSolutionError::VesselCountMismatch {
                 model_vessels: 2,
                 solution_vessels: 1
             })
@@ -223,7 +240,7 @@ mod tests {
         let view = SolutionView::new(&berths, &[0, 0], 0);
         assert_eq!(
             check_initial_solution(&model(), view),
-            Err(LocalSearchError::BerthOutOfBounds {
+            Err(InitialSolutionError::BerthOutOfBounds {
                 vessel: VesselIndex::new(1),
                 berth: BerthIndex::new(2),
                 num_berths: 2
@@ -233,7 +250,7 @@ mod tests {
         let view = SolutionView::new(&berths, &[0, 0], 0);
         assert_eq!(
             check_initial_solution(&model(), view),
-            Err(LocalSearchError::IncompatibleBerth {
+            Err(InitialSolutionError::IncompatibleBerth {
                 vessel: VesselIndex::new(0),
                 berth: BerthIndex::new(1)
             })
@@ -241,42 +258,35 @@ mod tests {
     }
 
     #[test]
-    fn test_check_run_refuses_parameters_without_a_neighborhood_before_the_schedule() {
-        let berths = [BerthIndex::new(0)];
-        let view = SolutionView::new(&berths, &[0], 0);
+    fn test_check_neighborhoods_refuses_parameters_without_a_neighborhood() {
         let parameters = LocalSearchParameters {
             neighborhoods: Vec::new(),
             ..LocalSearchParameters::default()
         };
         assert_eq!(
-            check_run(&model(), view, &parameters),
+            check_neighborhoods(&parameters),
             Err(LocalSearchError::NoNeighborhood)
         );
         assert_eq!(
-            check_run(&model(), view, &LocalSearchParameters::default()),
-            Err(LocalSearchError::VesselCountMismatch {
-                model_vessels: 2,
-                solution_vessels: 1
-            })
-        );
-        let berths = [BerthIndex::new(0), BerthIndex::new(1)];
-        let view = SolutionView::new(&berths, &[0, 0], 0);
-        assert_eq!(
-            check_run(&model(), view, &LocalSearchParameters::default()),
+            check_neighborhoods(&LocalSearchParameters::default()),
             Ok(())
         );
     }
 
     #[test]
     fn test_errors_display_their_values() {
-        let error = LocalSearchError::BerthOutOfBounds {
+        let error = InitialSolutionError::BerthOutOfBounds {
             vessel: VesselIndex::new(1),
             berth: BerthIndex::new(2),
             num_berths: 2,
         };
+        let message =
+            "the initial solution assigns Vessel 1 to Berth 2, outside a model of 2 berths";
+        assert_eq!(error.to_string(), message);
+        assert_eq!(LocalSearchError::from(error).to_string(), message);
         assert_eq!(
-            error.to_string(),
-            "the initial solution assigns Vessel 1 to Berth 2, outside a model of 2 berths"
+            LocalSearchError::NoNeighborhood.to_string(),
+            "the parameters name no neighborhood to explore"
         );
     }
 }

@@ -3,7 +3,7 @@
 
 //! What a portfolio answers, and why a portfolio refuses to start.
 
-use crate::{outcome::LocalSearchOutcome, parameters::LocalSearchError};
+use crate::{outcome::LocalSearchOutcome, parameters::InitialSolutionError};
 use talos_core::SolverNumeric;
 
 /// What a portfolio found: the outcome of each member's run, in the order of the members, and among them the best.
@@ -11,109 +11,102 @@ use talos_core::SolverNumeric;
 /// The best member is the one whose best schedule has the lowest objective, the lowest index among those that tie,
 /// so that the answer does not depend on which member ended first. Each outcome is what a lone
 /// [`Engine::run`](crate::Engine::run) of the member answers, unless a deadline ended the run.
-// Invariant: `members` is not empty.
+// Invariant: `outcomes` is not empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortfolioOutcome<T> {
     /// The outcome of each member's run, in the order of the members.
-    members: Vec<LocalSearchOutcome<T>>,
+    outcomes: Vec<LocalSearchOutcome<T>>,
 }
 
 impl<T> PortfolioOutcome<T>
 where
     T: SolverNumeric,
 {
-    /// The outcome of a portfolio whose members' runs answered `runs`, in the order of the members, or the refusal
-    /// of the member of lowest index among those refused.
+    /// The outcome of a portfolio whose members' runs answered `outcomes`, in the order of the members.
     ///
-    /// `runs` is not empty.
-    ///
-    /// # Errors
-    ///
-    /// [`PortfolioError::Member`] with the index and the error of the first refused run.
-    pub(super) fn from_runs(
-        runs: Vec<Result<LocalSearchOutcome<T>, LocalSearchError>>,
-    ) -> Result<Self, PortfolioError> {
+    /// `outcomes` is not empty.
+    pub(super) fn new(outcomes: Vec<LocalSearchOutcome<T>>) -> Self {
         debug_assert!(
-            !runs.is_empty(),
-            "called `PortfolioOutcome::from_runs` without a run"
+            !outcomes.is_empty(),
+            "called `PortfolioOutcome::new` without an outcome"
         );
-        let members = runs
-            .into_iter()
-            .enumerate()
-            .map(|(member, run)| run.map_err(|error| PortfolioError::Member { member, error }))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { members })
+        Self { outcomes }
     }
 
     /// The outcome of each member's run, in the order of the members; never empty.
-    pub fn members(&self) -> &[LocalSearchOutcome<T>] {
-        &self.members
+    pub fn outcomes(&self) -> &[LocalSearchOutcome<T>] {
+        &self.outcomes
     }
 
     /// The index of the best member: the one whose best schedule has the lowest objective, the lowest index among
     /// those that tie. It costs one pass over the members.
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "the outcomes are never empty, the invariant of the type, so the minimum exists"
+    )]
     pub fn best_member(&self) -> usize {
-        // A later member replaces the best only with a strictly lower objective, so a tie keeps the lower index.
-        self.members
+        // Of several equal minima, `min_by_key` answers the first, the member of lowest index.
+        self.outcomes
             .iter()
-            .map(|outcome| outcome.solution.objective_value())
             .enumerate()
-            .fold(None, |best, (member, objective)| match best {
-                Some((_, lowest)) if lowest <= objective => best,
-                _ => Some((member, objective)),
-            })
-            .map_or(0, |(member, _)| member)
+            .min_by_key(|(_, outcome)| outcome.solution.objective_value())
+            .map(|(member, _)| member)
+            .expect("a portfolio outcome should hold an outcome per member, of at least one member")
     }
 
     /// The outcome of the best member, as [`best_member`](Self::best_member) names it.
     pub fn best(&self) -> &LocalSearchOutcome<T> {
-        &self.members[self.best_member()]
+        &self.outcomes[self.best_member()]
     }
 
     /// The outcome of each member's run, in the order of the members; never empty.
-    pub fn into_members(self) -> Vec<LocalSearchOutcome<T>> {
-        self.members
+    pub fn into_outcomes(self) -> Vec<LocalSearchOutcome<T>> {
+        self.outcomes
     }
 }
 
-/// Why a portfolio refused to start.
+/// Why a portfolio refused to start; no member runs once it is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PortfolioError {
     /// The portfolio has no member.
     NoMember,
-    /// The run of a member was refused, as a lone [`Engine::run`](crate::Engine::run) of the member refuses it; of
-    /// several refused members, the one of lowest index.
-    Member {
+    /// The parameters of a member name no neighbourhood to explore; of several such members, the one of lowest
+    /// index.
+    NoNeighborhood {
         /// The index of the member.
         member: usize,
-        /// Why its run was refused.
-        error: LocalSearchError,
     },
+    /// The initial schedule is not one a run can start from, as a lone [`Engine::run`](crate::Engine::run)
+    /// refuses it.
+    InitialSolution(InitialSolutionError),
 }
 
+impl From<InitialSolutionError> for PortfolioError {
+    fn from(error: InitialSolutionError) -> Self {
+        Self::InitialSolution(error)
+    }
+}
+
+// A refused initial schedule is the whole story of the refusal, so its message is the refusal's own.
 impl std::fmt::Display for PortfolioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoMember => f.write_str("the portfolio has no member"),
-            Self::Member { member, .. } => write!(f, "the run of member {member} was refused"),
+            Self::NoNeighborhood { member } => write!(
+                f,
+                "the parameters of member {member} name no neighborhood to explore"
+            ),
+            Self::InitialSolution(error) => error.fmt(f),
         }
     }
 }
 
-impl std::error::Error for PortfolioError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::NoMember => None,
-            Self::Member { error, .. } => Some(error),
-        }
-    }
-}
+impl std::error::Error for PortfolioError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{statistics::LocalSearchStatistics, termination::TerminationReason};
-    use std::error::Error;
     use talos_model::{BerthIndex, Solution, SolutionView};
 
     /// An outcome of one vessel whose best schedule has `objective`, told apart by `iterations`.
@@ -130,54 +123,46 @@ mod tests {
 
     #[test]
     fn test_the_best_member_has_the_lowest_objective_and_the_lowest_index_among_ties() {
-        let portfolio = PortfolioOutcome::from_runs(vec![
-            Ok(outcome(30, 0)),
-            Ok(outcome(10, 1)),
-            Ok(outcome(20, 2)),
-            Ok(outcome(10, 3)),
-        ])
-        .expect("no run was refused");
+        let portfolio = PortfolioOutcome::new(vec![
+            outcome(30, 0),
+            outcome(10, 1),
+            outcome(20, 2),
+            outcome(10, 3),
+        ]);
         assert_eq!(portfolio.best_member(), 1);
         assert_eq!(portfolio.best(), &outcome(10, 1));
-        assert_eq!(portfolio.members().len(), 4);
+        assert_eq!(portfolio.outcomes().len(), 4);
 
-        let alone =
-            PortfolioOutcome::from_runs(vec![Ok(outcome(5, 0))]).expect("no run was refused");
+        let alone = PortfolioOutcome::new(vec![outcome(5, 0)]);
         assert_eq!(alone.best_member(), 0);
-        let tied = PortfolioOutcome::from_runs(vec![Ok(outcome(7, 0)), Ok(outcome(7, 1))])
-            .expect("no run was refused");
+        let tied = PortfolioOutcome::new(vec![outcome(7, 0), outcome(7, 1)]);
         assert_eq!(tied.best(), &outcome(7, 0));
+        let last = PortfolioOutcome::new(vec![outcome(9, 0), outcome(8, 1), outcome(4, 2)]);
+        assert_eq!(last.best_member(), 2);
     }
 
     #[test]
-    fn test_the_members_keep_the_order_of_the_runs() {
-        let runs = vec![Ok(outcome(3, 0)), Ok(outcome(1, 1)), Ok(outcome(2, 2))];
-        let portfolio = PortfolioOutcome::from_runs(runs).expect("no run was refused");
+    fn test_the_outcomes_keep_the_order_of_the_members() {
+        let portfolio = PortfolioOutcome::new(vec![outcome(3, 0), outcome(1, 1), outcome(2, 2)]);
         assert_eq!(
-            portfolio.into_members(),
+            portfolio.into_outcomes(),
             vec![outcome(3, 0), outcome(1, 1), outcome(2, 2)]
         );
     }
 
     #[test]
-    fn test_the_refusal_of_the_lowest_refused_member_is_the_answer() {
-        let runs = vec![
-            Ok(outcome(3, 0)),
-            Err(LocalSearchError::InfeasibleInitialSolution),
-            Err(LocalSearchError::NoNeighborhood),
-        ];
-        let refusal = PortfolioOutcome::from_runs(runs).expect_err("member 1 was refused");
+    fn test_errors_display_their_values() {
         assert_eq!(
-            refusal,
-            PortfolioError::Member {
-                member: 1,
-                error: LocalSearchError::InfeasibleInitialSolution
-            }
+            PortfolioError::NoMember.to_string(),
+            "the portfolio has no member"
         );
-        assert_eq!(refusal.to_string(), "the run of member 1 was refused");
         assert_eq!(
-            refusal.source().map(ToString::to_string),
-            Some(LocalSearchError::InfeasibleInitialSolution.to_string())
+            PortfolioError::NoNeighborhood { member: 3 }.to_string(),
+            "the parameters of member 3 name no neighborhood to explore"
+        );
+        assert_eq!(
+            PortfolioError::from(InitialSolutionError::InfeasibleOrder).to_string(),
+            InitialSolutionError::InfeasibleOrder.to_string()
         );
     }
 }
