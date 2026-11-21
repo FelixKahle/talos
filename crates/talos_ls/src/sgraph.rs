@@ -1241,8 +1241,11 @@ impl ScheduleGraph {
         assert!(last.index() < self.num_vessels);
         assert!(reference.index() < self.num_vessels);
 
-        let anchor_predecessor = self.arena.prev(reference.map());
-        self.relocate_segment_after(first, last, VesselIndex::new(anchor_predecessor.index()));
+        self.arena
+            .relocate_segment_before(first.map(), last.map(), reference.map());
+
+        let new_berth = self.vessel_berth[reference.index()];
+        self.update_segment_berth(first.map(), last.map(), new_berth);
     }
 
     /// # Safety
@@ -1952,6 +1955,23 @@ mod tests {
         let mut graph = standard_fixture();
         graph.relocate_segment_after(vessel(0), vessel(2), vessel(1));
         check_berth(&graph, 0, &[1, 0, 2]);
+    }
+
+    // The reference heads berth 1, so the node before it is the berth's sentinel, not a vessel.
+    #[test]
+    fn test_relocate_segment_before_the_head_of_a_berth() {
+        let mut graph = standard_fixture();
+        graph.relocate_segment_before(vessel(0), vessel(2), vessel(3));
+        check_berth(&graph, 0, &[1]);
+        check_berth(&graph, 1, &[0, 2, 3, 4]);
+    }
+
+    // The segment already stands before the reference, so the node before the reference is the segment's last.
+    #[test]
+    fn test_relocate_segment_before_the_vessel_it_precedes_changes_nothing() {
+        let mut graph = standard_fixture();
+        graph.relocate_segment_before(vessel(0), vessel(2), vessel(1));
+        check_berth(&graph, 0, &[0, 2, 1]);
     }
 
     #[test]

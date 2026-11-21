@@ -56,6 +56,7 @@ enum Step {
     RelocateAfter,
     RelocateBefore,
     RelocateSegmentAfter,
+    RelocateSegmentBefore,
     ReverseSegment,
 }
 
@@ -72,6 +73,7 @@ impl fmt::Display for Step {
             Self::RelocateAfter => "relocate_after",
             Self::RelocateBefore => "relocate_before",
             Self::RelocateSegmentAfter => "relocate_segment_after",
+            Self::RelocateSegmentBefore => "relocate_segment_before",
             Self::ReverseSegment => "reverse_segment",
         };
         write!(f, "`RingArena::{name}`")
@@ -549,8 +551,13 @@ impl RingArena {
         self.move_range_after(first, last, anchor);
     }
 
-    /// Moves the segment `first ..= last` to directly before `anchor`, for nodes the caller knows to lie in the
-    /// arena; nothing changes if the segment already precedes it.
+    /// Moves the segment `first ..= last` out of its ring to directly before `anchor`; nothing changes if the
+    /// segment already precedes it.
+    ///
+    /// ```text
+    /// before:  ... prev -> [first ... last] -> next ...      ... anchor_prev -> anchor ...
+    /// after:   ... prev -> next ...                          ... anchor_prev -> [first ... last] -> anchor ...
+    /// ```
     ///
     /// # Preconditions
     ///
@@ -558,9 +565,39 @@ impl RingArena {
     /// rings break, though no access leaves the arena; the caller that owns the rings' shape holds this, and a
     /// debug build checks it.
     ///
+    /// # Panics
+    ///
+    /// Panics if `first`, `last` or `anchor` lies outside the arena.
+    #[track_caller]
+    pub fn relocate_segment_before(&mut self, first: Node, last: Node, anchor: Node) {
+        let [first, last, anchor] = match self.slots([first, last, anchor]) {
+            Ok(slots) => slots,
+            Err(node) => self.outside(Step::RelocateSegmentBefore, node).panic(),
+        };
+        // Held by no type and not made total, as the segment conditions on `RingArena` say.
+        debug_assert!(
+            self.follows(first, last),
+            "called `RingArena::relocate_segment_before` with {last}, which does not follow {first}"
+        );
+        debug_assert!(
+            !self.segment_holds(first, last, anchor),
+            "called `RingArena::relocate_segment_before` with anchor {anchor} inside the segment {first} to \
+             {last}"
+        );
+        self.move_range_before(first, last, anchor);
+    }
+
+    /// Moves the segment `first ..= last` to directly before `anchor`, for nodes the caller knows to lie in the
+    /// arena.
+    ///
+    /// # Preconditions
+    ///
+    /// Those of [`relocate_segment_before`](RingArena::relocate_segment_before).
+    ///
     /// # Safety
     ///
-    /// The three nodes must lie in the arena.
+    /// The three nodes must lie in the arena, the condition
+    /// [`relocate_segment_before`](RingArena::relocate_segment_before) checks.
     pub unsafe fn relocate_segment_before_unchecked(
         &mut self,
         first: Node,
@@ -1400,6 +1437,14 @@ mod tests {
 
     #[test]
     #[should_panic(
+        expected = "called `RingArena::relocate_segment_before` with Node 8, outside an arena of 8 nodes"
+    )]
+    fn test_relocate_segment_before_refuses_a_node_outside() {
+        three_rings().relocate_segment_before(Node::new(0), Node::new(1), Node::new(8));
+    }
+
+    #[test]
+    #[should_panic(
         expected = "called `RingArena::reverse_segment` with Node 8, outside an arena of 8 nodes"
     )]
     fn test_reverse_segment_refuses_a_node_outside() {
@@ -1580,14 +1625,12 @@ mod tests {
                         .relocate_segment_after_unchecked(first, last, anchor)
                 };
             } else {
-                // The checked arena has no checked twin of this step; both arenas take the unchecked one.
+                self.checked.relocate_segment_before(first, last, anchor);
                 // SAFETY: every node handed over lies in the arena under test.
                 unsafe {
-                    self.checked
-                        .relocate_segment_before_unchecked(first, last, anchor);
                     self.unchecked
-                        .relocate_segment_before_unchecked(first, last, anchor);
-                }
+                        .relocate_segment_before_unchecked(first, last, anchor)
+                };
             }
         }
 
