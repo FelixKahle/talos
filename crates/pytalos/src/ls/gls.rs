@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 
 /// Lambda scaling strategy.
 #[pyclass(name = "LambdaStrategy", eq, eq_int, from_py_object)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PyLambdaStrategy {
     Static,
     Dynamic,
@@ -14,7 +14,7 @@ pub enum PyLambdaStrategy {
 
 /// When GLS fires its penalization step.
 #[pyclass(name = "Trigger", eq, eq_int, from_py_object)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PyTrigger {
     OnExhaustion = 0,
     AfterNonImprovements = 1,
@@ -23,7 +23,7 @@ pub enum PyTrigger {
 
 /// Penalty decay strategy.
 #[pyclass(name = "Decay", eq, eq_int, from_py_object)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PyDecay {
     NoDecay = 0,
     Geometric = 1,

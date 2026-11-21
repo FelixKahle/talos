@@ -39,7 +39,7 @@ use talos_ls::{
 use talos_model::{BerthIndex, Model, VesselIndex};
 
 #[pyclass(name = "Operator", eq, eq_int, from_py_object)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PyOperator {
     IntraSwap = 0,
     InterSwap = 1,
@@ -94,7 +94,7 @@ impl PyLocalSearchConfig {
         time_limit_secs: Option<f64>,
     ) -> Self {
         Self {
-            operators: operators.into_iter().unique_by(|op| *op as u8).collect(),
+            operators: operators.into_iter().unique_by(|op| op.clone() as u8).collect(),
             max_iterations,
             max_solutions,
             max_cycles,
