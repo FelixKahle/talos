@@ -1244,6 +1244,18 @@ mod tests {
 
     #[test]
     #[should_panic(
+        expected = "called `Mutator::new` with touched berths of 2 berths for a graph of 3"
+    )]
+    fn test_new_refuses_touched_berths_of_another_count() {
+        let mut graph = setup_graph();
+        let mut undo = ScheduleGraphUndoLog::new(1);
+        let mut diff = ScheduleGraphDiff::new();
+        let mut touched = TouchedBerths::new(2);
+        let _ = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
+    }
+
+    #[test]
+    #[should_panic(
         expected = "called `Mutator::swap_vessels` with Vessel 5, outside a graph of 5 vessels"
     )]
     fn test_swap_vessels_refuses_a_vessel_outside_the_graph() {

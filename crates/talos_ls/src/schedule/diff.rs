@@ -37,6 +37,7 @@ impl std::fmt::Display for ScheduleGraphDiffEdge {
 // ----------------------------------------------------------------
 
 /// Iterator over broken or created links in a `ScheduleGraphDiff`.
+#[derive(Clone, Debug)]
 pub struct DiffEdgeIter<'a> {
     inner: std::iter::Zip<std::slice::Iter<'a, Node>, std::slice::Iter<'a, Node>>,
 }
@@ -64,6 +65,7 @@ impl FusedIterator for DiffEdgeIter<'_> {}
 // ----------------------------------------------------------------
 
 /// Iterator over vessel reallocations between berths.
+#[derive(Clone, Debug)]
 pub struct DiffReallocationIter<'a> {
     vessels: std::slice::Iter<'a, VesselIndex>,
     originals: std::slice::Iter<'a, BerthIndex>,
