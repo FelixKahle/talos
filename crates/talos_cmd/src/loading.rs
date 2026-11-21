@@ -9,7 +9,7 @@ use std::path::Path;
 use std::str::FromStr;
 use talos_core::ClosedOpenInterval;
 use talos_core::SolverNumeric;
-use talos_model::{BerthIndex, Model, VesselIndex};
+use talos_model::{BerthIndex, Model, ModelError, VesselIndex};
 
 // ----------------------------------------------------------------
 // Errors
@@ -130,6 +130,8 @@ pub enum ProblemLoaderError {
     Feasibility(FeasibilityError),
     /// A logical timing constraint was violated.
     Constraint(ConstraintViolationError),
+    /// The numbers read make no model; the refusal carries them as text, as the loader reads any numeric type.
+    Model(ModelError<String>),
 }
 
 impl Display for ProblemLoaderError {
@@ -143,11 +145,54 @@ impl Display for ProblemLoaderError {
             }
             Self::Feasibility(e) => write!(f, "Feasibility error: {}", e),
             Self::Constraint(e) => write!(f, "Constraint violation: {}", e),
+            Self::Model(_) => write!(f, "the instance makes no model"),
         }
     }
 }
 
-impl std::error::Error for ProblemLoaderError {}
+impl std::error::Error for ProblemLoaderError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Model(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// `error` with the number it names as text.
+fn model_error_as_text<T>(error: ModelError<T>) -> ModelError<String>
+where
+    T: Display,
+{
+    match error {
+        ModelError::TooManyVessels { count } => ModelError::TooManyVessels { count },
+        ModelError::TooManyBerths { count } => ModelError::TooManyBerths { count },
+        ModelError::LatestDepartureTimesLength { len, vessel_count } => {
+            ModelError::LatestDepartureTimesLength { len, vessel_count }
+        }
+        ModelError::WeightsLength { len, vessel_count } => {
+            ModelError::WeightsLength { len, vessel_count }
+        }
+        ModelError::ProcessingTimesLength {
+            len,
+            vessel_count,
+            berth_count,
+        } => ModelError::ProcessingTimesLength {
+            len,
+            vessel_count,
+            berth_count,
+        },
+        ModelError::NegativeProcessingTime {
+            vessel,
+            berth,
+            processing_time,
+        } => ModelError::NegativeProcessingTime {
+            vessel,
+            berth,
+            processing_time: processing_time.to_string(),
+        },
+    }
+}
 
 impl From<std::io::Error> for ProblemLoaderError {
     fn from(e: std::io::Error) -> Self {
@@ -335,13 +380,14 @@ where
             )]);
         }
 
-        Ok(Model::new(
+        Model::try_new(
             arrival_times,
             latest_departure_times,
             vessel_weights,
             processing_times,
             opening_times,
-        ))
+        )
+        .map_err(|error| ProblemLoaderError::Model(model_error_as_text(error)))
     }
 
     /// Parses a DBAP instance from an in-memory string slice.
@@ -355,5 +401,36 @@ where
     pub fn load_dbap_file<P: AsRef<Path>>(&self, path: P) -> Result<Model<T>, ProblemLoaderError> {
         let file = File::open(path)?;
         self.load_dbap(file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One vessel arriving at 0, one berth open from 0 to 100, a processing time of -3 and a latest departure of
+    // 50: the model refuses the negative time, and the loader must answer that refusal instead of panicking.
+    #[test]
+    fn test_load_dbap_refuses_a_negative_processing_time_as_an_error() {
+        let loader = InstanceLoader::<i64>::new(99999);
+        let error = loader
+            .load_dbap_from_string("1 1\n0\n0\n-3\n100\n50\n")
+            .expect_err("a negative processing time should be refused");
+        let ProblemLoaderError::Model(refusal) = &error else {
+            panic!("expected the model's refusal, got {error}");
+        };
+        assert_eq!(
+            refusal,
+            &ModelError::NegativeProcessingTime {
+                vessel: VesselIndex::new(0),
+                berth: BerthIndex::new(0),
+                processing_time: String::from("-3"),
+            }
+        );
+        let source = std::error::Error::source(&error).map(ToString::to_string);
+        assert_eq!(
+            source.as_deref(),
+            Some("negative processing time -3 of Vessel 0 at Berth 0")
+        );
     }
 }
