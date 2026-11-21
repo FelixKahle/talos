@@ -6,7 +6,7 @@ use std::hint::black_box;
 use talos_core::ClosedOpenInterval;
 use talos_ls::{
     decoding::{ScheduleState, decode_unchecked},
-    schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff, ScheduleGraphUndoLog, TouchedBerths},
+    schedule::{Mutator, ScheduleGraph},
 };
 use talos_model::{BerthIndex, Model, VesselIndex};
 
@@ -74,11 +74,9 @@ fn bench_mutation_cycle(c: &mut Criterion) {
     ];
 
     for (name, is_worst_case) in scenarios.iter() {
-        let (mut graph, mut candidate, accepted, model) = setup_scenario(*is_worst_case);
+        let (graph, mut candidate, accepted, model) = setup_scenario(*is_worst_case);
 
-        let mut undo = ScheduleGraphUndoLog::new(1);
-        let mut diff = ScheduleGraphDiff::new();
-        let mut touched = TouchedBerths::new(20);
+        let mut mutator = Mutator::new(graph);
         let evaluator = |_: &Model<i64>, _: VesselIndex, _: BerthIndex, start: i64| Some(start);
 
         group.bench_with_input(
@@ -86,17 +84,13 @@ fn bench_mutation_cycle(c: &mut Criterion) {
             &is_worst_case,
             |b, _| {
                 b.iter(|| {
-                    undo.clear();
-                    diff.clear();
-                    touched.reset();
-
-                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-                    m.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
+                    mutator.clear_diff();
+                    mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
 
                     unsafe {
                         decode_unchecked(
-                            &touched,
-                            &graph,
+                            mutator.touched(),
+                            mutator.graph(),
                             &mut candidate,
                             &accepted,
                             &model,
@@ -104,9 +98,7 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                         )
                     };
 
-                    // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
-
-                    unsafe { undo.apply_rollback_unchecked(&mut graph) };
+                    mutator.rollback();
                 });
             },
         );
@@ -117,25 +109,20 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                 &is_worst_case,
                 |b, _| {
                     b.iter(|| {
-                        undo.clear();
-                        diff.clear();
-                        touched.reset();
-
-                        let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-                        m.swap_vessels(VesselIndex::new(10), VesselIndex::new(60));
+                        mutator.clear_diff();
+                        mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(60));
 
                         unsafe {
                             decode_unchecked(
-                                &touched,
-                                &graph,
+                                mutator.touched(),
+                                mutator.graph(),
                                 &mut candidate,
                                 &accepted,
                                 &model,
                                 evaluator,
                             )
                         };
-                        // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
-                        unsafe { undo.apply_rollback_unchecked(&mut graph) };
+                        mutator.rollback();
                     });
                 },
             );
@@ -146,25 +133,20 @@ fn bench_mutation_cycle(c: &mut Criterion) {
             &is_worst_case,
             |b, _| {
                 b.iter(|| {
-                    undo.clear();
-                    diff.clear();
-                    touched.reset();
-
-                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-                    m.relocate_after(VesselIndex::new(10), VesselIndex::new(40));
+                    mutator.clear_diff();
+                    mutator.relocate_after(VesselIndex::new(10), VesselIndex::new(40));
 
                     unsafe {
                         decode_unchecked(
-                            &touched,
-                            &graph,
+                            mutator.touched(),
+                            mutator.graph(),
                             &mut candidate,
                             &accepted,
                             &model,
                             evaluator,
                         )
                     };
-                    // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
-                    unsafe { undo.apply_rollback_unchecked(&mut graph) };
+                    mutator.rollback();
                 });
             },
         );
@@ -175,25 +157,20 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                 &is_worst_case,
                 |b, _| {
                     b.iter(|| {
-                        undo.clear();
-                        diff.clear();
-                        touched.reset();
-
-                        let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-                        m.relocate_after(VesselIndex::new(10), VesselIndex::new(60));
+                        mutator.clear_diff();
+                        mutator.relocate_after(VesselIndex::new(10), VesselIndex::new(60));
 
                         unsafe {
                             decode_unchecked(
-                                &touched,
-                                &graph,
+                                mutator.touched(),
+                                mutator.graph(),
                                 &mut candidate,
                                 &accepted,
                                 &model,
                                 evaluator,
                             )
                         };
-                        // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
-                        unsafe { undo.apply_rollback_unchecked(&mut graph) };
+                        mutator.rollback();
                     });
                 },
             );
@@ -204,25 +181,20 @@ fn bench_mutation_cycle(c: &mut Criterion) {
             &is_worst_case,
             |b, _| {
                 b.iter(|| {
-                    undo.clear();
-                    diff.clear();
-                    touched.reset();
-
-                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-                    m.reverse_segment(VesselIndex::new(10), VesselIndex::new(15));
+                    mutator.clear_diff();
+                    mutator.reverse_segment(VesselIndex::new(10), VesselIndex::new(15));
 
                     unsafe {
                         decode_unchecked(
-                            &touched,
-                            &graph,
+                            mutator.touched(),
+                            mutator.graph(),
                             &mut candidate,
                             &accepted,
                             &model,
                             evaluator,
                         )
                     };
-                    // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
-                    unsafe { undo.apply_rollback_unchecked(&mut graph) };
+                    mutator.rollback();
                 });
             },
         );
@@ -241,11 +213,9 @@ fn bench_single_mutation_cycle(c: &mut Criterion) {
     ];
 
     for (name, is_worst_case) in scenarios.iter() {
-        let (mut graph, mut candidate, accepted, model) = setup_scenario(*is_worst_case);
+        let (graph, mut candidate, accepted, model) = setup_scenario(*is_worst_case);
 
-        let mut undo = ScheduleGraphUndoLog::new(1);
-        let mut diff = ScheduleGraphDiff::new();
-        let mut touched = TouchedBerths::new(20);
+        let mut mutator = Mutator::new(graph);
         let evaluator = |_: &Model<i64>, _: VesselIndex, _: BerthIndex, start: i64| Some(start);
 
         group.bench_with_input(
@@ -253,17 +223,13 @@ fn bench_single_mutation_cycle(c: &mut Criterion) {
             &is_worst_case,
             |b, _| {
                 b.iter(|| {
-                    undo.clear();
-                    diff.clear();
-                    touched.reset();
-
-                    let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-                    m.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
+                    mutator.clear_diff();
+                    mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
 
                     unsafe {
                         decode_unchecked(
-                            &touched,
-                            &graph,
+                            mutator.touched(),
+                            mutator.graph(),
                             &mut candidate,
                             &accepted,
                             &model,
@@ -272,8 +238,7 @@ fn bench_single_mutation_cycle(c: &mut Criterion) {
                     };
 
                     black_box(candidate.objective());
-                    // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
-                    unsafe { undo.apply_rollback_unchecked(&mut graph) };
+                    mutator.rollback();
                 });
             },
         );

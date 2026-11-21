@@ -7,9 +7,10 @@
 //!   the ends of the links between consecutive places of a berth as [`LinkEnd`]s.
 //! - [`ScheduleGraphDiff`] records the links a sequence of moves broke and made and the vessels it moved between
 //!   berths.
-//! - [`ScheduleGraphUndoLog`] records how to undo a sequence of moves, and undoes it.
+//! - `ScheduleGraphUndoLog` records how to undo a sequence of moves, and undoes it.
 //! - [`TouchedBerths`] marks the berths whose order a sequence of moves changed.
-//! - [`Mutator`] makes the moves on a graph and records each in a diff, an undo log and the touched berths.
+//! - [`Mutator`] owns a graph and the records of the moves made on it: it makes each move and records it in a
+//!   diff, an undo log and the touched berths.
 
 mod graph;
 
@@ -23,4 +24,3 @@ pub use diff::{DiffLinkIter, DiffReallocationIter, Link, Reallocation, ScheduleG
 pub use graph::{BerthTopologyIter, LinkEnd, ScheduleGraph, VesselSequenceIter};
 pub use mutator::Mutator;
 pub use touched_berths::{TouchedBerths, TouchedBerthsIter};
-pub use undo_log::{ScheduleGraphUndoLog, UndoInstruction, UndoLogIter};

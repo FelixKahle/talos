@@ -1,26 +1,22 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Undo support for `ScheduleGraph` mutations.
+//! The record of how to undo a sequence of moves on a schedule graph, and the undoing.
 //!
-//! Local-search heuristics repeatedly apply speculative moves to a schedule
-//! and revert them when they do not improve the objective. This module
-//! provides a lightweight, allocation-free mechanism for that revert step.
+//! The local search makes a candidate's moves on the graph and takes them back when it rejects the candidate. The
+//! log keeps the inverse of each move as a few ids, so undoing costs what the moves cost, and clearing keeps its
+//! memory, so a run records its moves without allocating once the log has grown.
 
 use super::graph::{Outside, ScheduleGraph};
-use std::iter::FusedIterator;
 use talos_model::{BerthIndex, VesselIndex};
 
 // ----------------------------------------------------------------
 // UndoInstruction
 // ----------------------------------------------------------------
 
-/// Strongly-typed instructions for the undo stack machine.
-///
-/// Each variant encodes the exact inverse of a forward mutation using only
-/// domain-level types (`VesselIndex`, `BerthIndex`).
+/// The inverse of one move, as the ids that undo it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UndoInstruction {
+enum UndoInstruction {
     /// Reverts a swap between two vessels by swapping them again.
     SwapVessels {
         vessel_a: VesselIndex,
@@ -119,8 +115,7 @@ impl UndoInstruction {
     ///
     /// # Safety
     ///
-    /// Every vessel and berth the instruction names must be one of `graph`'s, the condition
-    /// [`ScheduleGraphUndoLog::apply_rollback`] checks.
+    /// Every vessel and berth the instruction names must be one of `graph`'s.
     #[inline(always)]
     unsafe fn undo_unchecked(self, graph: &mut ScheduleGraph) {
         debug_assert!(
@@ -178,34 +173,6 @@ impl UndoInstruction {
                 graph.relocate_segment_to_head_unchecked(segment_first, segment_last, berth);
             },
         }
-    }
-}
-
-/// An undo log handed to [`ScheduleGraphUndoLog::apply_rollback`] that names an id outside the graph.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct RollbackRefusal {
-    /// The first id the log names that is not the graph's, from the oldest instruction on.
-    outside: Outside,
-}
-
-impl RollbackRefusal {
-    /// Panics with the refusal.
-    // Kept out of line so that the check stays a compare and a branch per instruction on the caller's path.
-    #[cold]
-    #[inline(never)]
-    #[track_caller]
-    fn panic(self) -> ! {
-        panic!("{self}")
-    }
-}
-
-impl std::fmt::Display for RollbackRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "called `ScheduleGraphUndoLog::apply_rollback` with a log that names {}",
-            self.outside
-        )
     }
 }
 
@@ -279,77 +246,36 @@ impl std::fmt::Display for UndoInstruction {
 }
 
 // ----------------------------------------------------------------
-// UndoLogIter
-// ----------------------------------------------------------------
-
-/// Iterator over recorded `UndoInstruction`s in chronological (push) order.
-#[derive(Debug, Clone)]
-pub struct UndoLogIter<'a> {
-    iter: std::slice::Iter<'a, UndoInstruction>,
-}
-
-impl<'a> Iterator for UndoLogIter<'a> {
-    type Item = &'a UndoInstruction;
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
-    }
-
-    #[inline(always)]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-}
-
-impl<'a> DoubleEndedIterator for UndoLogIter<'a> {
-    #[inline(always)]
-    fn next_back(&mut self) -> Option<Self::Item> {
-        self.iter.next_back()
-    }
-}
-
-impl FusedIterator for UndoLogIter<'_> {}
-impl ExactSizeIterator for UndoLogIter<'_> {}
-
-// ----------------------------------------------------------------
 // ScheduleGraphUndoLog
 // ----------------------------------------------------------------
 
-/// A high-performance, purely instruction-based undo log for `ScheduleGraph` mutations.
+/// How to undo a sequence of moves on a schedule graph: the inverse of each move, the latest last.
 ///
-/// All topological mutations on the `ScheduleGraph` have strict mathematical inverses.
-/// This log stores exactly how to execute those inverses without heap allocations
-/// or state cloning.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScheduleGraphUndoLog {
+/// Every move of a schedule graph has an inverse that is itself a move, named by a few of the graph's ids; the log
+/// records it when the move is made, and rolling back applies the inverses, the latest first. The
+/// [`Mutator`](super::Mutator) writes the log as it makes its moves and is its only writer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ScheduleGraphUndoLog {
+    /// The inverse of each move, in the order the moves were made.
     stack: Vec<UndoInstruction>,
 }
 
 impl ScheduleGraphUndoLog {
-    /// The empty log, with room for `capacity` instructions.
-    #[inline]
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            stack: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Discards all recorded operations without deallocating.
+    /// Empties the log, keeping its memory.
     #[inline(always)]
-    pub fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.stack.clear();
     }
 
-    /// Returns `true` if no operations are recorded.
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
+    /// Whether the log records no move.
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
         self.stack.is_empty()
     }
 
-    /// Returns the number of recorded operations.
-    #[inline(always)]
-    pub fn len(&self) -> usize {
+    /// The number of moves the log records.
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
         self.stack.len()
     }
 
@@ -357,18 +283,19 @@ impl ScheduleGraphUndoLog {
     // Push methods
     // ----------------------------------------------------------------
 
-    /// Records a vessel swap. Must be called *before* the swap.
+    /// Records that `a` and `b` were swapped; the swap is its own inverse.
     #[inline(always)]
-    pub fn push_swap_vessels(&mut self, a: VesselIndex, b: VesselIndex) {
+    pub(super) fn push_swap_vessels(&mut self, a: VesselIndex, b: VesselIndex) {
         self.stack.push(UndoInstruction::SwapVessels {
             vessel_a: a,
             vessel_b: b,
         });
     }
 
-    /// Records a segment swap. Must be called *before* the swap.
+    /// Records that the segments `a_first ..= a_last` and `b_first ..= b_last` were swapped; swapping them back
+    /// is the inverse.
     #[inline(always)]
-    pub fn push_swap_segments(
+    pub(super) fn push_swap_segments(
         &mut self,
         a_first: VesselIndex,
         a_last: VesselIndex,
@@ -383,34 +310,38 @@ impl ScheduleGraphUndoLog {
         });
     }
 
-    /// Records a segment reversal. Must be called *before* the reversal.
+    /// Records that the segment `first ..= last` was reversed; reversing `last ..= first` is the inverse.
     #[inline(always)]
-    pub fn push_reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
+    pub(super) fn push_reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
         self.stack.push(UndoInstruction::ReverseSegment {
             original_first: first,
             original_last: last,
         });
     }
 
-    /// Records a relocation where the vessel was after another vessel.
+    /// Records that `vessel`, which stood directly after `predecessor`, was moved.
     #[inline(always)]
-    pub fn push_relocate_after_vessel(&mut self, vessel: VesselIndex, predecessor: VesselIndex) {
+    pub(super) fn push_relocate_after_vessel(
+        &mut self,
+        vessel: VesselIndex,
+        predecessor: VesselIndex,
+    ) {
         self.stack.push(UndoInstruction::RelocateAfterVessel {
             vessel,
             predecessor,
         });
     }
 
-    /// Records a relocation where the vessel was at the head of a berth.
+    /// Records that `vessel`, which headed `berth`, was moved.
     #[inline(always)]
-    pub fn push_relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
+    pub(super) fn push_relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         self.stack
             .push(UndoInstruction::RelocateToHead { vessel, berth });
     }
 
-    /// Records a segment relocation where the segment was after another vessel.
+    /// Records that the segment `first ..= last`, which stood directly after `predecessor`, was moved.
     #[inline(always)]
-    pub fn push_relocate_segment_after_vessel(
+    pub(super) fn push_relocate_segment_after_vessel(
         &mut self,
         first: VesselIndex,
         last: VesselIndex,
@@ -424,9 +355,9 @@ impl ScheduleGraphUndoLog {
             });
     }
 
-    /// Records a segment relocation where the segment was at the head of a berth.
+    /// Records that the segment `first ..= last`, which headed `berth`, was moved.
     #[inline(always)]
-    pub fn push_relocate_segment_to_head(
+    pub(super) fn push_relocate_segment_to_head(
         &mut self,
         first: VesselIndex,
         last: VesselIndex,
@@ -448,35 +379,12 @@ impl ScheduleGraphUndoLog {
     /// Afterwards `graph` stands as it stood before the first recorded move, if the log holds the moves made on
     /// it since then.
     ///
-    /// # Panics
-    ///
-    /// Panics if the log names a vessel or a berth that is not one of `graph`'s; the graph and the log are then
-    /// left unchanged.
-    #[track_caller]
-    pub fn apply_rollback(&mut self, graph: &mut ScheduleGraph) {
-        if let Some(outside) = self
-            .stack
-            .iter()
-            .find_map(|instruction| instruction.outside(graph))
-        {
-            RollbackRefusal { outside }.panic();
-        }
-        // SAFETY: every id the log names is one of the graph's, as the search above found.
-        unsafe { self.apply_rollback_unchecked(graph) }
-    }
-
-    /// Undoes every recorded move on `graph`, the latest first, and empties the log, for a log the caller knows
-    /// to name only ids of `graph`.
-    ///
-    /// A log written only by a [`Mutator`](super::Mutator) over `graph` names only ids of `graph`, while the
-    /// graph's counts of vessels and berths stay as they were.
-    ///
     /// # Safety
     ///
-    /// Every vessel and berth the log names must be one of `graph`'s, the condition
-    /// [`apply_rollback`](Self::apply_rollback) checks.
+    /// Every vessel and berth the log names must be one of `graph`'s, as the [`Mutator`](super::Mutator) that
+    /// writes the log over its own graph keeps.
     #[inline]
-    pub unsafe fn apply_rollback_unchecked(&mut self, graph: &mut ScheduleGraph) {
+    pub(super) unsafe fn apply_rollback_unchecked(&mut self, graph: &mut ScheduleGraph) {
         while let Some(instruction) = self.stack.pop() {
             debug_assert!(
                 instruction.outside(graph).is_none(),
@@ -485,18 +393,6 @@ impl ScheduleGraphUndoLog {
             );
             // SAFETY: every id the log names is one of the graph's, the precondition of this function.
             unsafe { instruction.undo_unchecked(graph) };
-        }
-    }
-}
-
-impl<'a> IntoIterator for &'a ScheduleGraphUndoLog {
-    type Item = &'a UndoInstruction;
-    type IntoIter = UndoLogIter<'a>;
-
-    #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter {
-        UndoLogIter {
-            iter: self.stack.iter(),
         }
     }
 }
@@ -544,15 +440,16 @@ mod tests {
     #[test]
     fn test_rollback_swap_vessels() {
         let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(10);
+        let mut log = ScheduleGraphUndoLog::default();
 
         log.push_swap_vessels(v(0), v(2));
-        unsafe { graph.swap_vessels_unchecked(v(0), v(2)) };
+        graph.swap_vessels(v(0), v(2));
 
         let seq: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         assert_eq!(seq, vec![v(2), v(1), v(0)]);
 
-        log.apply_rollback(&mut graph);
+        // SAFETY: the log names only vessels and berths of the graph.
+        unsafe { log.apply_rollback_unchecked(&mut graph) };
 
         let restored: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         assert_eq!(restored, vec![v(0), v(1), v(2)]);
@@ -562,15 +459,16 @@ mod tests {
     #[test]
     fn test_rollback_swap_segments() {
         let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(10);
+        let mut log = ScheduleGraphUndoLog::default();
 
         log.push_swap_segments(v(0), v(1), v(3), v(4));
-        unsafe { graph.swap_segments_unchecked(v(0), v(1), v(3), v(4)) };
+        graph.swap_segments(v(0), v(1), v(3), v(4));
 
         let seq: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         assert_eq!(seq, vec![v(3), v(4), v(2)]);
 
-        log.apply_rollback(&mut graph);
+        // SAFETY: the log names only vessels and berths of the graph.
+        unsafe { log.apply_rollback_unchecked(&mut graph) };
 
         let restored: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         assert_eq!(restored, vec![v(0), v(1), v(2)]);
@@ -579,15 +477,16 @@ mod tests {
     #[test]
     fn test_rollback_reverse_segment() {
         let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(10);
+        let mut log = ScheduleGraphUndoLog::default();
 
         log.push_reverse_segment(v(0), v(2));
-        unsafe { graph.reverse_segment_unchecked(v(0), v(2)) };
+        graph.reverse_segment(v(0), v(2));
 
         let seq: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         assert_eq!(seq, vec![v(2), v(1), v(0)]);
 
-        log.apply_rollback(&mut graph);
+        // SAFETY: the log names only vessels and berths of the graph.
+        unsafe { log.apply_rollback_unchecked(&mut graph) };
 
         let restored: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         assert_eq!(restored, vec![v(0), v(1), v(2)]);
@@ -596,17 +495,18 @@ mod tests {
     #[test]
     fn test_rollback_relocate_after_vessel() {
         let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(10);
+        let mut log = ScheduleGraphUndoLog::default();
 
         // V0 is at head of B0, predecessor is sentinel -> use RelocateToHead
         // But first test the AfterVessel variant: move V2 (predecessor is V1)
         log.push_relocate_after_vessel(v(2), v(1));
-        unsafe { graph.relocate_after_unchecked(v(2), v(0)) };
+        graph.relocate_after(v(2), v(0));
 
         let seq: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         assert_eq!(seq, vec![v(0), v(2), v(1)]);
 
-        log.apply_rollback(&mut graph);
+        // SAFETY: the log names only vessels and berths of the graph.
+        unsafe { log.apply_rollback_unchecked(&mut graph) };
 
         let restored: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         assert_eq!(restored, vec![v(0), v(1), v(2)]);
@@ -615,18 +515,19 @@ mod tests {
     #[test]
     fn test_rollback_relocate_to_head() {
         let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(10);
+        let mut log = ScheduleGraphUndoLog::default();
 
         // V0 is at head of B0. Move it after V3 in B1.
         log.push_relocate_to_head(v(0), b(0));
-        unsafe { graph.relocate_after_unchecked(v(0), v(3)) };
+        graph.relocate_after(v(0), v(3));
 
         let seq_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         let seq_b1: Vec<_> = graph.vessel_sequence_iter(b(1)).collect();
         assert_eq!(seq_b0, vec![v(1), v(2)]);
         assert_eq!(seq_b1, vec![v(3), v(0), v(4)]);
 
-        log.apply_rollback(&mut graph);
+        // SAFETY: the log names only vessels and berths of the graph.
+        unsafe { log.apply_rollback_unchecked(&mut graph) };
 
         let restored_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         let restored_b1: Vec<_> = graph.vessel_sequence_iter(b(1)).collect();
@@ -637,18 +538,19 @@ mod tests {
     #[test]
     fn test_rollback_relocate_segment_after_vessel() {
         let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(10);
+        let mut log = ScheduleGraphUndoLog::default();
 
         // Move [V1, V2] (predecessor V0) to after V3 in B1.
         log.push_relocate_segment_after_vessel(v(1), v(2), v(0));
-        unsafe { graph.relocate_segment_after_unchecked(v(1), v(2), v(3)) };
+        graph.relocate_segment_after(v(1), v(2), v(3));
 
         let seq_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         let seq_b1: Vec<_> = graph.vessel_sequence_iter(b(1)).collect();
         assert_eq!(seq_b0, vec![v(0)]);
         assert_eq!(seq_b1, vec![v(3), v(1), v(2), v(4)]);
 
-        log.apply_rollback(&mut graph);
+        // SAFETY: the log names only vessels and berths of the graph.
+        unsafe { log.apply_rollback_unchecked(&mut graph) };
 
         let restored_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         let restored_b1: Vec<_> = graph.vessel_sequence_iter(b(1)).collect();
@@ -659,18 +561,19 @@ mod tests {
     #[test]
     fn test_rollback_relocate_segment_to_head() {
         let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(10);
+        let mut log = ScheduleGraphUndoLog::default();
 
         // Move [V0, V1] (at head of B0) to head of B2.
         log.push_relocate_segment_to_head(v(0), v(1), b(0));
-        unsafe { graph.relocate_segment_to_head_unchecked(v(0), v(1), b(2)) };
+        graph.relocate_segment_to_head(v(0), v(1), b(2));
 
         let seq_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         let seq_b2: Vec<_> = graph.vessel_sequence_iter(b(2)).collect();
         assert_eq!(seq_b0, vec![v(2)]);
         assert_eq!(seq_b2, vec![v(0), v(1)]);
 
-        log.apply_rollback(&mut graph);
+        // SAFETY: the log names only vessels and berths of the graph.
+        unsafe { log.apply_rollback_unchecked(&mut graph) };
 
         let restored_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
         let restored_b2: Vec<_> = graph.vessel_sequence_iter(b(2)).collect();
@@ -682,53 +585,32 @@ mod tests {
     fn test_lifo_execution_order() {
         let mut graph = setup_graph();
         let original = graph.clone();
-        let mut log = ScheduleGraphUndoLog::new(20);
+        let mut log = ScheduleGraphUndoLog::default();
 
         // Op 1: Move V2 to head of empty B2 (V2 was after V1)
         log.push_relocate_after_vessel(v(2), v(1));
-        unsafe { graph.relocate_to_head_unchecked(v(2), b(2)) };
+        graph.relocate_to_head(v(2), b(2));
 
         // Op 2: Reverse [V3, V4] in B1
         log.push_reverse_segment(v(3), v(4));
-        unsafe { graph.reverse_segment_unchecked(v(3), v(4)) };
+        graph.reverse_segment(v(3), v(4));
 
         // Op 3: Swap V0 and V3
         log.push_swap_vessels(v(0), v(3));
-        unsafe { graph.swap_vessels_unchecked(v(0), v(3)) };
+        graph.swap_vessels(v(0), v(3));
 
         assert_ne!(graph, original);
 
-        log.apply_rollback(&mut graph);
+        // SAFETY: the log names only vessels and berths of the graph.
+        unsafe { log.apply_rollback_unchecked(&mut graph) };
 
         assert_eq!(graph, original);
         assert!(log.is_empty());
     }
 
     #[test]
-    #[should_panic(
-        expected = "called `ScheduleGraphUndoLog::apply_rollback` with a log that names Vessel 9, outside a graph of 5 vessels"
-    )]
-    fn test_apply_rollback_refuses_a_log_that_names_a_vessel_outside_the_graph() {
-        let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(1);
-        log.push_swap_vessels(v(0), v(9));
-        log.apply_rollback(&mut graph);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `ScheduleGraphUndoLog::apply_rollback` with a log that names Berth 3, outside a graph of 3 berths"
-    )]
-    fn test_apply_rollback_refuses_a_log_that_names_a_berth_outside_the_graph() {
-        let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::new(1);
-        log.push_relocate_to_head(v(0), b(3));
-        log.apply_rollback(&mut graph);
-    }
-
-    #[test]
     fn test_clear_keeps_the_memory() {
-        let mut log = ScheduleGraphUndoLog::new(4);
+        let mut log = ScheduleGraphUndoLog::default();
         log.push_swap_vessels(v(0), v(1));
         log.push_reverse_segment(v(2), v(3));
         assert_eq!(log.len(), 2);
@@ -739,12 +621,12 @@ mod tests {
     }
 
     #[test]
-    fn test_iterator() {
-        let mut log = ScheduleGraphUndoLog::new(10);
+    fn test_the_log_keeps_the_moves_in_their_order() {
+        let mut log = ScheduleGraphUndoLog::default();
         log.push_swap_vessels(v(0), v(1));
         log.push_relocate_to_head(v(2), b(1));
 
-        let ops: Vec<_> = log.into_iter().cloned().collect();
+        let ops = &log.stack;
         assert_eq!(ops.len(), 2);
         assert_eq!(
             ops[0],

@@ -103,53 +103,44 @@ impl fmt::Display for Move {
 // Mutator
 // ----------------------------------------------------------------
 
-/// The moves of the local search on a [`ScheduleGraph`], each recorded as it is made.
+/// A [`ScheduleGraph`] and the moves of the local search on it, each recorded as it is made.
 ///
 /// Every move is recorded three ways: its inverse in an undo log, so that a rejected candidate is undone; the
-/// links it broke and made and the vessels it moved between berths in a diff, which the metaheuristics read; and
-/// the berths whose order it changed among the touched berths, which the decoder decodes again. A move that
-/// changes nothing records nothing where its doc says so.
+/// links it broke and made and the vessels it moved between berths in a [`ScheduleGraphDiff`], which the
+/// metaheuristics read; and the berths whose order it changed among the [`TouchedBerths`], which the decoder
+/// decodes again. A move that changes nothing records nothing where its doc says so.
+///
+/// The mutator owns the graph and its records together, so that they always speak of one graph: the touched
+/// berths count its berths, and the undo log names only its vessels and berths. A run keeps one mutator, makes a
+/// candidate's moves, and then either [`accept`](Self::accept)s them or [`rollback`](Self::rollback)s them.
 ///
 /// Each move comes as a safe form, which checks in every build that its vessels and berths are the graph's, and an
 /// `_unchecked` twin for the operator whose loop proves that they are.
-// Invariant: `touched` counts as many berths as `graph`. Unchecked marks of a berth rest on it; `new` checks it,
-// and neither count can change while the mutator holds both borrows.
-#[derive(Debug)]
-pub struct Mutator<'a> {
+// Invariant: `touched` counts the berths of `graph`, and every vessel and berth `undo` names is one of `graph`'s.
+// The unchecked marks of a berth and the unchecked rollback rest on these. Only the moves write `undo`, each with
+// ids of the graph, and every step that changes the graph's counts (`overwrite_*`) empties `undo` and sizes
+// `touched` anew with it.
+#[derive(Clone, Debug)]
+pub struct Mutator {
     /// The graph the moves change.
-    graph: &'a mut ScheduleGraph,
-    /// The inverse of every move made, the latest last.
-    undo: &'a mut ScheduleGraphUndoLog,
-    /// The links and berths the moves changed.
-    diff: &'a mut ScheduleGraphDiff,
-    /// The berths whose order the moves changed.
-    touched: &'a mut TouchedBerths,
+    graph: ScheduleGraph,
+    /// The inverse of every move made since the moves were last accepted or rolled back, the latest last.
+    undo: ScheduleGraphUndoLog,
+    /// The links and berths the moves changed since the diff was last cleared.
+    diff: ScheduleGraphDiff,
+    /// The berths whose order the moves changed since they were last accepted or rolled back.
+    touched: TouchedBerths,
 }
 
-impl<'a> Mutator<'a> {
-    /// The mutator that makes moves on `graph` and records them in `undo`, `diff` and `touched`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `touched` does not count as many berths as `graph`.
+impl Mutator {
+    /// The mutator of `graph`, with empty records.
     #[inline]
-    #[track_caller]
-    pub fn new(
-        graph: &'a mut ScheduleGraph,
-        undo: &'a mut ScheduleGraphUndoLog,
-        diff: &'a mut ScheduleGraphDiff,
-        touched: &'a mut TouchedBerths,
-    ) -> Self {
-        assert!(
-            touched.num_berths() == graph.num_berths(),
-            "called `Mutator::new` with touched berths of {} berths for a graph of {}",
-            touched.num_berths(),
-            graph.num_berths()
-        );
+    pub fn new(graph: ScheduleGraph) -> Self {
+        let touched = TouchedBerths::new(graph.num_berths());
         Self {
             graph,
-            undo,
-            diff,
+            undo: ScheduleGraphUndoLog::default(),
+            diff: ScheduleGraphDiff::new(),
             touched,
         }
     }
@@ -157,7 +148,80 @@ impl<'a> Mutator<'a> {
     /// The graph the moves change.
     #[inline(always)]
     pub fn graph(&self) -> &ScheduleGraph {
+        &self.graph
+    }
+
+    /// The links and berths the moves changed since the diff was last cleared.
+    #[inline(always)]
+    pub fn diff(&self) -> &ScheduleGraphDiff {
+        &self.diff
+    }
+
+    /// The berths whose order the moves changed since they were last accepted or rolled back; they count the
+    /// berths of the graph.
+    #[inline(always)]
+    pub fn touched(&self) -> &TouchedBerths {
+        &self.touched
+    }
+
+    /// Empties the diff, keeping its memory.
+    #[inline(always)]
+    pub fn clear_diff(&mut self) {
+        self.diff.clear();
+    }
+
+    /// Keeps the moves made since they were last accepted or rolled back: forgets how to undo them and which
+    /// berths they touched, at a cost of the touched berths. The diff stays until it is cleared.
+    #[inline]
+    pub fn accept(&mut self) {
+        self.undo.clear();
+        self.touched.reset();
+    }
+
+    /// Undoes every move made since the moves were last accepted or rolled back, the latest first, and unmarks
+    /// the berths they touched. Afterwards the graph stands as it stood then; the diff stays until it is cleared.
+    #[inline]
+    pub fn rollback(&mut self) {
+        // SAFETY: every id the log names is one of the graph's, by the invariant of `Mutator`.
+        unsafe { self.undo.apply_rollback_unchecked(&mut self.graph) };
+        self.touched.reset();
+    }
+
+    /// Makes the graph the one [`ScheduleGraph::from_slices`] builds from the same arguments and empties the
+    /// records, reusing the memory of both.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`ScheduleGraph::overwrite_from_slices`] refuses the arguments; the mutator is then left
+    /// unchanged.
+    #[track_caller]
+    pub fn overwrite_from_slices<T>(
+        &mut self,
+        berths: &[BerthIndex],
+        start_times: &[T],
+        num_berths: usize,
+    ) where
+        T: Ord,
+    {
         self.graph
+            .overwrite_from_slices(berths, start_times, num_berths);
+        self.empty_records();
+    }
+
+    /// Makes the graph a copy of `other` and empties the records, reusing the memory of both.
+    #[inline]
+    pub fn overwrite_from_graph(&mut self, other: &ScheduleGraph) {
+        self.graph.overwrite_from_graph(other);
+        self.empty_records();
+    }
+
+    /// Empties the records and sizes the touched berths for the graph's berths, as a change of the graph's counts
+    /// asks.
+    #[inline]
+    fn empty_records(&mut self) {
+        self.undo.clear();
+        self.diff.clear();
+        self.touched.resize(self.graph.num_berths());
     }
 
     /// Panics with the refusal of `step` if one of `vessels` or `berths` is not one of the graph's.
@@ -224,7 +288,7 @@ impl<'a> Mutator<'a> {
                 self.graph.vessel_berth_unchecked(b),
             );
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 berths.0,
                 berths.1,
             )
@@ -235,7 +299,7 @@ impl<'a> Mutator<'a> {
             self.touch_unchecked(berth_a);
             self.touch_unchecked(berth_b);
             self.graph.swap_vessels_unchecked(a, b);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(a, a, berth_a);
             self.record_berth_change_unchecked(b, b, berth_b);
         }
@@ -322,7 +386,7 @@ impl<'a> Mutator<'a> {
                 self.graph.vessel_berth_unchecked(b_first),
             );
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 berths.0,
                 berths.1,
             )
@@ -335,7 +399,7 @@ impl<'a> Mutator<'a> {
             self.touch_unchecked(berth_b);
             self.graph
                 .swap_segments_unchecked(a_first, a_last, b_first, b_last);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(a_first, a_last, berth_a);
             self.record_berth_change_unchecked(b_first, b_last, berth_b);
         }
@@ -469,7 +533,7 @@ impl<'a> Mutator<'a> {
                 anchor_node,
             ];
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(vessel),
                 self.graph.vessel_berth_unchecked(anchor),
             )
@@ -480,7 +544,7 @@ impl<'a> Mutator<'a> {
             self.touch_unchecked(to);
             self.record_position_unchecked(vessel, vessel);
             self.graph.relocate_after_unchecked(vessel, anchor);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(vessel, vessel, from);
         }
     }
@@ -538,7 +602,7 @@ impl<'a> Mutator<'a> {
                 reference_prev,
             ];
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(vessel),
                 self.graph.vessel_berth_unchecked(reference),
             )
@@ -549,7 +613,7 @@ impl<'a> Mutator<'a> {
             self.touch_unchecked(to);
             self.record_position_unchecked(vessel, vessel);
             self.graph.relocate_before_unchecked(vessel, reference);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(vessel, vessel, from);
         }
     }
@@ -596,7 +660,7 @@ impl<'a> Mutator<'a> {
                 sentinel,
             ];
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(vessel),
                 berth,
             )
@@ -607,7 +671,7 @@ impl<'a> Mutator<'a> {
             self.touch_unchecked(to);
             self.record_position_unchecked(vessel, vessel);
             self.graph.relocate_to_head_unchecked(vessel, berth);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(vessel, vessel, from);
         }
     }
@@ -654,7 +718,7 @@ impl<'a> Mutator<'a> {
                 self.graph.prev_node_unchecked(sentinel),
             ];
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(vessel),
                 berth,
             )
@@ -665,7 +729,7 @@ impl<'a> Mutator<'a> {
             self.touch_unchecked(to);
             self.record_position_unchecked(vessel, vessel);
             self.graph.relocate_to_tail_unchecked(vessel, berth);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(vessel, vessel, from);
         }
     }
@@ -738,7 +802,7 @@ impl<'a> Mutator<'a> {
                 anchor_node,
             ];
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(first),
                 self.graph.vessel_berth_unchecked(anchor),
             )
@@ -750,7 +814,7 @@ impl<'a> Mutator<'a> {
             self.record_position_unchecked(first, last);
             self.graph
                 .relocate_segment_after_unchecked(first, last, anchor);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(first, last, from);
         }
     }
@@ -824,7 +888,7 @@ impl<'a> Mutator<'a> {
                 reference_prev,
             ];
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(first),
                 self.graph.vessel_berth_unchecked(reference),
             )
@@ -836,7 +900,7 @@ impl<'a> Mutator<'a> {
             self.record_position_unchecked(first, last);
             self.graph
                 .relocate_segment_before_unchecked(first, last, reference);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(first, last, from);
         }
     }
@@ -904,7 +968,7 @@ impl<'a> Mutator<'a> {
                 sentinel,
             ];
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(first),
                 berth,
             )
@@ -916,7 +980,7 @@ impl<'a> Mutator<'a> {
             self.record_position_unchecked(first, last);
             self.graph
                 .relocate_segment_to_head_unchecked(first, last, berth);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(first, last, from);
         }
     }
@@ -984,7 +1048,7 @@ impl<'a> Mutator<'a> {
                 self.graph.prev_node_unchecked(sentinel),
             ];
             (
-                LinkSnapshot::new_unchecked(self.graph, nodes),
+                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(first),
                 berth,
             )
@@ -996,7 +1060,7 @@ impl<'a> Mutator<'a> {
             self.record_position_unchecked(first, last);
             self.graph
                 .relocate_segment_to_tail_unchecked(first, last, berth);
-            links.commit_unchecked(self.graph, self.diff);
+            links.commit_unchecked(&self.graph, &mut self.diff);
             self.record_berth_change_unchecked(first, last, from);
         }
     }
@@ -1013,8 +1077,8 @@ impl<'a> Mutator<'a> {
             "called `Mutator::touch_unchecked` with {berth}, outside a graph of {} berths",
             self.graph.num_berths()
         );
-        // SAFETY: `berth` is the graph's, the precondition of this function, and the touched berths count as many
-        // as the graph by the invariant of `Mutator`.
+        // SAFETY: `berth` is the graph's, the precondition of this function, and the touched berths count the
+        // graph's berths by the invariant of `Mutator`.
         unsafe { self.touched.touch_unchecked(berth) };
     }
 
@@ -1107,6 +1171,16 @@ mod tests {
         ScheduleGraph::from_slices(&berths, &starts, 3)
     }
 
+    /// The mutator of the graph of `setup_graph`.
+    fn setup() -> Mutator {
+        Mutator::new(setup_graph())
+    }
+
+    /// The vessels of `berth`, from its head to its tail.
+    fn vessels_of(mutator: &Mutator, berth: usize) -> Vec<VesselIndex> {
+        mutator.graph().vessel_sequence_iter(b(berth)).collect()
+    }
+
     fn extract_reallocations(
         diff: &ScheduleGraphDiff,
     ) -> Vec<(VesselIndex, BerthIndex, BerthIndex)> {
@@ -1116,113 +1190,58 @@ mod tests {
     }
 
     #[test]
+    fn test_new_counts_the_berths_of_the_graph_and_records_nothing() {
+        let mutator = setup();
+        assert_eq!(mutator.touched().num_berths(), 3);
+        assert_eq!(mutator.touched().iter_touched_berths().count(), 0);
+        assert!(mutator.undo.is_empty());
+        assert_eq!(mutator.diff(), &ScheduleGraphDiff::new());
+    }
+
+    #[test]
     fn test_swap_vessels_same_berth() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-
-        {
-            let mut touched = TouchedBerths::new(graph.num_berths());
-            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-            m.swap_vessels(v(0), v(2));
-        }
-
-        let seq: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        assert_eq!(seq, vec![v(2), v(1), v(0)]);
-        assert!(extract_reallocations(&diff).is_empty());
+        let mut mutator = setup();
+        mutator.swap_vessels(v(0), v(2));
+        assert_eq!(vessels_of(&mutator, 0), [v(2), v(1), v(0)]);
+        assert!(extract_reallocations(mutator.diff()).is_empty());
     }
 
     #[test]
     fn test_relocate_to_head_cross_berth() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-
-        {
-            let mut touched = TouchedBerths::new(graph.num_berths());
-            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-            m.relocate_to_head(v(0), b(1));
-        }
-
-        assert_eq!(
-            graph.vessel_sequence_iter(b(0)).collect::<Vec<_>>(),
-            vec![v(1), v(2)]
-        );
-        assert_eq!(
-            graph.vessel_sequence_iter(b(1)).collect::<Vec<_>>(),
-            vec![v(0), v(3), v(4)]
-        );
-
-        let reallocs = extract_reallocations(&diff);
-        assert_eq!(reallocs, vec![(v(0), b(0), b(1))]);
+        let mut mutator = setup();
+        mutator.relocate_to_head(v(0), b(1));
+        assert_eq!(vessels_of(&mutator, 0), [v(1), v(2)]);
+        assert_eq!(vessels_of(&mutator, 1), [v(0), v(3), v(4)]);
+        assert_eq!(extract_reallocations(mutator.diff()), [(v(0), b(0), b(1))]);
     }
 
     #[test]
     fn test_relocate_segment_after_cross_berth() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-
-        {
-            let mut touched = TouchedBerths::new(graph.num_berths());
-            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-            m.relocate_segment_after(v(0), v(1), v(3));
-        }
-
+        let mut mutator = setup();
+        mutator.relocate_segment_after(v(0), v(1), v(3));
+        assert_eq!(vessels_of(&mutator, 0), [v(2)]);
+        assert_eq!(vessels_of(&mutator, 1), [v(3), v(0), v(1), v(4)]);
         assert_eq!(
-            graph.vessel_sequence_iter(b(0)).collect::<Vec<_>>(),
-            vec![v(2)]
+            extract_reallocations(mutator.diff()),
+            [(v(0), b(0), b(1)), (v(1), b(0), b(1))]
         );
-        assert_eq!(
-            graph.vessel_sequence_iter(b(1)).collect::<Vec<_>>(),
-            vec![v(3), v(0), v(1), v(4)]
-        );
-
-        let reallocs = extract_reallocations(&diff);
-        assert_eq!(reallocs, vec![(v(0), b(0), b(1)), (v(1), b(0), b(1))]);
     }
 
     #[test]
     fn test_reverse_segment() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-
-        {
-            let mut touched = TouchedBerths::new(graph.num_berths());
-            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-            m.reverse_segment(v(0), v(2));
-        }
-
-        assert_eq!(
-            graph.vessel_sequence_iter(b(0)).collect::<Vec<_>>(),
-            vec![v(2), v(1), v(0)]
-        );
-        assert!(extract_reallocations(&diff).is_empty());
+        let mut mutator = setup();
+        mutator.reverse_segment(v(0), v(2));
+        assert_eq!(vessels_of(&mutator, 0), [v(2), v(1), v(0)]);
+        assert!(extract_reallocations(mutator.diff()).is_empty());
     }
 
     #[test]
     fn test_swap_segments_cross_berth() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-
-        {
-            let mut touched = TouchedBerths::new(graph.num_berths());
-            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-            m.swap_segments(v(0), v(1), v(3), v(3));
-        }
-
-        assert_eq!(
-            graph.vessel_sequence_iter(b(0)).collect::<Vec<_>>(),
-            vec![v(3), v(2)]
-        );
-        assert_eq!(
-            graph.vessel_sequence_iter(b(1)).collect::<Vec<_>>(),
-            vec![v(0), v(1), v(4)]
-        );
-
-        let reallocs = extract_reallocations(&diff);
+        let mut mutator = setup();
+        mutator.swap_segments(v(0), v(1), v(3), v(3));
+        assert_eq!(vessels_of(&mutator, 0), [v(3), v(2)]);
+        assert_eq!(vessels_of(&mutator, 1), [v(0), v(1), v(4)]);
+        let reallocs = extract_reallocations(mutator.diff());
         assert!(reallocs.contains(&(v(0), b(0), b(1))));
         assert!(reallocs.contains(&(v(1), b(0), b(1))));
         assert!(reallocs.contains(&(v(3), b(1), b(0))));
@@ -1230,36 +1249,14 @@ mod tests {
 
     #[test]
     fn test_relocate_segment_to_tail_empty_berth() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-
-        {
-            let mut touched = TouchedBerths::new(graph.num_berths());
-            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-            m.relocate_segment_to_tail(v(3), v(4), b(2));
-        }
-
-        assert!(graph.vessel_sequence_iter(b(1)).next().is_none());
+        let mut mutator = setup();
+        mutator.relocate_segment_to_tail(v(3), v(4), b(2));
+        assert!(vessels_of(&mutator, 1).is_empty());
+        assert_eq!(vessels_of(&mutator, 2), [v(3), v(4)]);
         assert_eq!(
-            graph.vessel_sequence_iter(b(2)).collect::<Vec<_>>(),
-            vec![v(3), v(4)]
+            extract_reallocations(mutator.diff()),
+            [(v(3), b(1), b(2)), (v(4), b(1), b(2))]
         );
-
-        let reallocs = extract_reallocations(&diff);
-        assert_eq!(reallocs, vec![(v(3), b(1), b(2)), (v(4), b(1), b(2))]);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `Mutator::new` with touched berths of 2 berths for a graph of 3"
-    )]
-    fn test_new_refuses_touched_berths_of_another_count() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(1);
-        let mut diff = ScheduleGraphDiff::new();
-        let mut touched = TouchedBerths::new(2);
-        let _ = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
     }
 
     #[test]
@@ -1267,11 +1264,7 @@ mod tests {
         expected = "called `Mutator::swap_vessels` with Vessel 5, outside a graph of 5 vessels"
     )]
     fn test_swap_vessels_refuses_a_vessel_outside_the_graph() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-        let mut touched = TouchedBerths::new(graph.num_berths());
-        Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched).swap_vessels(v(0), v(5));
+        setup().swap_vessels(v(0), v(5));
     }
 
     #[test]
@@ -1279,15 +1272,7 @@ mod tests {
         expected = "called `Mutator::relocate_segment_before` with Vessel 7, outside a graph of 5 vessels"
     )]
     fn test_relocate_segment_before_refuses_a_vessel_outside_the_graph() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-        let mut touched = TouchedBerths::new(graph.num_berths());
-        Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched).relocate_segment_before(
-            v(0),
-            v(1),
-            v(7),
-        );
+        setup().relocate_segment_before(v(0), v(1), v(7));
     }
 
     #[test]
@@ -1295,75 +1280,100 @@ mod tests {
         expected = "called `Mutator::relocate_to_tail` with Berth 3, outside a graph of 3 berths"
     )]
     fn test_relocate_to_tail_refuses_a_berth_outside_the_graph() {
-        let mut graph = setup_graph();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-        let mut touched = TouchedBerths::new(graph.num_berths());
-        Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched).relocate_to_tail(v(0), b(3));
+        setup().relocate_to_tail(v(0), b(3));
     }
 
     // V1 already stands directly before V2, and the segment [V0, V1] too: neither move changes anything, so none
     // is recorded and no berth is touched.
     #[test]
     fn test_relocating_before_the_vessel_already_followed_records_nothing() {
-        let mut graph = setup_graph();
-        let original = graph.clone();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-        let mut touched = TouchedBerths::new(graph.num_berths());
-        {
-            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-            m.relocate_before(v(1), v(2));
-            m.relocate_segment_before(v(0), v(1), v(2));
-            // SAFETY: every vessel handed over is one of the graph's.
-            unsafe {
-                m.relocate_before_unchecked(v(1), v(2));
-                m.relocate_segment_before_unchecked(v(0), v(1), v(2));
-            }
+        let mut mutator = setup();
+        mutator.relocate_before(v(1), v(2));
+        mutator.relocate_segment_before(v(0), v(1), v(2));
+        // SAFETY: every vessel handed over is one of the graph's.
+        unsafe {
+            mutator.relocate_before_unchecked(v(1), v(2));
+            mutator.relocate_segment_before_unchecked(v(0), v(1), v(2));
         }
-        assert_eq!(graph, original);
-        assert!(undo.is_empty());
-        assert_eq!(touched.iter_touched_berths().count(), 0);
+        assert_eq!(mutator.graph(), &setup_graph());
+        assert!(mutator.undo.is_empty());
+        assert_eq!(mutator.touched().iter_touched_berths().count(), 0);
     }
 
     #[test]
     fn test_relocate_segment_to_the_tail_it_already_ends_keeps_the_graph() {
-        let mut graph = setup_graph();
-        let original = graph.clone();
-        let mut undo = ScheduleGraphUndoLog::new(10);
-        let mut diff = ScheduleGraphDiff::new();
-        let mut touched = TouchedBerths::new(graph.num_berths());
-        Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched).relocate_segment_to_tail(
-            v(3),
-            v(4),
-            b(1),
-        );
-        assert_eq!(graph, original);
-        assert_eq!(diff.link_broken_count(), 0);
-        undo.apply_rollback(&mut graph);
-        assert_eq!(graph, original);
+        let mut mutator = setup();
+        mutator.relocate_segment_to_tail(v(3), v(4), b(1));
+        assert_eq!(mutator.graph(), &setup_graph());
+        assert_eq!(mutator.diff().link_broken_count(), 0);
+        mutator.rollback();
+        assert_eq!(mutator.graph(), &setup_graph());
     }
 
     #[test]
-    fn test_mutator_then_undo_rollback() {
-        let mut graph = setup_graph();
-        let original = graph.clone();
-        let mut undo = ScheduleGraphUndoLog::new(20);
-        let mut diff = ScheduleGraphDiff::new();
-        {
-            let mut touched = TouchedBerths::new(graph.num_berths());
-            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
-            m.relocate_to_head(v(0), b(2));
-            m.reverse_segment(v(3), v(4));
-            m.swap_vessels(v(1), v(3));
-        }
+    fn test_relocate_segment_to_the_head_it_already_heads_keeps_the_graph() {
+        let mut mutator = setup();
+        mutator.relocate_segment_to_head(v(0), v(1), b(0));
+        assert_eq!(mutator.graph(), &setup_graph());
+        assert_eq!(mutator.diff().link_broken_count(), 0);
+        mutator.rollback();
+        assert_eq!(mutator.graph(), &setup_graph());
+    }
 
-        assert_ne!(graph, original);
+    #[test]
+    fn test_rollback_restores_the_graph_and_unmarks_the_touched_berths() {
+        let mut mutator = setup();
+        mutator.relocate_to_head(v(0), b(2));
+        mutator.reverse_segment(v(3), v(4));
+        mutator.swap_vessels(v(1), v(3));
+        assert_ne!(mutator.graph(), &setup_graph());
+        let diff = mutator.diff().clone();
 
-        undo.apply_rollback(&mut graph);
+        mutator.rollback();
 
-        assert_eq!(graph, original);
-        assert!(undo.is_empty());
+        assert_eq!(mutator.graph(), &setup_graph());
+        assert!(mutator.undo.is_empty());
+        assert_eq!(mutator.touched().iter_touched_berths().count(), 0);
+        assert_eq!(mutator.diff(), &diff);
+    }
+
+    #[test]
+    fn test_accept_keeps_the_moves_and_forgets_how_to_undo_them() {
+        let mut mutator = setup();
+        mutator.swap_vessels(v(0), v(3));
+        let moved = mutator.graph().clone();
+        mutator.accept();
+        assert!(mutator.undo.is_empty());
+        assert_eq!(mutator.touched().iter_touched_berths().count(), 0);
+        mutator.rollback();
+        assert_eq!(mutator.graph(), &moved);
+    }
+
+    #[test]
+    fn test_overwrite_empties_the_records_and_counts_the_berths_of_the_new_graph() {
+        let mut mutator = setup();
+        mutator.swap_vessels(v(0), v(3));
+        mutator.overwrite_from_slices(&[b(0), b(1)], &[0, 0], 4);
+        assert!(mutator.undo.is_empty());
+        assert_eq!(mutator.diff(), &ScheduleGraphDiff::new());
+        assert_eq!(mutator.touched().num_berths(), 4);
+        assert_eq!(mutator.touched().iter_touched_berths().count(), 0);
+
+        mutator.swap_vessels(v(0), v(1));
+        mutator.overwrite_from_graph(&setup_graph());
+        assert!(mutator.undo.is_empty());
+        assert_eq!(mutator.touched().num_berths(), 3);
+        assert_eq!(mutator.graph(), &setup_graph());
+    }
+
+    #[test]
+    fn test_clear_diff_keeps_the_undo_log_and_the_touched_berths() {
+        let mut mutator = setup();
+        mutator.swap_vessels(v(0), v(3));
+        mutator.clear_diff();
+        assert_eq!(mutator.diff(), &ScheduleGraphDiff::new());
+        assert_eq!(mutator.undo.len(), 1);
+        assert_eq!(mutator.touched().iter_touched_berths().count(), 2);
     }
 
     /// A move of the reference test, its vessels and berths named by numbers that `Harness::apply` reads modulo
@@ -1430,18 +1440,12 @@ mod tests {
         (berth, place)
     }
 
-    /// A graph moved by a mutator through checked moves, a second by unchecked ones, and the reference: the
-    /// vessels of each berth in order, as a plain list.
+    /// A mutator moved through checked moves, a second through unchecked ones, and the reference: the vessels of
+    /// each berth in order, as a plain list.
     struct Harness {
-        checked: ScheduleGraph,
-        unchecked: ScheduleGraph,
+        checked: Mutator,
+        unchecked: Mutator,
         reference: Vec<Vec<usize>>,
-        undo: ScheduleGraphUndoLog,
-        diff: ScheduleGraphDiff,
-        touched: TouchedBerths,
-        unchecked_undo: ScheduleGraphUndoLog,
-        unchecked_diff: ScheduleGraphDiff,
-        unchecked_touched: TouchedBerths,
     }
 
     impl Harness {
@@ -1454,34 +1458,17 @@ mod tests {
                 reference[berth].push(vessel);
             }
             Self {
-                checked: graph.clone(),
-                unchecked: graph,
+                checked: Mutator::new(graph.clone()),
+                unchecked: Mutator::new(graph),
                 reference,
-                undo: ScheduleGraphUndoLog::new(0),
-                diff: ScheduleGraphDiff::new(),
-                touched: TouchedBerths::new(num_berths),
-                unchecked_undo: ScheduleGraphUndoLog::new(0),
-                unchecked_diff: ScheduleGraphDiff::new(),
-                unchecked_touched: TouchedBerths::new(num_berths),
             }
         }
 
         /// Applies `change` to the reference and to both graphs, unless it breaks a precondition of the move.
         fn apply(&mut self, change: Change) {
-            let n = self.checked.num_vessels();
-            let berths = self.checked.num_berths();
-            let mut checked = Mutator::new(
-                &mut self.checked,
-                &mut self.undo,
-                &mut self.diff,
-                &mut self.touched,
-            );
-            let mut unchecked = Mutator::new(
-                &mut self.unchecked,
-                &mut self.unchecked_undo,
-                &mut self.unchecked_diff,
-                &mut self.unchecked_touched,
-            );
+            let n = self.checked.graph().num_vessels();
+            let berths = self.checked.graph().num_berths();
+            let (checked, unchecked) = (&mut self.checked, &mut self.unchecked);
             let reference = &mut self.reference;
             match change {
                 Change::SwapVessels(a, c) => {
@@ -1672,34 +1659,35 @@ mod tests {
             changes in proptest::collection::vec(change(), 0..16),
         ) {
             let mut harness = Harness::new(&berths, num_berths);
-            let start = harness.checked.clone();
+            let start = harness.checked.graph().clone();
             let start_order = order_of(&start);
             for &change in &changes {
-                let before = order_of(&harness.checked);
-                harness.diff.clear();
-                harness.touched.reset();
+                let before = order_of(harness.checked.graph());
+                for mutator in [&mut harness.checked, &mut harness.unchecked] {
+                    mutator.clear_diff();
+                    mutator.touched.reset();
+                }
                 harness.apply(change);
-                let after = order_of(&harness.checked);
+                let after = order_of(harness.checked.graph());
                 prop_assert_eq!(&after, &harness.reference, "after {:?}", change);
-                prop_assert_eq!(&order_of(&harness.unchecked), &after, "unchecked, after {:?}", change);
+                prop_assert_eq!(&order_of(harness.unchecked.graph()), &after, "unchecked, after {:?}", change);
                 for berth in 0..num_berths {
                     if before[berth] != after[berth] {
-                        prop_assert!(harness.touched.is_touched(b(berth)), "{:?} changed berth {}", change, berth);
+                        prop_assert!(harness.checked.touched().is_touched(b(berth)), "{:?} changed berth {}", change, berth);
                     }
                 }
-                let moved: Vec<_> = harness.diff.reallocations().collect();
+                let moved: Vec<_> = harness.checked.diff().reallocations().collect();
                 for vessel in 0..berths.len() {
                     let (from, to) = (locate(&before, vessel).0, locate(&after, vessel).0);
                     let recorded = moved.iter().filter(|recorded| recorded.vessel == v(vessel)).count();
                     prop_assert_eq!(recorded, usize::from(from != to), "{:?} and vessel {}", change, vessel);
                 }
             }
-            harness.undo.apply_rollback(&mut harness.checked);
-            // SAFETY: the log holds only moves a mutator over this graph recorded.
-            unsafe { harness.unchecked_undo.apply_rollback_unchecked(&mut harness.unchecked) };
-            prop_assert_eq!(&harness.checked, &start);
-            prop_assert_eq!(&order_of(&harness.checked), &start_order);
-            prop_assert_eq!(&order_of(&harness.unchecked), &start_order);
+            harness.checked.rollback();
+            harness.unchecked.rollback();
+            prop_assert_eq!(harness.checked.graph(), &start);
+            prop_assert_eq!(&order_of(harness.checked.graph()), &start_order);
+            prop_assert_eq!(&order_of(harness.unchecked.graph()), &start_order);
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::{
     operator::lsoperator::LocalSearchOperator,
     outcome::LocalSearchOutcome,
     params::{MutableLocalSearchParams, check_initial_solution},
-    schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff, ScheduleGraphUndoLog, TouchedBerths},
+    schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff},
     stats::LocalSearchStatistics,
 };
 use std::time::Instant;
@@ -32,10 +32,9 @@ pub struct Engine<T> {
     /// partially rolled back or overwritten.
     candidate_state: ScheduleState<T>,
 
-    /// The mutable schedule graph that encodes the current and candidate states
-    /// and transitions between them as the engine explores the neighborhood. This graph is modified in-place by the
-    /// mutators and can be rolled back by using the `schedule_graph_undo_log` if a move is rejected.
-    topology_graph: ScheduleGraph,
+    /// The schedule graph of the candidate, with the records of the moves that made it from the accepted state:
+    /// how to undo them, the links and berths they changed, and the berths whose order they changed.
+    mutator: Mutator,
 
     /// **The Neighborhood Buffer**: Used during multi-move exploration (e.g., Tabu Search).
     /// Holds a potential candidate until the entire neighborhood is sampled,
@@ -51,25 +50,10 @@ pub struct Engine<T> {
     /// start of the search. This is the "return value" of the solver.
     best_state: ScheduleState<T>,
 
-    /// **Topological Rollback Stack**: A LIFO stack of inverse graph operations.
-    /// Allows the `ScheduleGraph` to revert its linked-list pointers in $O(1)$
-    /// time when a move does not meet acceptance criteria.
-    schedule_graph_undo_log: ScheduleGraphUndoLog,
-
-    /// **Structural Diff**: Records which edges were broken/created and which
-    /// vessels were reallocated between berths during a mutation. Used by the
-    /// metaheuristic for Tabu tenure tracking and aspiration criteria.
-    schedule_graph_diff: ScheduleGraphDiff,
-
     /// Saved copy of the structural diff corresponding to the `buffered_state`.
     /// Captured when a candidate is buffered and passed to `on_accept` when
     /// the buffer is committed.
     buffered_schedule_graph_diff: ScheduleGraphDiff,
-
-    /// **Dirty-Tracking Set**: A type-safe bitset or boolean mask identifying
-    /// berths modified during the current mutation. Informs the downstream
-    /// decoder exactly which timelines require recalculation.
-    touched: TouchedBerths,
 }
 
 impl<T> Engine<T> {
@@ -94,12 +78,9 @@ impl<T> Engine<T> {
             candidate_state: make_state(),
             buffered_state: make_state(),
             best_state: make_state(),
-            topology_graph,
+            mutator: Mutator::new(topology_graph),
             buffered_topology_graph,
-            schedule_graph_undo_log: ScheduleGraphUndoLog::new(1),
-            schedule_graph_diff: ScheduleGraphDiff::new(),
             buffered_schedule_graph_diff: ScheduleGraphDiff::new(),
-            touched: TouchedBerths::new(num_berths),
         }
     }
 
@@ -149,10 +130,9 @@ impl<T> Engine<T> {
         // Grow all buffers if this problem is larger than anything seen before.
         self.ensure_capacity(model.num_vessels(), model.num_berths());
 
-        // Initialise topology from the validated initial solution. The undo log may hold moves of an earlier run
-        // that ended in a panic, on a graph of other counts.
-        self.schedule_graph_undo_log.clear();
-        self.topology_graph.overwrite_from_slices(
+        // Initialise topology from the validated initial solution, which empties the records of the moves, which
+        // may hold moves of an earlier run that ended in a panic.
+        self.mutator.overwrite_from_slices(
             &params.berths.raw,
             &params.start_times.raw,
             model.num_berths(),
@@ -161,14 +141,14 @@ impl<T> Engine<T> {
         // Full-decode to populate the candidate buffer, then propagate to all states.
         // This ensures all four states start from the same decoded solution.
         debug_assert!(
-            self.topology_graph.num_vessels() == model.num_vessels()
-                && self.topology_graph.num_berths() == model.num_berths()
+            self.mutator.graph().num_vessels() == model.num_vessels()
+                && self.mutator.graph().num_berths() == model.num_berths()
         );
         // SAFETY: the graph was built from `params`, which the check at the door found to be a schedule of the
         // vessels and berths of `model`, and every state was sized for those counts by `ensure_capacity`.
         unsafe {
             decode_full_unchecked(
-                &self.topology_graph,
+                self.mutator.graph(),
                 &mut self.candidate_state,
                 model,
                 &evaluator,
@@ -179,7 +159,7 @@ impl<T> Engine<T> {
             .overwrite_from_state(&self.candidate_state);
         self.best_state.overwrite_from_state(&self.candidate_state);
         self.buffered_topology_graph
-            .overwrite_from_graph(&self.topology_graph);
+            .overwrite_from_graph(self.mutator.graph());
 
         let mut stats = LocalSearchStatistics::default();
         let start_time = Instant::now();
@@ -189,7 +169,7 @@ impl<T> Engine<T> {
         metaheuristic.on_start(
             model,
             self.accepted_state.as_solution_view(),
-            &self.topology_graph,
+            self.mutator.graph(),
         );
 
         let termination_reason;
@@ -247,19 +227,14 @@ impl<T> Engine<T> {
                 } else {
                     None
                 },
-                &self.topology_graph,
+                self.mutator.graph(),
             );
 
             'inner: loop {
-                self.schedule_graph_diff.clear();
+                self.mutator.clear_diff();
 
                 let mutated = {
-                    let mut mutator = Mutator::new(
-                        &mut self.topology_graph,
-                        &mut self.schedule_graph_undo_log,
-                        &mut self.schedule_graph_diff,
-                        &mut self.touched,
-                    );
+                    let mutator = &mut self.mutator;
                     // SAFETY: the graph in `mutator` is the one `prepare` saw, and it has the vessels and berths
                     // of `model`, as the check at the door of the run established.
                     unsafe {
@@ -272,7 +247,7 @@ impl<T> Engine<T> {
                             } else {
                                 None
                             },
-                            &mut mutator,
+                            mutator,
                             &stats,
                         )
                     }
@@ -299,7 +274,7 @@ impl<T> Engine<T> {
                             self.best_state.as_solution_view(),
                             self.accepted_state.as_solution_view(),
                             Some(self.buffered_state.as_solution_view()),
-                            &self.topology_graph,
+                            self.mutator.graph(),
                             &self.buffered_topology_graph,
                         )
                     {
@@ -315,7 +290,7 @@ impl<T> Engine<T> {
                             self.best_state.as_solution_view(),
                             self.accepted_state.as_solution_view(),
                             None,
-                            &self.topology_graph,
+                            self.mutator.graph(),
                             &self.buffered_schedule_graph_diff,
                         );
 
@@ -340,7 +315,7 @@ impl<T> Engine<T> {
                             metaheuristic.on_new_best(
                                 model,
                                 self.best_state.as_solution_view(),
-                                &self.topology_graph,
+                                self.mutator.graph(),
                                 &self.buffered_schedule_graph_diff,
                             );
                         }
@@ -356,7 +331,7 @@ impl<T> Engine<T> {
                         } else {
                             None
                         },
-                        &self.topology_graph,
+                        self.mutator.graph(),
                     );
 
                     // Ask the metaheuristic how to proceed after exhaustion.
@@ -369,7 +344,7 @@ impl<T> Engine<T> {
                         } else {
                             None
                         },
-                        &self.topology_graph,
+                        self.mutator.graph(),
                     ) {
                         NeighborhoodExhaustionOutcome::Restart => {
                             operator.reset();
@@ -385,11 +360,12 @@ impl<T> Engine<T> {
                 stats.on_iteration();
 
                 // SAFETY: the graph has the vessels and berths of `model`, as the check at the door of the run
-                // established and as every mutation keeps, and `touched` was sized for its berths.
+                // established and as every mutation keeps, and the touched berths count its berths by the
+                // invariant of `Mutator`.
                 let decode_ok = unsafe {
                     decode_unchecked(
-                        &self.touched,
-                        &self.topology_graph,
+                        self.mutator.touched(),
+                        self.mutator.graph(),
                         &mut self.candidate_state,
                         &self.accepted_state,
                         model,
@@ -422,7 +398,7 @@ impl<T> Engine<T> {
                         } else {
                             None
                         },
-                        &self.topology_graph,
+                        self.mutator.graph(),
                     );
 
                     let cmd = monitor.search_command(
@@ -469,8 +445,8 @@ impl<T> Engine<T> {
                         None
                     },
                     candidate_objective,
-                    &self.topology_graph,
-                    &self.schedule_graph_diff,
+                    self.mutator.graph(),
+                    self.mutator.diff(),
                 );
 
                 match decision {
@@ -488,8 +464,8 @@ impl<T> Engine<T> {
                             } else {
                                 None
                             },
-                            &self.topology_graph,
-                            &self.schedule_graph_diff,
+                            self.mutator.graph(),
+                            self.mutator.diff(),
                         );
                         monitor.on_candidate_accepted(
                             self.best_state.as_solution_view(),
@@ -522,8 +498,8 @@ impl<T> Engine<T> {
                             metaheuristic.on_new_best(
                                 model,
                                 self.best_state.as_solution_view(),
-                                &self.topology_graph,
-                                &self.schedule_graph_diff,
+                                self.mutator.graph(),
+                                self.mutator.diff(),
                             );
                         }
 
@@ -536,7 +512,7 @@ impl<T> Engine<T> {
                             self.best_state.as_solution_view(),
                             self.accepted_state.as_solution_view(),
                             None,
-                            &self.topology_graph,
+                            self.mutator.graph(),
                         );
 
                         let cmd = monitor.search_command(
@@ -566,7 +542,7 @@ impl<T> Engine<T> {
 
                         // Roll back the topology graph so the next mutation
                         // starts from the accepted state.
-                        self.rollback();
+                        self.mutator.rollback();
 
                         metaheuristic.on_iteration(
                             stats.iterations,
@@ -574,7 +550,7 @@ impl<T> Engine<T> {
                             self.best_state.as_solution_view(),
                             self.accepted_state.as_solution_view(),
                             Some(self.buffered_state.as_solution_view()),
-                            &self.topology_graph,
+                            self.mutator.graph(),
                         );
 
                         let cmd = monitor.search_command(
@@ -604,8 +580,8 @@ impl<T> Engine<T> {
                                 None
                             },
                             candidate_objective,
-                            &self.topology_graph,
-                            &self.schedule_graph_diff,
+                            self.mutator.graph(),
+                            self.mutator.diff(),
                         );
                         monitor.on_candidate_rejected(
                             self.best_state.as_solution_view(),
@@ -631,7 +607,7 @@ impl<T> Engine<T> {
                             } else {
                                 None
                             },
-                            &self.topology_graph,
+                            self.mutator.graph(),
                         );
 
                         let cmd = monitor.search_command(
@@ -661,7 +637,7 @@ impl<T> Engine<T> {
         metaheuristic.on_end(
             model,
             self.best_state.as_solution_view(),
-            &self.topology_graph,
+            self.mutator.graph(),
         );
 
         let solution = Solution::from(self.best_state.as_solution_view());
@@ -687,30 +663,17 @@ impl<T> Engine<T> {
         unsafe {
             self.accepted_state.patch_from_delta_unchecked(
                 &self.candidate_state,
-                &self.touched,
-                &self.topology_graph,
+                self.mutator.touched(),
+                self.mutator.graph(),
             );
         }
-        self.schedule_graph_undo_log.clear();
-        self.touched.reset();
+        self.mutator.accept();
     }
 
     /// Rejects the current candidate and restores the graph to its previous state.
     #[inline(always)]
     fn reject_candidate(&mut self) {
-        self.rollback();
-        self.touched.reset();
-    }
-
-    /// Undoes on the topology graph every move recorded since the accepted state.
-    #[inline(always)]
-    fn rollback(&mut self) {
-        // SAFETY: the undo log holds only moves that a mutator over the topology graph recorded since the run
-        // emptied it, while the graph's counts stayed those of the run's model.
-        unsafe {
-            self.schedule_graph_undo_log
-                .apply_rollback_unchecked(&mut self.topology_graph)
-        };
+        self.mutator.rollback();
     }
 
     /// Saves the current candidate to the buffer for later comparison.
@@ -723,21 +686,19 @@ impl<T> Engine<T> {
         T: SolverNumeric,
     {
         self.buffered_topology_graph
-            .overwrite_from_graph(&self.topology_graph);
+            .overwrite_from_graph(self.mutator.graph());
         self.buffered_schedule_graph_diff
-            .overwrite_from_graph_diff(&self.schedule_graph_diff);
+            .overwrite_from_graph_diff(self.mutator.diff());
         self.buffered_state
             .overwrite_from_state(&self.accepted_state);
 
         unsafe {
             self.buffered_state.patch_from_delta_unchecked(
                 &self.candidate_state,
-                &self.touched,
-                &self.topology_graph,
+                self.mutator.touched(),
+                self.mutator.graph(),
             );
         }
-
-        self.touched.reset();
     }
 
     /// Commits the buffered state, making it the new accepted state.
@@ -748,10 +709,8 @@ impl<T> Engine<T> {
     {
         self.accepted_state
             .overwrite_from_state(&self.buffered_state);
-        self.topology_graph
+        self.mutator
             .overwrite_from_graph(&self.buffered_topology_graph);
-        self.schedule_graph_undo_log.clear();
-        self.touched.reset();
     }
 
     /// Ensures all internal buffers and data structures are large enough to handle
@@ -770,10 +729,9 @@ impl<T> Engine<T> {
         self.candidate_state.resize(num_vessels, num_berths);
         self.buffered_state.resize(num_vessels, num_berths);
         self.best_state.resize(num_vessels, num_berths);
-        self.touched.resize(num_berths);
 
-        // topology_graph and buffered_topology_graph are handled by
-        // overwrite_from_slices / overwrite_from_graph which grow internally.
+        // The mutator's graph and records, and the buffered graph, are sized by `overwrite_from_slices` and
+        // `overwrite_from_graph`, which grow them as needed.
     }
 }
 
@@ -997,7 +955,7 @@ mod tests {
             _best: SolutionView<'_, i64>,
             _accepted: SolutionView<'_, i64>,
             _buffered: Option<SolutionView<'_, i64>>,
-            mutator: &mut Mutator<'_>,
+            mutator: &mut Mutator,
             _stats: &LocalSearchStatistics,
         ) -> bool {
             if self.cursor >= self.max_moves {
@@ -1948,7 +1906,7 @@ mod tests {
             _best: SolutionView<'_, i64>,
             _accepted: SolutionView<'_, i64>,
             _buffered: Option<SolutionView<'_, i64>>,
-            mutator: &mut Mutator<'_>,
+            mutator: &mut Mutator,
             _stats: &LocalSearchStatistics,
         ) -> bool {
             if self.cursor >= self.max_moves || self.num_vessels < 2 {
