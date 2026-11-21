@@ -465,7 +465,7 @@ impl ScheduleGraph {
     /// Returns the total number of nodes in the arena, including both vessels and sentinels.
     #[inline(always)]
     pub fn num_nodes(&self) -> usize {
-        self.arena.num_nodes()
+        self.arena.len()
     }
 
     /// Returns the raw node representing the boundary before the first vessel of a berth.
