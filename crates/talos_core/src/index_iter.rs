@@ -3,11 +3,11 @@
 
 //! The walk over every id of one kind.
 
+use crate::index::{TypedIndex, TypedIndexTag};
 use derive_where::derive_where;
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
 use std::ops::Range;
-use talos_core::{TypedIndex, TypedIndexTag};
 
 /// The ids of one kind from the first up to a count, in increasing order.
 ///

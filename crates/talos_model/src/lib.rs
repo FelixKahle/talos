@@ -16,7 +16,6 @@
 
 mod assignment;
 mod index;
-mod index_iter;
 mod infeasibility;
 mod model;
 mod solution;
@@ -25,7 +24,6 @@ pub use assignment::Assignment;
 pub use index::{
     BerthIndex, BerthIndexIter, BerthIndexTag, VesselIndex, VesselIndexIter, VesselIndexTag,
 };
-pub use index_iter::TypedIndexIter;
 pub use infeasibility::Infeasibility;
 pub use model::{Model, ModelError};
 pub use solution::{Solution, SolutionIter, SolutionLengthMismatch, SolutionView};
