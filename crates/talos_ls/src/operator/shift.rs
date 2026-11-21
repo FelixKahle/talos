@@ -112,11 +112,18 @@ impl IntraBerthShiftOperator {
             if !same_berth || already_there {
                 continue;
             }
+            debug_assert!(
+                vessel.index() < model.num_vessels() && anchor.index() < model.num_vessels()
+            );
             // SAFETY: both vessels are the graph's, whose vessels are the model's, the precondition of this
             // function.
             if unsafe { intra_berth_shift_filter_unchecked(vessel, anchor, model) } {
-                debug_assert!(vessel.index() < mutator.graph().num_vessels());
-                // SAFETY: both vessels are the graph's, as above.
+                debug_assert!(
+                    vessel.index() < mutator.graph().num_vessels()
+                        && anchor.index() < mutator.graph().num_vessels()
+                );
+                // SAFETY: the placements count the vessels of the graph, the precondition of this function, so both
+                // vessels are the graph's.
                 unsafe { mutator.relocate_after_unchecked(vessel, anchor) };
                 return true;
             }
@@ -175,11 +182,19 @@ impl InterBerthShiftOperator {
             if !other_berth {
                 continue;
             }
+            debug_assert!(
+                graph.num_vessels() == model.num_vessels()
+                    && graph.num_berths() == model.num_berths()
+            );
             // SAFETY: both vessels are the graph's, which has the vessels and berths of the model, the
             // precondition of this function.
             if unsafe { inter_berth_shift_filter_unchecked(vessel, anchor, graph, model) } {
-                debug_assert!(vessel.index() < mutator.graph().num_vessels());
-                // SAFETY: both vessels are the graph's, as above.
+                debug_assert!(
+                    vessel.index() < mutator.graph().num_vessels()
+                        && anchor.index() < mutator.graph().num_vessels()
+                );
+                // SAFETY: the placements count the vessels of the graph, the precondition of this function, so both
+                // vessels are the graph's.
                 unsafe { mutator.relocate_after_unchecked(vessel, anchor) };
                 return true;
             }

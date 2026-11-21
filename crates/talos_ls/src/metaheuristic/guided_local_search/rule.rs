@@ -191,6 +191,7 @@ where
         if !candidate.is_finite() || !accepted.is_finite() {
             return AcceptanceOutcome::Reject;
         }
+        debug_assert!(self.memory.covers(diff));
         // SAFETY: the diff names only vessels and berths of the graph the run searches, which the memory counts
         // from the start of the run on, the precondition of this function.
         let candidate_penalty_sum =
@@ -211,6 +212,7 @@ where
         graph: &ScheduleGraph,
         diff: &ScheduleGraphDiff,
     ) {
+        debug_assert!(self.memory.covers(diff));
         // SAFETY: the diff names only vessels and berths of the graph the run searches, which the memory counts
         // from the start of the run on, the precondition of this function.
         self.penalty_sum += unsafe { self.memory.penalty_delta_unchecked(diff) };

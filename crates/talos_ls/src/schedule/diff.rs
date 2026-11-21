@@ -254,11 +254,39 @@ impl ScheduleGraphDiff {
             to: self.reallocated_to.iter(),
         }
     }
+
+    /// Whether every vessel the records name is below `num_vessels` and every berth below `num_berths`: the
+    /// condition of every unchecked read through them. It costs one pass over the records.
+    pub fn names_only_ids_below(&self, num_vessels: usize, num_berths: usize) -> bool {
+        let end_below = |end: LinkEnd| match end {
+            LinkEnd::Vessel(vessel) => vessel.index() < num_vessels,
+            LinkEnd::Berth(berth) => berth.index() < num_berths,
+        };
+        let links_below = self
+            .broken_links()
+            .chain(self.created_links())
+            .all(|link| end_below(link.from) && end_below(link.to));
+        let reallocations_below = self.reallocations().all(|moved| {
+            moved.vessel.index() < num_vessels
+                && moved.from.index() < num_berths
+                && moved.to.index() < num_berths
+        });
+        links_below && reallocations_below
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_names_only_ids_below_checks_every_vessel_and_berth_of_the_records() {
+        let diff = recorded();
+        assert!(diff.names_only_ids_below(3, 2));
+        assert!(!diff.names_only_ids_below(2, 2));
+        assert!(!diff.names_only_ids_below(3, 1));
+        assert!(ScheduleGraphDiff::new().names_only_ids_below(0, 0));
+    }
 
     fn vessel(index: usize) -> LinkEnd {
         LinkEnd::Vessel(VesselIndex::new(index))

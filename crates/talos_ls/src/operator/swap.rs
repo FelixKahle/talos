@@ -91,7 +91,7 @@ impl IntraBerthSwapOperator {
         for (first, second) in &mut self.pairs {
             let graph = mutator.graph();
             debug_assert!(
-                second.index() < graph.num_vessels(),
+                first.index() < graph.num_vessels() && second.index() < graph.num_vessels(),
                 "called `IntraBerthSwapOperator::next_neighbor_unchecked` with a graph of fewer vessels than \
                  prepared for"
             );
@@ -103,11 +103,18 @@ impl IntraBerthSwapOperator {
             if !same_berth {
                 continue;
             }
+            debug_assert!(
+                first.index() < model.num_vessels() && second.index() < model.num_vessels()
+            );
             // SAFETY: both vessels are the graph's, whose vessels are the model's, the precondition of this
             // function.
             if unsafe { intra_berth_swap_filter_unchecked(first, second, model) } {
-                debug_assert!(second.index() < mutator.graph().num_vessels());
-                // SAFETY: both vessels are the graph's, as above.
+                debug_assert!(
+                    first.index() < mutator.graph().num_vessels()
+                        && second.index() < mutator.graph().num_vessels()
+                );
+                // SAFETY: the pairs count the vessels of the graph, the precondition of this function, so both
+                // vessels are the graph's.
                 unsafe { mutator.swap_vessels_unchecked(first, second) };
                 return true;
             }
@@ -154,7 +161,7 @@ impl InterBerthSwapOperator {
         for (first, second) in &mut self.pairs {
             let graph = mutator.graph();
             debug_assert!(
-                second.index() < graph.num_vessels(),
+                first.index() < graph.num_vessels() && second.index() < graph.num_vessels(),
                 "called `InterBerthSwapOperator::next_neighbor_unchecked` with a graph of fewer vessels than \
                  prepared for"
             );
@@ -166,11 +173,19 @@ impl InterBerthSwapOperator {
             if !other_berth {
                 continue;
             }
+            debug_assert!(
+                graph.num_vessels() == model.num_vessels()
+                    && graph.num_berths() == model.num_berths()
+            );
             // SAFETY: both vessels are the graph's, which has the vessels and berths of the model, the
             // precondition of this function.
             if unsafe { inter_berth_swap_filter_unchecked(first, second, graph, model) } {
-                debug_assert!(second.index() < mutator.graph().num_vessels());
-                // SAFETY: both vessels are the graph's, as above.
+                debug_assert!(
+                    first.index() < mutator.graph().num_vessels()
+                        && second.index() < mutator.graph().num_vessels()
+                );
+                // SAFETY: the pairs count the vessels of the graph, the precondition of this function, so both
+                // vessels are the graph's.
                 unsafe { mutator.swap_vessels_unchecked(first, second) };
                 return true;
             }

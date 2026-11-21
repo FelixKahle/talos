@@ -217,6 +217,17 @@ where
     /// Panics unless every state and graph of the engine counts the vessels and berths of `model`, the condition
     /// every unchecked read of a run rests on; it costs constant time.
     fn assert_loaded_for(&self, model: &Model<T>) {
+        assert!(
+            self.is_loaded_for(model),
+            "the engine should be loaded for a model of {} vessels and {} berths",
+            model.num_vessels(),
+            model.num_berths()
+        );
+    }
+
+    /// Whether every state and graph of the engine, and the touched berths, count the vessels and berths of
+    /// `model`; it costs constant time.
+    fn is_loaded_for(&self, model: &Model<T>) -> bool {
         let (num_vessels, num_berths) = (model.num_vessels(), model.num_berths());
         let states_fit = [&self.accepted, &self.candidate, &self.buffered, &self.best]
             .iter()
@@ -224,10 +235,13 @@ where
         let graphs_fit = [self.mutator.graph(), &self.buffered_graph]
             .iter()
             .all(|graph| graph.num_vessels() == num_vessels && graph.num_berths() == num_berths);
-        assert!(
-            states_fit && graphs_fit && self.mutator.touched().num_berths() == num_berths,
-            "the engine should be loaded for a model of {num_vessels} vessels and {num_berths} berths"
-        );
+        states_fit && graphs_fit && self.mutator.touched().num_berths() == num_berths
+    }
+
+    /// Whether `diff` names only vessels and berths of the graph of the run.
+    fn names_only_ids_of_the_run(&self, diff: &ScheduleGraphDiff) -> bool {
+        let graph = self.mutator.graph();
+        diff.names_only_ids_below(graph.num_vessels(), graph.num_berths())
     }
 
     /// Runs the search from the loaded schedule with the cost `V`, the rule `rule` and the operator `operator`.
@@ -463,10 +477,7 @@ where
         let solutions_at_start = self.statistics.total_solutions;
         loop {
             self.engine.mutator.clear_diff();
-            debug_assert_eq!(
-                self.engine.mutator.graph().num_vessels(),
-                self.model.num_vessels()
-            );
+            debug_assert!(self.engine.is_loaded_for(self.model));
             // SAFETY: the graph counts the vessels the operator was prepared for and has the vessels and berths of
             // the model, as checked when the run started (`Engine::assert_loaded_for`); no move changes a count.
             if !unsafe {
@@ -526,7 +537,12 @@ where
         self.statistics.accepted_solutions += 1;
         self.operator
             .on_accepted(AcceptedMove::KeptAside, self.engine.accepted.objective());
-        // SAFETY: the buffered diff records moves on the graph of the run, the graph `on_start` was given.
+        debug_assert!(
+            self.engine
+                .names_only_ids_of_the_run(&self.engine.buffered_diff)
+        );
+        // SAFETY: the buffered diff records moves on the graph of the run, which has the counts of the graph
+        // `on_start` was given (`Engine::assert_loaded_for`; no move changes a count).
         unsafe {
             self.rule.on_accept_unchecked(
                 self.engine.accepted.objective(),
@@ -554,10 +570,7 @@ where
     fn step(&mut self) -> StepEnd {
         self.statistics.iterations += 1;
         let engine = &mut *self.engine;
-        debug_assert_eq!(
-            engine.mutator.touched().num_berths(),
-            self.model.num_berths()
-        );
+        debug_assert!(engine.is_loaded_for(self.model));
         // SAFETY: the touched berths, the graph, the states and the model count the same vessels and berths, as
         // checked when the run started (`Engine::assert_loaded_for`); no step of a run changes a count.
         let feasible = unsafe {
@@ -580,7 +593,12 @@ where
             Buffer::Holding => Some(self.engine.buffered.objective()),
             Buffer::Empty => None,
         };
-        // SAFETY: the diff records moves on the graph of the run, the graph `on_start` was given.
+        debug_assert!(
+            self.engine
+                .names_only_ids_of_the_run(self.engine.mutator.diff())
+        );
+        // SAFETY: the diff records moves on the graph of the run, which has the counts of the graph `on_start` was
+        // given (`Engine::assert_loaded_for`; no move changes a count).
         let outcome = unsafe {
             self.rule.decide_unchecked(
                 self.engine.accepted.objective(),
@@ -609,7 +627,12 @@ where
         self.statistics.accepted_solutions += 1;
         self.operator
             .on_accepted(AcceptedMove::Last, self.engine.accepted.objective());
-        // SAFETY: the diff records moves on the graph of the run, the graph `on_start` was given.
+        debug_assert!(
+            self.engine
+                .names_only_ids_of_the_run(self.engine.mutator.diff())
+        );
+        // SAFETY: the diff records moves on the graph of the run, which has the counts of the graph `on_start` was
+        // given (`Engine::assert_loaded_for`; no move changes a count).
         unsafe {
             self.rule.on_accept_unchecked(
                 self.engine.accepted.objective(),

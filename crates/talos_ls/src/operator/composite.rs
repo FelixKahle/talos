@@ -224,6 +224,10 @@ impl RoundRobin {
             debug_assert!(self.current < scans.len());
             // SAFETY: `current` is below the length of `scans`, as the loop condition found.
             let scan = unsafe { scans.get_unchecked_mut(self.current) };
+            debug_assert!(
+                mutator.graph().num_vessels() == model.num_vessels()
+                    && mutator.graph().num_berths() == model.num_berths()
+            );
             // SAFETY: the graph is as every scan needs it, the precondition of this function.
             if unsafe { scan.next_neighbor_unchecked(model, mutator) } {
                 return true;
@@ -267,6 +271,10 @@ impl RandomSelection {
             // SAFETY: `index` starts at `current`, below the length of `scans` by the precondition of this
             // function, and steps in circular order below it.
             let scan = unsafe { scans.get_unchecked_mut(index) };
+            debug_assert!(
+                mutator.graph().num_vessels() == model.num_vessels()
+                    && mutator.graph().num_berths() == model.num_berths()
+            );
             // SAFETY: the graph is as every scan needs it, the precondition of this function.
             if unsafe { scan.next_neighbor_unchecked(model, mutator) } {
                 self.current = index;
@@ -415,13 +423,18 @@ impl Bandit {
             // SAFETY: the active rank is below the length of the ranking, which has one entry per scan, the
             // precondition of this function.
             let neighborhood = unsafe { *self.ranking.get_unchecked(self.active_rank) };
-            debug_assert!(neighborhood < scans.len() && neighborhood < self.samples.len());
+            debug_assert!(neighborhood < scans.len());
             // SAFETY: every index of the ranking is below the length of `scans`, the precondition of this
             // function.
             let scan = unsafe { scans.get_unchecked_mut(neighborhood) };
+            debug_assert!(
+                mutator.graph().num_vessels() == model.num_vessels()
+                    && mutator.graph().num_berths() == model.num_berths()
+            );
             // SAFETY: the graph is as every scan needs it, the precondition of this function.
             if unsafe { scan.next_neighbor_unchecked(model, mutator) } {
                 self.total_samples += 1;
+                debug_assert!(neighborhood < self.samples.len());
                 // SAFETY: the samples have one entry per scan, by the invariant of `CompoundOperator`.
                 unsafe { *self.samples.get_unchecked_mut(neighborhood) += 1 };
                 return true;

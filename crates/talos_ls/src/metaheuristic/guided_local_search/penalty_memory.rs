@@ -161,6 +161,21 @@ impl PenaltyMemory {
         vessel.index() * self.num_berths + berth.index()
     }
 
+    /// Whether the index of `feature` is below the length of its table, the condition of
+    /// [`count_unchecked`](Self::count_unchecked).
+    fn holds(&self, feature: Feature) -> bool {
+        match feature {
+            Feature::Link(index) => index < self.links.len(),
+            Feature::Assignment(index) => index < self.assignments.len(),
+        }
+    }
+
+    /// Whether every vessel and berth `diff` names is the memory's, the condition of
+    /// [`penalty_delta_unchecked`](Self::penalty_delta_unchecked); it costs one pass over the diff.
+    pub(super) fn covers(&self, diff: &ScheduleGraphDiff) -> bool {
+        diff.names_only_ids_below(self.num_vessels, self.num_berths)
+    }
+
     /// The count of the feature at `feature`.
     ///
     /// # Safety
@@ -170,12 +185,20 @@ impl PenaltyMemory {
     unsafe fn count_unchecked(&self, feature: Feature) -> u64 {
         match feature {
             Feature::Link(index) => {
-                debug_assert!(index < self.links.len());
+                debug_assert!(
+                    index < self.links.len(),
+                    "called `PenaltyMemory::count_unchecked` with link {index}, outside a table of {}",
+                    self.links.len()
+                );
                 // SAFETY: the index is below the length of the table of links, the precondition of this function.
                 unsafe { *self.links.get_unchecked(index) }
             }
             Feature::Assignment(index) => {
-                debug_assert!(index < self.assignments.len());
+                debug_assert!(
+                    index < self.assignments.len(),
+                    "called `PenaltyMemory::count_unchecked` with assignment {index}, outside a table of {}",
+                    self.assignments.len()
+                );
                 // SAFETY: the index is below the length of the table of assignments, the precondition of this
                 // function.
                 unsafe { *self.assignments.get_unchecked(index) }
@@ -263,29 +286,35 @@ impl PenaltyMemory {
     ///
     /// Every vessel and berth `diff` names must be the memory's.
     pub(super) unsafe fn penalty_delta_unchecked(&self, diff: &ScheduleGraphDiff) -> i64 {
+        debug_assert!(
+            self.covers(diff),
+            "called `PenaltyMemory::penalty_delta_unchecked` with a diff that names an id outside the memory"
+        );
         let mut delta: i64 = 0;
         for link in diff.broken_links() {
-            let index = link_index(link.from, link.to, self.num_vessels);
+            let feature = Feature::Link(link_index(link.from, link.to, self.num_vessels));
+            debug_assert!(self.holds(feature));
             // SAFETY: both ends are boundaries or vessels of the memory, the precondition of this function, so
             // the index is below `(num_vessels + 1)^2`, the length of the table of links.
-            delta -= signed(unsafe { self.count_unchecked(Feature::Link(index)) });
+            delta -= signed(unsafe { self.count_unchecked(feature) });
         }
         for link in diff.created_links() {
-            let index = link_index(link.from, link.to, self.num_vessels);
-            // SAFETY: as for the broken links.
-            delta += signed(unsafe { self.count_unchecked(Feature::Link(index)) });
+            let feature = Feature::Link(link_index(link.from, link.to, self.num_vessels));
+            debug_assert!(self.holds(feature));
+            // SAFETY: both ends are boundaries or vessels of the memory, the precondition of this function, so
+            // the index is below `(num_vessels + 1)^2`, the length of the table of links.
+            delta += signed(unsafe { self.count_unchecked(feature) });
         }
         for reallocation in diff.reallocations() {
-            let left = self.assignment_index(reallocation.vessel, reallocation.from);
-            let reached = self.assignment_index(reallocation.vessel, reallocation.to);
+            let left =
+                Feature::Assignment(self.assignment_index(reallocation.vessel, reallocation.from));
+            let reached =
+                Feature::Assignment(self.assignment_index(reallocation.vessel, reallocation.to));
+            debug_assert!(self.holds(left) && self.holds(reached));
             // SAFETY: the vessel and both berths are the memory's, the precondition of this function, so both
             // indices are below `num_vessels * num_berths`, the length of the table of assignments.
-            let (left, reached) = unsafe {
-                (
-                    self.count_unchecked(Feature::Assignment(left)),
-                    self.count_unchecked(Feature::Assignment(reached)),
-                )
-            };
+            let (left, reached) =
+                unsafe { (self.count_unchecked(left), self.count_unchecked(reached)) };
             delta += signed(reached) - signed(left);
         }
         delta
@@ -303,18 +332,21 @@ impl PenaltyMemory {
             let ends = graph.berth_topology_iter(berth);
             for (from, to) in ends.clone().zip(ends.skip(1)) {
                 if is_feature(from, to) {
-                    let index = link_index(from, to, self.num_vessels);
+                    let feature = Feature::Link(link_index(from, to, self.num_vessels));
+                    debug_assert!(self.holds(feature));
                     // SAFETY: both ends are boundaries or vessels of the graph, which counts the memory's
                     // vessels, as checked above.
-                    sum += signed(unsafe { self.count_unchecked(Feature::Link(index)) });
+                    sum += signed(unsafe { self.count_unchecked(feature) });
                 }
             }
         }
         for vessel in graph.vessels() {
-            let index = self.assignment_index(vessel, graph.vessel_berth(vessel));
+            let feature =
+                Feature::Assignment(self.assignment_index(vessel, graph.vessel_berth(vessel)));
+            debug_assert!(self.holds(feature));
             // SAFETY: the vessel and its berth are the graph's, which counts the memory's vessels and berths, as
             // checked above.
-            sum += signed(unsafe { self.count_unchecked(Feature::Assignment(index)) });
+            sum += signed(unsafe { self.count_unchecked(feature) });
         }
         sum
     }
@@ -346,6 +378,7 @@ impl PenaltyMemory {
             for (from, to) in ends.clone().zip(ends.skip(1)) {
                 if is_feature(from, to) {
                     let feature = Feature::Link(link_index(from, to, self.num_vessels));
+                    debug_assert!(self.holds(feature));
                     // SAFETY: both ends are boundaries or vessels of the graph, which counts the memory's
                     // vessels, as checked above.
                     consider(feature, unsafe { self.count_unchecked(feature) });
@@ -353,6 +386,7 @@ impl PenaltyMemory {
             }
             for vessel in graph.vessel_sequence_iter(berth) {
                 let feature = Feature::Assignment(self.assignment_index(vessel, berth));
+                debug_assert!(self.holds(feature));
                 // SAFETY: the vessel and the berth are the graph's, which counts the memory's vessels and berths,
                 // as checked above.
                 consider(feature, unsafe { self.count_unchecked(feature) });
