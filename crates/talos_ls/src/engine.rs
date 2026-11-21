@@ -9,7 +9,7 @@ use crate::{
     mutator::Mutator,
     operator::lsoperator::LocalSearchOperator,
     outcome::LocalSearchOutcome,
-    params::MutableLocalSearchParams,
+    params::{MutableLocalSearchParams, check_initial_solution},
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
     sgraphundo::ScheduleGraphUndoLog,
     state::ScheduleState,
@@ -126,6 +126,14 @@ impl<T> Engine<T> {
     /// during decoding.
     ///
     /// Returns the best solution found, the termination reason, and statistics.
+    ///
+    /// Every vessel and berth of the graph the run builds from `params` is one of `params.model`, as the check at
+    /// its door establishes; the run's unchecked reads, and the operator's, rest on that.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `params.berths` and `params.start_times` are not a schedule of the vessels and berths of
+    /// `params.model`, as [`check_initial_solution`] refuses it, or if the initial solution cannot be decoded.
     pub fn run<H, O, M, F, C>(
         &mut self,
         params: MutableLocalSearchParams<'_, T, H, O, M>,
@@ -140,6 +148,11 @@ impl<T> Engine<T> {
         F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
         C: FnMut(SolutionView<'_, T>),
     {
+        if let Err(error) = check_initial_solution(params.model, params.berths, params.start_times)
+        {
+            panic!("called `Engine::run` with {error}");
+        }
+
         let model = params.model;
         let operator = params.operator;
         let metaheuristic = params.metaheuristic;
@@ -157,6 +170,12 @@ impl<T> Engine<T> {
 
         // Full-decode to populate the candidate buffer, then propagate to all states.
         // This ensures all four states start from the same decoded solution.
+        debug_assert!(
+            self.topology_graph.num_vessels() == model.num_vessels()
+                && self.topology_graph.num_berths() == model.num_berths()
+        );
+        // SAFETY: the graph was built from `params`, which the check at the door found to be a schedule of the
+        // vessels and berths of `model`, and every state was sized for those counts by `ensure_capacity`.
         unsafe {
             decode_full_unchecked(
                 &self.topology_graph,
@@ -251,6 +270,8 @@ impl<T> Engine<T> {
                         &mut self.schedule_graph_diff,
                         &mut self.touched,
                     );
+                    // SAFETY: the graph in `mutator` is the one `prepare` saw, and it has the vessels and berths
+                    // of `model`, as the check at the door of the run established.
                     unsafe {
                         operator.next_neighbor(
                             model,
@@ -373,6 +394,8 @@ impl<T> Engine<T> {
 
                 stats.on_iteration();
 
+                // SAFETY: the graph has the vessels and berths of `model`, as the check at the door of the run
+                // established and as every mutation keeps, and `touched` was sized for its berths.
                 let decode_ok = unsafe {
                     decode_unchecked(
                         &self.touched,
@@ -1574,6 +1597,57 @@ mod tests {
 
         let mut engine = Engine::<i64>::new(2, 2);
         engine.run(params, mock_evaluator, |_| {})
+    }
+
+    // A schedule of three vessels for a model of two would build a graph whose third vessel every unchecked read
+    // of the model takes for one of its own; the run must refuse it at its door, in every build.
+    #[test]
+    #[should_panic(
+        expected = "called `Engine::run` with vessel count mismatch: model has 2, but initial solution has 3"
+    )]
+    fn test_engine_run_refuses_a_schedule_of_more_vessels_than_the_model() {
+        let model = build_test_model();
+        let berths = [BerthIndex::new(0); 3];
+        let start_times = [0_i64, 5, 15];
+        let params = MutableLocalSearchParams {
+            model: &model,
+            operator: &mut MockOperator::new(1),
+            metaheuristic: &mut AcceptAllMetaheuristic::new(1),
+            monitor: MockMonitor::default(),
+            berths: &berths,
+            start_times: &start_times,
+            objective_value: 0,
+        };
+        let _ = Engine::<i64>::new(3, 2).run(params, mock_evaluator, |_| {});
+    }
+
+    #[test]
+    fn test_engine_run_refuses_a_berth_beyond_the_model() {
+        let model = build_test_model();
+        let berths = [BerthIndex::new(0), BerthIndex::new(2)];
+        let start_times = [0_i64, 5];
+        let params = MutableLocalSearchParams {
+            model: &model,
+            operator: &mut MockOperator::new(1),
+            metaheuristic: &mut AcceptAllMetaheuristic::new(1),
+            monitor: MockMonitor::default(),
+            berths: &berths,
+            start_times: &start_times,
+            objective_value: 0,
+        };
+        let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Engine::<i64>::new(2, 2).run(params, mock_evaluator, |_| {})
+        }))
+        .expect_err("a berth beyond the model should be refused");
+        let message = refusal
+            .downcast_ref::<String>()
+            .expect("the refusal should carry a formatted message");
+        assert!(
+            message.starts_with(
+                "called `Engine::run` with initial solution contains an out-of-bounds berth"
+            ),
+            "unexpected refusal: {message}"
+        );
     }
 
     #[test]

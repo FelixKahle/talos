@@ -197,29 +197,39 @@ fn evaluator(
     berth: BerthIndex,
     start: i64,
 ) -> Option<i64> {
+    // SAFETY: the engine calls its evaluator only while decoding, with a vessel of its graph and that vessel's
+    // berth, which are of `model`, as the check at the door of `Engine::run` established.
     unsafe { calculate_weighted_turnaround_time_unchecked(model, vessel, berth, start) }
 }
 
 fn build_full_operator() -> RoundRobinCompoundOperator<'static, i64> {
     let ops: Vec<Box<dyn LocalSearchOperator<i64>>> = vec![
         Box::new(IntraBerthSwapOperator::new(
-            |v_a, v_b, sol, graph, model| unsafe {
-                intra_berth_swap_filter_unchecked(v_a, v_b, sol, graph, model)
+            |v_a, v_b, sol, graph, model| {
+                // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
+                // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
+                unsafe { intra_berth_swap_filter_unchecked(v_a, v_b, sol, graph, model) }
             },
         )),
         Box::new(InterBerthSwapOperator::new(
-            |v_a, v_b, sol, graph, model| unsafe {
-                inter_berth_swap_filter_unchecked(v_a, v_b, sol, graph, model)
+            |v_a, v_b, sol, graph, model| {
+                // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
+                // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
+                unsafe { inter_berth_swap_filter_unchecked(v_a, v_b, sol, graph, model) }
             },
         )),
         Box::new(IntraBerthShiftOperator::new(
-            |v, anchor, sol, graph, model| unsafe {
-                intra_berth_shift_filter_unchecked(v, anchor, sol, graph, model)
+            |v, anchor, sol, graph, model| {
+                // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
+                // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
+                unsafe { intra_berth_shift_filter_unchecked(v, anchor, sol, graph, model) }
             },
         )),
         Box::new(InterBerthShiftOperator::new(
-            |v, anchor, sol, graph, model| unsafe {
-                inter_berth_shift_filter_unchecked(v, anchor, sol, graph, model)
+            |v, anchor, sol, graph, model| {
+                // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
+                // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
+                unsafe { inter_berth_shift_filter_unchecked(v, anchor, sol, graph, model) }
             },
         )),
     ];

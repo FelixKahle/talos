@@ -34,6 +34,10 @@ where
         + Send
         + Sync,
 {
+    /// The operator that proposes only the moves `filter` lets through.
+    ///
+    /// `filter` is called only from `next_neighbor`, with two vessels of the mutator's graph, and so under the
+    /// conditions of its `# Safety`: the graph has the vessels and the berths of the model it is handed.
     pub fn new(filter: F) -> Self {
         Self {
             filter,
@@ -139,6 +143,10 @@ where
         + Send
         + Sync,
 {
+    /// The operator that proposes only the moves `filter` lets through.
+    ///
+    /// `filter` is called only from `next_neighbor`, with two vessels of the mutator's graph, and so under the
+    /// conditions of its `# Safety`: the graph has the vessels and the berths of the model it is handed.
     pub fn new(filter: F) -> Self {
         Self {
             filter,

@@ -156,6 +156,78 @@ impl std::error::Error for LocalSearchParamsError {
 }
 
 // ----------------------------------------------------------------
+// Initial solution check
+// ----------------------------------------------------------------
+
+/// Refuses an initial solution that is not a schedule of the vessels and berths of `model`.
+///
+/// The solution is accepted exactly when it holds one berth and one start time per vessel of `model`, and every
+/// berth is a berth of `model` that its vessel may use. A run of the engine builds its graph from these tables and
+/// reads the model unchecked through every vessel and berth of that graph, so it calls this at its door, in every
+/// build; it costs one pass over the berths.
+///
+/// # Errors
+///
+/// The `LocalSearchParamsError` of the first condition broken, in the order stated.
+pub fn check_initial_solution<T>(
+    model: &Model<T>,
+    berths: &[BerthIndex],
+    start_times: &[T],
+) -> Result<(), LocalSearchParamsError>
+where
+    T: SolverNumeric,
+{
+    let model_vessels = model.num_vessels();
+    let solution_vessels = berths.len();
+
+    // Check Model vs Solution bounds
+    if model_vessels != solution_vessels {
+        return Err(LocalSearchParamsError::ModelSolutionMismatch(
+            ModelSolutionMismatchError {
+                model_count: model_vessels,
+                solution_count: solution_vessels,
+            },
+        ));
+    }
+
+    // Check internal solution array alignment
+    if berths.len() != start_times.len() {
+        return Err(LocalSearchParamsError::BerthStartTimeMismatch(
+            BerthStartTimeMismatchError {
+                berths_count: berths.len(),
+                start_times_count: start_times.len(),
+            },
+        ));
+    }
+
+    // Check that the initial solution does not contain out-of-bounds berth indices,
+    // AND check that every vessel is actually allowed to dock at its assigned berth.
+    let num_berths = model.num_berths();
+    for (v_idx, &berth_idx) in berths.iter().enumerate() {
+        if berth_idx.index() >= num_berths {
+            return Err(LocalSearchParamsError::SolutionBerthOutOfBounds(
+                SolutionBerthOutOfBoundsError {
+                    invalid_index: berth_idx.index(),
+                    model_count: num_berths,
+                },
+            ));
+        }
+
+        let vessel = VesselIndex::new(v_idx);
+        if model.vessel_processing_time(vessel, berth_idx).is_none() {
+            return Err(LocalSearchParamsError::SolutionIncompatibleBerth(
+                SolutionIncompatibleBerthError {
+                    vessel_index: v_idx,
+                    incompatible_berth: berth_idx.index(),
+                },
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+// ----------------------------------------------------------------
 // LocalSearchParams
 // ----------------------------------------------------------------
 
@@ -214,52 +286,7 @@ where
         start_times: &'a [T],
         objective_value: T,
     ) -> Result<Self, LocalSearchParamsError> {
-        let model_vessels = model.num_vessels();
-        let solution_vessels = berths.len();
-
-        // Check Model vs Solution bounds
-        if model_vessels != solution_vessels {
-            return Err(LocalSearchParamsError::ModelSolutionMismatch(
-                ModelSolutionMismatchError {
-                    model_count: model_vessels,
-                    solution_count: solution_vessels,
-                },
-            ));
-        }
-
-        // Check internal solution array alignment
-        if berths.len() != start_times.len() {
-            return Err(LocalSearchParamsError::BerthStartTimeMismatch(
-                BerthStartTimeMismatchError {
-                    berths_count: berths.len(),
-                    start_times_count: start_times.len(),
-                },
-            ));
-        }
-
-        // Check that the initial solution does not contain out-of-bounds berth indices,
-        // AND check that every vessel is actually allowed to dock at its assigned berth.
-        let num_berths = model.num_berths();
-        for (v_idx, &berth_idx) in berths.iter().enumerate() {
-            if berth_idx.index() >= num_berths {
-                return Err(LocalSearchParamsError::SolutionBerthOutOfBounds(
-                    SolutionBerthOutOfBoundsError {
-                        invalid_index: berth_idx.index(),
-                        model_count: num_berths,
-                    },
-                ));
-            }
-
-            let vessel = VesselIndex::new(v_idx);
-            if model.vessel_processing_time(vessel, berth_idx).is_none() {
-                return Err(LocalSearchParamsError::SolutionIncompatibleBerth(
-                    SolutionIncompatibleBerthError {
-                        vessel_index: v_idx,
-                        incompatible_berth: berth_idx.index(),
-                    },
-                ));
-            }
-        }
+        check_initial_solution(model, berths, start_times)?;
 
         Ok(Self {
             model,

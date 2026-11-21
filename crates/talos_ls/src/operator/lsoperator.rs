@@ -85,6 +85,10 @@ where
     ///    berth counts) as the graph passed to `prepare`.
     /// 2. All `VesselIndex` values produced by the operator are valid indices within
     ///    the graph.
+    /// 3. The graph has the vessels and the berths of `model`: as many vessels as the model,
+    ///    and every berth of the graph a berth of the model. The filters of the operators read
+    ///    the model unchecked through the graph's vessels and their berths. `Engine::run`
+    ///    establishes this at its door.
     unsafe fn next_neighbor(
         &mut self,
         model: &Model<T>,
