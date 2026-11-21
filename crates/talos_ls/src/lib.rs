@@ -10,6 +10,10 @@
 //! its model, its initial schedule, its parameters and its monitor, unless a deadline of its limits, which reads
 //! the clock, ends it.
 //!
+//! A [`Portfolio`] runs several [`PortfolioMember`]s, each with parameters of its own, from one model and one
+//! initial schedule on engines of their own, one after another or on a thread pool the caller hands in as an
+//! [`Execution`], and answers each member's outcome and the best of them. The crate starts no thread of its own.
+//!
 //! The crate is a stack of layers, each on the ones before it:
 //!
 //! - `ring_arena`: closed rings of nodes spliced in constant time;
@@ -19,7 +23,9 @@
 //! - `metaheuristic`: the rules that decide which candidates a run accepts;
 //! - `statistics`, `termination`, `limits`, `monitor`, `parameters` and `outcome`: what a run counts, why it
 //!   ends, what ends it, who observes it, what it is asked, and what it answers;
-//! - `engine`: the run itself.
+//! - `engine`: the run itself;
+//! - `portfolio`: several runs with parameters of their own, side by side on engines of their own, whose best
+//!   outcome is the answer.
 
 mod ring_arena;
 
@@ -41,6 +47,8 @@ mod termination;
 
 mod engine;
 
+mod portfolio;
+
 #[cfg(test)]
 mod benchmarks;
 
@@ -56,5 +64,6 @@ pub use objective::Objective;
 pub use operator::{MultiArmedBandit, Neighborhood, NeighborhoodSelection};
 pub use outcome::LocalSearchOutcome;
 pub use parameters::{LocalSearchError, LocalSearchParameters};
+pub use portfolio::{Execution, Portfolio, PortfolioError, PortfolioMember, PortfolioOutcome};
 pub use statistics::LocalSearchStatistics;
 pub use termination::{SearchCommand, TerminationReason};

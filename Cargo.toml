@@ -41,6 +41,13 @@ itertools = { version = "0.14.0", default-features = false, features = ["use_std
 rand_core = { version = "0.10.0", default-features = false }
 rand_xoshiro = { version = "0.8.2", default-features = false }
 rand = { version = "0.10.0", default-features = false }
+# Parallel runs of the engine on a thread pool the caller builds and hands in: `rayon` for its pool and its
+# indexed parallel iterators, which keep the order of their items; no feature is needed, and the library never
+# starts a thread or uses the global pool.
+rayon = { version = "1.12.0", default-features = false }
+# `CachePadded`, which keeps a flag that one thread writes and others read on a cache line of its own; the type
+# needs no feature.
+crossbeam-utils = { version = "0.8.23", default-features = false }
 # Python bindings: `macros` for the `#[pyfunction]` and `#[pyclass]` attributes, and `abi3-py38` builds one module
 # for every CPython from 3.8 on.
 pyo3 = { version = "0.28.2", default-features = false, features = ["macros", "abi3-py38"] }
