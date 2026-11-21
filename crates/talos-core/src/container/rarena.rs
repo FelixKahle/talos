@@ -251,17 +251,6 @@ impl RingArena {
         self.next.extend((0..new_len).map(Node::new));
     }
 
-    /// Resizes the arena to exactly `new_len` nodes.
-    ///
-    /// If growing, new slots are initialized to `Node(0)` (not valid rings —
-    /// the caller must fix them up). If shrinking, excess nodes are dropped.
-    /// Existing data for indices `< min(old_len, new_len)` is preserved.
-    #[inline]
-    pub fn resize(&mut self, new_len: usize) {
-        self.prev.resize(new_len, Node::new(0));
-        self.next.resize(new_len, Node::new(0));
-    }
-
     /// Returns mutable references to the raw `prev` and `next` arrays
     /// for direct bulk initialization.
     ///
@@ -1558,27 +1547,6 @@ mod tests {
         arena.reset_to_self_loops(0);
         assert_eq!(arena.len(), 0);
         assert!(arena.is_empty());
-    }
-
-    #[test]
-    fn test_resize_grow() {
-        let mut arena = RingArena::new(vec![Node::new(0)], vec![Node::new(0)]);
-        arena.resize(3);
-        assert_eq!(arena.len(), 3);
-        // Original self-loop is preserved.
-        assert_eq!(arena.next(Node::new(0)), Node::new(0));
-        assert_eq!(arena.prev(Node::new(0)), Node::new(0));
-    }
-
-    #[test]
-    fn test_resize_shrink() {
-        let arena_orig = complex_fixture();
-        let mut arena = arena_orig.clone();
-        arena.resize(4);
-        assert_eq!(arena.len(), 4);
-        // Ring 0 data is preserved (indices 0..4 stay the same).
-        assert_eq!(arena.next(Node::new(0)), Node::new(1));
-        assert_eq!(arena.prev(Node::new(0)), Node::new(3));
     }
 
     #[test]
