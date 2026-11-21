@@ -1,492 +1,324 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Phenotype representation for the local-search scheduling loop.
-//!
-//! While `ScheduleGraph` encodes the *topology* (genotype) — which vessel
-//! follows which on each berth — `ScheduleState` captures the *evaluated
-//! result* (phenotype): the concrete berth assignment, start time, sequence
-//! position, per-berth cost, and global objective for every vessel.
+//! A decoded schedule: where and when each vessel is served, and what each berth costs.
 
 use crate::schedule::{ScheduleGraph, TouchedBerths};
 use talos_core::SolverNumeric;
-use talos_model::{Assignment, BerthIndex, SolutionView, VesselIndex};
+use talos_model::{BerthIndex, SolutionView, VesselIndex};
+use typed_index_collections::TiVec;
 
-/// An encapsulated "Phenotype" of the scheduling problem.
+/// The schedule a [`ScheduleGraph`] stands for once decoded: each vessel's berth and start, each berth's cost, and
+/// the objective, their sum.
 ///
-/// Groups all the loosely related parallel arrays into a single cohesive
-/// memory block. This dramatically improves cache locality. The `positions`
-/// array here is critical: it maintains $O(1)$ lookup speeds for the `Mutator`
-/// intent tracker without polluting the hot paths of `ScheduleGraph`.
-#[derive(Debug, Clone)]
+/// The engine keeps several of them (the accepted schedule, the candidate, the best found) and copies between them
+/// in place, so that a run allocates only when it starts.
+// Invariant: `assigned_berths` and `start_times` have the same length, the number of vessels. Unchecked reads by a
+// vessel rest on it: a vessel below `num_vessels` indexes both columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleState<T> {
-    berths: Vec<BerthIndex>, // len = num_vessels
-    starts: Vec<T>,          // len = num_vessels
-    positions: Vec<usize>,   // len = num_vessels
-    costs: Vec<T>,           // len = num_berths
-    objective: T,            // The objective for this state
+    /// The berth each vessel is served at, per vessel.
+    assigned_berths: TiVec<VesselIndex, BerthIndex>,
+    /// The time each vessel's service starts, per vessel.
+    start_times: TiVec<VesselIndex, T>,
+    /// The sum of the costs of the vessels served at each berth, per berth.
+    berth_costs: TiVec<BerthIndex, T>,
+    /// The sum of the berths' costs.
+    objective: T,
 }
-
-impl<T: SolverNumeric> PartialEq for ScheduleState<T> {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        if self.objective != other.objective {
-            return false;
-        }
-
-        self.berths == other.berths
-            && self.starts == other.starts
-            && self.positions == other.positions
-            && self.costs == other.costs
-    }
-}
-
-impl<T: SolverNumeric> Eq for ScheduleState<T> {}
 
 impl<T> std::fmt::Display for ScheduleState<T>
 where
     T: SolverNumeric + std::fmt::Display,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "ScheduleState [Objective: {}]", self.objective)?;
-
-        write!(f, "Berth Costs: [")?;
-        for (i, cost) in self.costs.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "B{}: {}", i, cost)?;
+        writeln!(f, "schedule of objective {}", self.objective)?;
+        for (berth, cost) in self.berth_costs.iter_enumerated() {
+            writeln!(f, "  {berth} costs {cost}")?;
         }
-        writeln!(f, "]")?;
-
-        for i in 0..self.berths.len() {
-            writeln!(
-                f,
-                "  V{:<3} -> B{:<2} | start: {:<5} | pos: {:<3}",
-                i,
-                self.berths[i].index(),
-                self.starts[i],
-                self.positions[i],
-            )?;
+        for (vessel, (berth, start)) in self
+            .assigned_berths
+            .iter_enumerated()
+            .zip(&self.start_times)
+            .map(|((vessel, berth), start)| (vessel, (berth, start)))
+        {
+            writeln!(f, "  {vessel} at {berth} from {start}")?;
         }
-
         Ok(())
     }
 }
 
-impl<T: SolverNumeric> ScheduleState<T> {
-    /// Creates a new `ScheduleState` from the given vectors.
+impl<T> ScheduleState<T>
+where
+    T: SolverNumeric,
+{
+    /// The schedule that serves vessel `v` at `assigned_berths[v]` from `start_times[v]`, with the given berth
+    /// costs and objective.
     ///
     /// # Panics
     ///
-    /// Panics if the lengths of `berths`, `starts`, and `positions` do not match.
+    /// Panics if `assigned_berths` and `start_times` differ in length.
+    #[track_caller]
     pub fn new(
-        berths: Vec<BerthIndex>,
-        starts: Vec<T>,
-        positions: Vec<usize>,
-        costs: Vec<T>,
+        assigned_berths: Vec<BerthIndex>,
+        start_times: Vec<T>,
+        berth_costs: Vec<T>,
         objective: T,
     ) -> Self {
         assert!(
-            berths.len() == starts.len() && berths.len() == positions.len(),
-            "called `ScheduleState::new` with mismatched vector lengths: berths.len() = {}, starts.len() = {}, positions.len() = {}",
-            berths.len(),
-            starts.len(),
-            positions.len()
+            assigned_berths.len() == start_times.len(),
+            "called `ScheduleState::new` with {} assigned berths and {} start times",
+            assigned_berths.len(),
+            start_times.len()
         );
-
         Self {
-            berths,
-            starts,
-            positions,
-            costs,
-            objective,
-        }
-    }
-    /// Creates a new `ScheduleState` from the given slices.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the lengths of `berths`, `starts`, and `positions` do not match.
-    #[inline]
-    pub fn from_slices(
-        berths: &[BerthIndex],
-        starts: &[T],
-        positions: &[usize],
-        costs: &[T],
-        objective: T,
-    ) -> Self {
-        assert!(
-            berths.len() == starts.len() && berths.len() == positions.len(),
-            "called `ScheduleState::from_slices` with mismatched slice lengths: berths.len() = {}, starts.len() = {}, positions.len() = {}",
-            berths.len(),
-            starts.len(),
-            positions.len()
-        );
-
-        Self {
-            berths: berths.to_vec(),
-            starts: starts.to_vec(),
-            positions: positions.to_vec(),
-            costs: costs.to_vec(),
+            assigned_berths: TiVec::from(assigned_berths),
+            start_times: TiVec::from(start_times),
+            berth_costs: TiVec::from(berth_costs),
             objective,
         }
     }
 
-    /// Resizes the internal vectors to accommodate a new number of vessels and berths.
-    /// Note that the data in this struct will be not meaningful after this operation,
-    /// and the caller is expected to overwrite it with new data.
+    /// Gives the state `num_vessels` vessels and `num_berths` berths, reusing its memory; what it held is no longer
+    /// a schedule until it is overwritten.
     #[inline]
     pub fn resize(&mut self, num_vessels: usize, num_berths: usize) {
-        self.berths.resize(num_vessels, BerthIndex::new(0));
-        self.starts.resize(num_vessels, T::zero());
-        self.positions.resize(num_vessels, 0);
-        self.costs.resize(num_berths, T::zero());
-        self.objective = T::zero();
+        self.assigned_berths.resize(num_vessels, BerthIndex::new(0));
+        self.start_times.resize(num_vessels, T::ZERO);
+        self.berth_costs.resize(num_berths, T::ZERO);
+        self.objective = T::ZERO;
     }
 
-    /// Overwrites the current state with new data, reusing existing heap allocations.
-    ///
-    /// This method is designed for high-performance state resets. By calling `.clear()`
-    /// and `.extend()` on the internal vectors, it attempts to reuse the capacity of
-    /// previously allocated memory buffers to minimize heap pressure during
-    /// high-frequency local search restarts.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the lengths of the provided `berths`, `starts`, and `positions`
-    /// vectors do not match.
-    #[inline]
-    pub fn overwrite_from_slices(
-        &mut self,
-        berths: &[BerthIndex],
-        starts: &[T],
-        positions: &[usize],
-        costs: &[T],
-        objective: T,
-    ) {
-        assert!(
-            berths.len() == starts.len() && berths.len() == positions.len(),
-            "called `ScheduleState::overwrite_from_slices` with mismatched slice lengths: berths.len() = {}, starts.len() = {}, positions.len() = {}",
-            berths.len(),
-            starts.len(),
-            positions.len()
-        );
-
-        self.berths.clear();
-        self.berths.extend(berths);
-
-        self.starts.clear();
-        self.starts.extend(starts);
-
-        self.positions.clear();
-        self.positions.extend(positions);
-
-        self.costs.clear();
-        self.costs.extend(costs);
-
-        self.objective = objective;
-    }
-
-    /// Overwrites the current state with data from another `ScheduleState`, reusing existing heap allocations.
+    /// Makes the state a copy of `other`, reusing its memory.
     #[inline]
     pub fn overwrite_from_state(&mut self, other: &Self) {
-        self.overwrite_from_slices(
-            &other.berths,
-            &other.starts,
-            &other.positions,
-            &other.costs,
-            other.objective,
-        );
+        self.assigned_berths.clone_from(&other.assigned_berths);
+        self.start_times.clone_from(&other.start_times);
+        self.berth_costs.clone_from(&other.berth_costs);
+        self.objective = other.objective;
     }
 
-    /// Returns the number of vessels represented in this state.
+    /// The number of vessels.
     #[inline]
     pub fn num_vessels(&self) -> usize {
-        self.berths.len()
+        self.assigned_berths.len()
     }
 
-    /// Returns the number of berths represented in this state.
+    /// The number of berths.
     #[inline]
     pub fn num_berths(&self) -> usize {
-        self.costs.len()
+        self.berth_costs.len()
     }
 
-    /// Returns the objective value of this state.
+    /// The objective value, the sum of the berths' costs.
     #[inline]
     pub fn objective(&self) -> T {
         self.objective
     }
 
-    /// Updates the objective value of this state.
+    /// Sets the objective value.
     #[inline]
     pub fn set_objective(&mut self, objective: T) {
         self.objective = objective;
     }
 
-    /// Set the berth, start time, and position for a specific vessel.
+    /// The berth `vessel` is served at.
     ///
     /// # Panics
     ///
-    /// Panics if the `vessel` index is out of bounds,
-    /// meaning `vessel >= self.num_vessels()`.
+    /// Panics if `vessel` is not one of the state's vessels.
     #[inline]
-    pub fn set_vessel(
-        &mut self,
-        vessel: VesselIndex,
-        berth: BerthIndex,
-        start: T,
-        position: usize,
-    ) {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        let v_idx = vessel.index();
-        self.berths[v_idx] = berth;
-        self.starts[v_idx] = start;
-        self.positions[v_idx] = position;
+    #[track_caller]
+    pub fn vessel_berth(&self, vessel: VesselIndex) -> BerthIndex {
+        self.assigned_berths[vessel]
     }
 
-    /// Set the berth, start time, and position for a specific vessel without any bounds checks.
+    /// The berth `vessel` is served at, for a vessel the caller knows to be the state's.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the `vessel` is in bounds,
-    /// meaning `vessel < self.num_vessels()`.
+    /// `vessel` must be one of the state's vessels, the condition [`vessel_berth`](Self::vessel_berth) checks.
+    #[inline]
+    pub unsafe fn vessel_berth_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
+        debug_assert!(
+            vessel.index() < self.num_vessels(),
+            "called `ScheduleState::vessel_berth_unchecked` with {vessel}, outside a state of {} vessels",
+            self.num_vessels()
+        );
+        // SAFETY: `vessel` is one of the state's vessels, the precondition of this function.
+        *unsafe { self.assigned_berths.get_unchecked(vessel) }
+    }
+
+    /// The time `vessel`'s service starts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `vessel` is not one of the state's vessels.
+    #[inline]
+    #[track_caller]
+    pub fn vessel_start(&self, vessel: VesselIndex) -> T {
+        self.start_times[vessel]
+    }
+
+    /// The time `vessel`'s service starts, for a vessel the caller knows to be the state's.
+    ///
+    /// # Safety
+    ///
+    /// `vessel` must be one of the state's vessels, the condition [`vessel_start`](Self::vessel_start) checks.
+    #[inline]
+    pub unsafe fn vessel_start_unchecked(&self, vessel: VesselIndex) -> T {
+        debug_assert!(
+            vessel.index() < self.num_vessels(),
+            "called `ScheduleState::vessel_start_unchecked` with {vessel}, outside a state of {} vessels",
+            self.num_vessels()
+        );
+        // SAFETY: `vessel` is one of the state's vessels, the precondition of this function.
+        *unsafe { self.start_times.get_unchecked(vessel) }
+    }
+
+    /// Serves `vessel` at `berth` from `start`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `vessel` is not one of the state's vessels.
+    #[inline]
+    #[track_caller]
+    pub fn set_vessel(&mut self, vessel: VesselIndex, berth: BerthIndex, start: T) {
+        self.assigned_berths[vessel] = berth;
+        self.start_times[vessel] = start;
+    }
+
+    /// Serves `vessel` at `berth` from `start`, for a vessel the caller knows to be the state's.
+    ///
+    /// # Safety
+    ///
+    /// `vessel` must be one of the state's vessels, the condition [`set_vessel`](Self::set_vessel) checks.
     #[inline]
     pub unsafe fn set_vessel_unchecked(
         &mut self,
         vessel: VesselIndex,
         berth: BerthIndex,
         start: T,
-        position: usize,
     ) {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        let v_idx = vessel.index();
-        *unsafe { self.berths.get_unchecked_mut(v_idx) } = berth;
-        *unsafe { self.starts.get_unchecked_mut(v_idx) } = start;
-        *unsafe { self.positions.get_unchecked_mut(v_idx) } = position;
+        debug_assert!(
+            vessel.index() < self.num_vessels(),
+            "called `ScheduleState::set_vessel_unchecked` with {vessel}, outside a state of {} vessels",
+            self.num_vessels()
+        );
+        // SAFETY: `vessel` is one of the state's vessels, the precondition of this function, and so indexes both
+        // vessel columns by the invariant of `ScheduleState`.
+        unsafe {
+            *self.assigned_berths.get_unchecked_mut(vessel) = berth;
+            *self.start_times.get_unchecked_mut(vessel) = start;
+        }
     }
 
-    /// Returns the berth assigned to a specific vessel.
+    /// The cost of `berth`.
     ///
     /// # Panics
     ///
-    /// Panics if the `vessel` index is out of bounds,
-    /// meaning `vessel >= self.num_vessels()`.
+    /// Panics if `berth` is not one of the state's berths.
     #[inline]
-    pub fn vessel_berth(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        self.berths[vessel.index()]
-    }
-
-    /// Returns the berth assigned to a specific vessel without any bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the `vessel` is in bounds,
-    /// meaning `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn vessel_berth_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        *unsafe { self.berths.get_unchecked(vessel.index()) }
-    }
-
-    /// Returns the start time assigned to a specific vessel.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `vessel` index is out of bounds,
-    /// meaning `vessel >= self.num_vessels()`.
-    #[inline]
-    pub fn vessel_start(&self, vessel: VesselIndex) -> T {
-        debug_assert!(vessel.index() < self.starts.len());
-
-        self.starts[vessel.index()]
-    }
-
-    /// Returns the start time assigned to a specific vessel without any bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the `vessel` is in bounds,
-    /// meaning `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn vessel_start_unchecked(&self, vessel: VesselIndex) -> T {
-        debug_assert!(vessel.index() < self.starts.len());
-
-        *unsafe { self.starts.get_unchecked(vessel.index()) }
-    }
-
-    /// Returns the cost of the given berth.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `berth` index is out of bounds,
-    /// meaning `berth >= self.num_berths()`.
-    #[inline]
+    #[track_caller]
     pub fn berth_cost(&self, berth: BerthIndex) -> T {
-        debug_assert!(berth.index() < self.costs.len());
-
-        self.costs[berth.index()]
+        self.berth_costs[berth]
     }
 
-    /// Returns the cost of the given berth without any bounds checks.
+    /// The cost of `berth`, for a berth the caller knows to be the state's.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the `berth` is in bounds,
-    /// meaning `berth < self.num_berths()`.
+    /// `berth` must be one of the state's berths, the condition [`berth_cost`](Self::berth_cost) checks.
     #[inline]
     pub unsafe fn berth_cost_unchecked(&self, berth: BerthIndex) -> T {
-        debug_assert!(berth.index() < self.costs.len());
-
-        *unsafe { self.costs.get_unchecked(berth.index()) }
+        debug_assert!(
+            berth.index() < self.num_berths(),
+            "called `ScheduleState::berth_cost_unchecked` with {berth}, outside a state of {} berths",
+            self.num_berths()
+        );
+        // SAFETY: `berth` is one of the state's berths, the precondition of this function.
+        *unsafe { self.berth_costs.get_unchecked(berth) }
     }
 
-    /// Sets the cost of the given berth.
+    /// Sets the cost of `berth`.
     ///
     /// # Panics
     ///
-    /// Panics if the `berth` index is out of bounds,
-    /// meaning `berth >= self.num_berths()`.
+    /// Panics if `berth` is not one of the state's berths.
     #[inline]
+    #[track_caller]
     pub fn set_berth_cost(&mut self, berth: BerthIndex, cost: T) {
-        debug_assert!(berth.index() < self.costs.len());
-
-        self.costs[berth.index()] = cost;
+        self.berth_costs[berth] = cost;
     }
 
-    /// Sets the cost of the given berth without any bounds checks.
+    /// Sets the cost of `berth`, for a berth the caller knows to be the state's.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the `berth` is in bounds,
-    /// meaning `berth < self.num_berths()`.
+    /// `berth` must be one of the state's berths, the condition [`set_berth_cost`](Self::set_berth_cost) checks.
     #[inline]
     pub unsafe fn set_berth_cost_unchecked(&mut self, berth: BerthIndex, cost: T) {
-        debug_assert!(berth.index() < self.costs.len());
-
-        *unsafe { self.costs.get_unchecked_mut(berth.index()) } = cost;
+        debug_assert!(
+            berth.index() < self.num_berths(),
+            "called `ScheduleState::set_berth_cost_unchecked` with {berth}, outside a state of {} berths",
+            self.num_berths()
+        );
+        // SAFETY: `berth` is one of the state's berths, the precondition of this function.
+        *unsafe { self.berth_costs.get_unchecked_mut(berth) } = cost;
     }
 
-    /// Returns the position of the given vessel in its berth's sequence.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `vessel` index is out of bounds,
-    /// meaning `vessel >= self.num_vessels()`.
-    #[inline]
-    pub fn vessel_position(&self, vessel: VesselIndex) -> usize {
-        debug_assert!(vessel.index() < self.positions.len());
-
-        self.positions[vessel.index()]
-    }
-
-    /// Returns the position of the given vessel in its berth's sequence without any bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the `vessel` is in bounds,
-    /// meaning `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn vessel_position_unchecked(&self, vessel: VesselIndex) -> usize {
-        debug_assert!(vessel.index() < self.positions.len());
-
-        *unsafe { self.positions.get_unchecked(vessel.index()) }
-    }
-
-    /// Returns an `Assignment` for the given vessel, which includes both the berth and start time.
-    ///
-    /// # Panics
-    /// Panics if the `vessel` index is out of bounds,
-    /// meaning `vessel >= self.num_vessels()`.
-    #[inline]
-    pub fn vessel_assignment(&self, vessel: VesselIndex) -> Assignment<T> {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        Assignment {
-            start_time: self.vessel_start(vessel),
-            berth: self.vessel_berth(vessel),
-        }
-    }
-
-    /// Returns an `Assignment` for the given vessel without any bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the `vessel` is in bounds,
-    /// meaning `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn vessel_assignment_unchecked(&self, vessel: VesselIndex) -> Assignment<T> {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        Assignment {
-            start_time: unsafe { self.vessel_start_unchecked(vessel) },
-            berth: unsafe { self.vessel_berth_unchecked(vessel) },
-        }
-    }
-
-    /// Creates a `SolutionView` that borrows from this state.
+    /// The schedule as a borrowed solution.
     #[inline]
     pub fn as_solution_view(&self) -> SolutionView<'_, T> {
-        SolutionView::new(&self.berths, &self.starts, self.objective)
+        SolutionView::new(
+            &self.assigned_berths.raw,
+            &self.start_times.raw,
+            self.objective,
+        )
     }
 
-    /// Incrementally updates this baseline state using data from a newly evaluated candidate state.
+    /// Takes from `candidate` the vessels and costs of every berth `touched` marks, and its objective.
     ///
-    /// Instead of performing a full array copy (which is expensive and causes cache thrashing),
-    /// this method acts as a highly targeted "commit". It only synchronizes the physical pathways
-    /// (berths and their assigned vessels) that were altered by a neighborhood move, as indicated
-    /// by the `touched` array.
-    ///
-    /// It walks the pure-topology `graph` for the dirtied berths, instantly updating the `$O(1)$`
-    /// lookup mappings (`berth`, `start`, and `position`) for the affected vessels, along with
-    /// the localized berth `cost`. Finally, it updates the global `objective` score.
+    /// Afterwards the state is `candidate` on the touched berths and as it was on the others: each vessel of a
+    /// touched berth of `graph` is served at that berth from its start in `candidate`. The cost is the number of
+    /// berths plus the vessels of the touched ones.
     ///
     /// # Safety
     ///
-    /// Calling this method is highly `unsafe` as it entirely bypasses bounds checking in the hot loop.
-    /// To avoid Undefined Behavior, the caller must strictly guarantee the following dimensional alignments:
-    ///
-    /// 1. **Berth Dimensions**: `touched.len()`, `self.costs.len()`, and `cand.costs.len()` must all be
-    ///    equal to or greater than `graph.num_berths()`.
-    /// 2. **Vessel Dimensions**: `self.berths.len()`, `self.starts.len()`, and `self.positions.len()`
-    ///    (as well as their equivalents in `cand`) must all be equal to or greater than `graph.num_vessels()`.
-    /// 3. **Graph Integrity**: The `graph` must be structurally valid and must only yield vessel indices
-    ///    that fit within the bounds of the state arrays.
+    /// The state, `candidate` and `touched` must have the vessels and berths of `graph`: each must count as many
+    /// vessels as `graph` does, where it counts vessels, and as many berths.
     #[inline]
     pub unsafe fn patch_from_delta_unchecked(
         &mut self,
-        cand: &Self,
+        candidate: &Self,
         touched: &TouchedBerths,
         graph: &ScheduleGraph,
     ) {
-        debug_assert_eq!(self.costs.len(), cand.costs.len());
-        debug_assert_eq!(self.costs.len(), graph.num_berths());
-        debug_assert!(graph.num_vessels() <= self.berths.len());
-
-        for berth_idx in touched.iter_touched_berths() {
-            let b = berth_idx.index();
-
-            unsafe {
-                *self.costs.get_unchecked_mut(b) = *cand.costs.get_unchecked(b);
-            }
-
-            let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth_idx) };
-            for (pos, vessel) in sequence.enumerate() {
-                let v_idx = vessel.index();
+        debug_assert!(
+            self.num_vessels() == graph.num_vessels()
+                && candidate.num_vessels() == graph.num_vessels()
+                && self.num_berths() == graph.num_berths()
+                && candidate.num_berths() == graph.num_berths()
+                && touched.num_berths() == graph.num_berths(),
+            "called `ScheduleState::patch_from_delta_unchecked` with states, touched berths and a graph of \
+             different counts"
+        );
+        for berth in touched.iter_touched_berths() {
+            // SAFETY: every berth `touched` yields is below its count, which is the graph's and the states', a
+            // precondition of this function.
+            unsafe { self.set_berth_cost_unchecked(berth, candidate.berth_cost_unchecked(berth)) };
+            // SAFETY: as above, `berth` is one of the graph's.
+            let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
+            for vessel in sequence {
+                // SAFETY: every vessel the graph yields is one of its vessels, which are the states', a
+                // precondition of this function.
                 unsafe {
-                    *self.berths.get_unchecked_mut(v_idx) = berth_idx;
-                    *self.starts.get_unchecked_mut(v_idx) = *cand.starts.get_unchecked(v_idx);
-                    *self.positions.get_unchecked_mut(v_idx) = pos;
+                    let start = candidate.vessel_start_unchecked(vessel);
+                    self.set_vessel_unchecked(vessel, berth, start);
                 }
             }
         }
-
-        self.objective = cand.objective;
+        self.objective = candidate.objective;
     }
 }
 
@@ -495,143 +327,155 @@ where
     T: SolverNumeric,
 {
     #[inline]
-    fn from(val: &'a ScheduleState<T>) -> Self {
-        val.as_solution_view()
+    fn from(state: &'a ScheduleState<T>) -> Self {
+        state.as_solution_view()
     }
 }
 
 #[cfg(test)]
-mod test_schedule_state {
+mod tests {
     use super::*;
-    use talos_model::{BerthIndex, VesselIndex};
+    use proptest::prelude::*;
 
-    // Helper function to create a basic state for testing
-    fn create_default_state() -> ScheduleState<i32> {
+    fn berth(index: usize) -> BerthIndex {
+        BerthIndex::new(index)
+    }
+
+    fn vessel(index: usize) -> VesselIndex {
+        VesselIndex::new(index)
+    }
+
+    /// V0 at B0 from 10, V1 at B1 from 20, V2 at B0 from 30; B0 costs 100, B1 200.
+    fn three_vessels() -> ScheduleState<i64> {
         ScheduleState::new(
-            vec![BerthIndex::new(0), BerthIndex::new(1), BerthIndex::new(0)], // berths
-            vec![10, 20, 30],                                                 // starts
-            vec![0, 0, 1],                                                    // positions
-            vec![100, 200],                                                   // costs
-            300,                                                              // objective
+            vec![berth(0), berth(1), berth(0)],
+            vec![10, 20, 30],
+            vec![100, 200],
+            300,
         )
     }
 
     #[test]
-    fn test_initialization_and_dimensions() {
-        let state = create_default_state();
-
+    fn test_new_counts_its_vessels_and_berths() {
+        let state = three_vessels();
         assert_eq!(state.num_vessels(), 3);
         assert_eq!(state.num_berths(), 2);
         assert_eq!(state.objective(), 300);
     }
 
     #[test]
-    #[should_panic(expected = "mismatched vector lengths")]
-    fn test_new_panics_on_length_mismatch() {
-        ScheduleState::new(
-            vec![BerthIndex::new(0)],
-            vec![10, 20], // Mismatched length
-            vec![0],
-            vec![100],
-            300,
+    #[should_panic(
+        expected = "called `ScheduleState::new` with 1 assigned berths and 2 start times"
+    )]
+    fn test_new_refuses_columns_of_different_lengths() {
+        let _ = ScheduleState::new(vec![berth(0)], vec![10, 20], vec![100], 300);
+    }
+
+    #[test]
+    fn test_set_vessel_changes_only_that_vessel() {
+        let mut state = three_vessels();
+        state.set_vessel(vessel(1), berth(0), 25);
+        assert_eq!(state.vessel_berth(vessel(1)), berth(0));
+        assert_eq!(state.vessel_start(vessel(1)), 25);
+        assert_eq!(state.vessel_start(vessel(0)), 10);
+        assert_eq!(state.vessel_berth(vessel(2)), berth(0));
+    }
+
+    #[test]
+    fn test_set_berth_cost_changes_only_that_berth() {
+        let mut state = three_vessels();
+        state.set_berth_cost(berth(0), 150);
+        assert_eq!(state.berth_cost(berth(0)), 150);
+        assert_eq!(state.berth_cost(berth(1)), 200);
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn test_vessel_start_refuses_a_vessel_outside() {
+        let _ = three_vessels().vessel_start(vessel(3));
+    }
+
+    #[test]
+    fn test_overwrite_from_state_makes_an_equal_state() {
+        let mut state = three_vessels();
+        let other = ScheduleState::new(vec![berth(2); 4], vec![1, 2, 3, 4], vec![0, 0, 9], 9);
+        state.overwrite_from_state(&other);
+        assert_eq!(state, other);
+    }
+
+    #[test]
+    fn test_solution_view_shows_the_columns() {
+        let state = three_vessels();
+        let view = state.as_solution_view();
+        assert_eq!(view.assigned_berths().raw, [berth(0), berth(1), berth(0)]);
+        assert_eq!(view.start_times().raw, [10, 20, 30]);
+        assert_eq!(view.objective_value(), 300);
+    }
+
+    // The candidate moved V2 from B0 to B1, so both berths are touched; V0 keeps its berth but its start in the
+    // candidate is taken too, as it stands on a touched berth.
+    #[test]
+    fn test_patch_from_delta_takes_the_touched_berths_of_the_candidate() {
+        let graph = ScheduleGraph::from_slices(&[berth(0), berth(1), berth(1)], &[0, 0, 1], 3);
+        let mut accepted = ScheduleState::new(
+            vec![berth(0), berth(1), berth(0)],
+            vec![10, 20, 30],
+            vec![100, 200, 7],
+            307,
         );
-    }
-
-    #[test]
-    fn test_vessel_getters_and_setters() {
-        let mut state = create_default_state();
-        let v1 = VesselIndex::new(1);
-
-        // Check initial values
-        assert_eq!(state.vessel_berth(v1), BerthIndex::new(1));
-        assert_eq!(state.vessel_start(v1), 20);
-        assert_eq!(state.vessel_position(v1), 0);
-
-        // Update vessel
-        state.set_vessel(v1, BerthIndex::new(2), 25, 1);
-
-        // Verify updates
-        assert_eq!(state.vessel_berth(v1), BerthIndex::new(2));
-        assert_eq!(state.vessel_start(v1), 25);
-        assert_eq!(state.vessel_position(v1), 1);
-
-        // Check Assignment creation
-        let assignment = state.vessel_assignment(v1);
-        assert_eq!(assignment.berth, BerthIndex::new(2));
-        assert_eq!(assignment.start_time, 25);
-    }
-
-    #[test]
-    fn test_berth_cost_getters_and_setters() {
-        let mut state = create_default_state();
-        let b0 = BerthIndex::new(0);
-
-        assert_eq!(state.berth_cost(b0), 100);
-
-        state.set_berth_cost(b0, 150);
-        assert_eq!(state.berth_cost(b0), 150);
-    }
-
-    #[test]
-    fn test_overwrite_from_slices() {
-        let mut state = create_default_state();
-
-        let new_berths = [BerthIndex::new(2), BerthIndex::new(2), BerthIndex::new(2)];
-        let new_starts = [5, 5, 5];
-        let new_positions = [0, 1, 2];
-        let new_costs = [0, 0, 500];
-        let new_objective = 500;
-
-        // Overwrite existing buffers
-        state.overwrite_from_slices(
-            &new_berths,
-            &new_starts,
-            &new_positions,
-            &new_costs,
-            new_objective,
+        let candidate = ScheduleState::new(
+            vec![berth(0), berth(1), berth(1)],
+            vec![11, 21, 31],
+            vec![40, 50, 99],
+            97,
         );
-
-        assert_eq!(state.objective(), 500);
-        assert_eq!(state.num_berths(), 3);
-        assert_eq!(state.vessel_start(VesselIndex::new(0)), 5);
-        assert_eq!(state.berth_cost(BerthIndex::new(2)), 500);
+        let mut touched = TouchedBerths::new(3);
+        touched.touch(berth(0));
+        touched.touch(berth(1));
+        // SAFETY: the states, the touched berths and the graph all have three vessels and three berths.
+        unsafe { accepted.patch_from_delta_unchecked(&candidate, &touched, &graph) };
+        assert_eq!(accepted.vessel_berth(vessel(2)), berth(1));
+        assert_eq!(accepted.vessel_start(vessel(2)), 31);
+        assert_eq!(accepted.vessel_start(vessel(0)), 11);
+        assert_eq!(accepted.berth_cost(berth(0)), 40);
+        assert_eq!(accepted.berth_cost(berth(1)), 50);
+        assert_eq!(accepted.berth_cost(berth(2)), 7);
+        assert_eq!(accepted.objective(), 97);
     }
 
-    #[test]
-    fn test_overwrite_from_state_and_equality() {
-        let mut state1 = create_default_state();
-        let state2 = ScheduleState::new(
-            vec![BerthIndex::new(1), BerthIndex::new(1), BerthIndex::new(1)],
-            vec![50, 60, 70],
-            vec![0, 1, 2],
-            vec![0, 999],
-            999,
-        );
-
-        // Initially they should not be equal
-        assert_ne!(state1, state2);
-
-        // Overwrite state1 with state2's data
-        state1.overwrite_from_state(&state2);
-
-        // Now they should be perfectly equal
-        assert_eq!(state1, state2);
-        assert_eq!(state1.objective(), 999);
-    }
-
-    #[test]
-    fn test_unchecked_operations_maintain_integrity() {
-        let mut state = create_default_state();
-        let v0 = VesselIndex::new(0);
-        let b1 = BerthIndex::new(1);
-
-        unsafe {
-            state.set_vessel_unchecked(v0, b1, 99, 5);
-            state.set_berth_cost_unchecked(b1, 777);
+    proptest! {
+        #[test]
+        fn test_checked_reads_and_writes_match_their_unchecked_twins(
+            starts in proptest::collection::vec(-1000_i64..1000, 1..12),
+            pick in any::<proptest::sample::Index>(),
+            start in -1000_i64..1000,
+        ) {
+            let num_vessels = starts.len();
+            let berths: Vec<_> = (0..num_vessels).map(|index| berth(index % 3)).collect();
+            let costs = vec![1, 2, 3];
+            let mut checked = ScheduleState::new(berths.clone(), starts.clone(), costs.clone(), 6);
+            let mut unchecked = checked.clone();
+            let chosen = vessel(pick.index(num_vessels));
+            let chosen_berth = berth(pick.index(3));
+            checked.set_vessel(chosen, chosen_berth, start);
+            checked.set_berth_cost(chosen_berth, start);
+            // SAFETY: `chosen` is below the vessel count and `chosen_berth` below the berth count of 3.
+            unsafe {
+                unchecked.set_vessel_unchecked(chosen, chosen_berth, start);
+                unchecked.set_berth_cost_unchecked(chosen_berth, start);
+            }
+            prop_assert_eq!(&checked, &unchecked);
+            for index in 0..num_vessels {
+                // SAFETY: `index` is below the vessel count.
+                unsafe {
+                    prop_assert_eq!(checked.vessel_start(vessel(index)), unchecked.vessel_start_unchecked(vessel(index)));
+                    prop_assert_eq!(checked.vessel_berth(vessel(index)), unchecked.vessel_berth_unchecked(vessel(index)));
+                }
+            }
+            // SAFETY: `chosen_berth` is below the berth count of 3.
+            prop_assert_eq!(checked.berth_cost(chosen_berth), unsafe { unchecked.berth_cost_unchecked(chosen_berth) });
+            let outside = vessel(num_vessels);
+            prop_assert!(std::panic::catch_unwind(|| checked.vessel_start(outside)).is_err());
         }
-
-        assert_eq!(unsafe { state.vessel_start_unchecked(v0) }, 99);
-        assert_eq!(unsafe { state.vessel_position_unchecked(v0) }, 5);
-        assert_eq!(unsafe { state.berth_cost_unchecked(b1) }, 777);
     }
 }

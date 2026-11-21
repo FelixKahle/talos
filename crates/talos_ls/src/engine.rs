@@ -80,18 +80,10 @@ impl<T> Engine<T> {
     {
         let berths = vec![BerthIndex::new(0); num_vessels];
         let starts = vec![T::ZERO; num_vessels];
-        let positions = vec![0_usize; num_vessels];
         let costs = vec![T::ZERO; num_berths];
 
-        let make_state = || {
-            ScheduleState::new(
-                berths.clone(),
-                starts.clone(),
-                positions.clone(),
-                costs.clone(),
-                T::ZERO,
-            )
-        };
+        let make_state =
+            || ScheduleState::new(berths.clone(), starts.clone(), costs.clone(), T::ZERO);
 
         let dummy_starts: Vec<i32> = (0..num_vessels as i32).collect();
         let topology_graph = ScheduleGraph::from_slices(&berths, &dummy_starts, num_berths);
@@ -161,8 +153,8 @@ impl<T> Engine<T> {
         // that ended in a panic, on a graph of other counts.
         self.schedule_graph_undo_log.clear();
         self.topology_graph.overwrite_from_slices(
-            params.berths,
-            params.start_times,
+            &params.berths.raw,
+            &params.start_times.raw,
             model.num_berths(),
         );
 
@@ -805,6 +797,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use talos_core::ClosedOpenInterval;
     use talos_model::{BerthIndex, Model, SolutionView, VesselIndex};
+    use typed_index_collections::TiSlice;
 
     /// Builds a minimal 2-vessel / 2-berth model.
     /// V0: arrival=0, deadline=100, weight=1, p(B0)=5, p(B1)=5
@@ -1433,8 +1426,8 @@ mod tests {
             operator,
             metaheuristic,
             monitor,
-            berths: &berths,
-            start_times: &start_times,
+            berths: TiSlice::from_ref(&berths),
+            start_times: TiSlice::from_ref(&start_times),
             objective_value: 5, // weight=1 * start=0 + weight=1 * start=5
         };
 
@@ -1597,8 +1590,8 @@ mod tests {
             operator,
             metaheuristic,
             monitor: CellMonitor(cell),
-            berths: &berths,
-            start_times: &start_times,
+            berths: TiSlice::from_ref(&berths),
+            start_times: TiSlice::from_ref(&start_times),
             objective_value: 5,
         };
 
@@ -1621,8 +1614,8 @@ mod tests {
             operator: &mut MockOperator::new(1),
             metaheuristic: &mut AcceptAllMetaheuristic::new(1),
             monitor: MockMonitor::default(),
-            berths: &berths,
-            start_times: &start_times,
+            berths: TiSlice::from_ref(&berths),
+            start_times: TiSlice::from_ref(&start_times),
             objective_value: 0,
         };
         let _ = Engine::<i64>::new(3, 2).run(params, mock_evaluator, |_| {});
@@ -1638,8 +1631,8 @@ mod tests {
             operator: &mut MockOperator::new(1),
             metaheuristic: &mut AcceptAllMetaheuristic::new(1),
             monitor: MockMonitor::default(),
-            berths: &berths,
-            start_times: &start_times,
+            berths: TiSlice::from_ref(&berths),
+            start_times: TiSlice::from_ref(&start_times),
             objective_value: 0,
         };
         let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1994,8 +1987,8 @@ mod tests {
                 operator: &mut op,
                 metaheuristic: &mut meta,
                 monitor,
-                berths: &berths,
-                start_times: &start_times,
+                berths: TiSlice::from_ref(&berths),
+                start_times: TiSlice::from_ref(&start_times),
                 objective_value: 0,
             };
 
@@ -2030,8 +2023,8 @@ mod tests {
                 operator: &mut op,
                 metaheuristic: &mut meta,
                 monitor,
-                berths: &berths,
-                start_times: &start_times,
+                berths: TiSlice::from_ref(&berths),
+                start_times: TiSlice::from_ref(&start_times),
                 objective_value: 0,
             };
 
@@ -2055,8 +2048,8 @@ mod tests {
                 operator: &mut op,
                 metaheuristic: &mut meta,
                 monitor,
-                berths: &berths,
-                start_times: &start_times,
+                berths: TiSlice::from_ref(&berths),
+                start_times: TiSlice::from_ref(&start_times),
                 objective_value: 0,
             };
 
@@ -2080,8 +2073,8 @@ mod tests {
                 operator: &mut op,
                 metaheuristic: &mut meta,
                 monitor,
-                berths: &berths,
-                start_times: &start_times,
+                berths: TiSlice::from_ref(&berths),
+                start_times: TiSlice::from_ref(&start_times),
                 objective_value: 0,
             };
 
@@ -2106,8 +2099,8 @@ mod tests {
                 operator: &mut op,
                 metaheuristic: &mut meta,
                 monitor,
-                berths: &berths,
-                start_times: &start_times,
+                berths: TiSlice::from_ref(&berths),
+                start_times: TiSlice::from_ref(&start_times),
                 objective_value: 0,
             };
 

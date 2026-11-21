@@ -59,13 +59,7 @@ fn setup_scenario(
 
     let graph = ScheduleGraph::from_slices(&berths, &starts, num_berths);
 
-    let state = ScheduleState::new(
-        berths,
-        starts.clone(),
-        (0..num_vessels).collect(),
-        vec![0; num_berths],
-        0,
-    );
+    let state = ScheduleState::new(berths, starts.clone(), vec![0; num_berths], 0);
     let accepted = state.clone();
 
     (graph, state, accepted, model)

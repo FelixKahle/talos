@@ -346,8 +346,8 @@ impl PySolver {
             }
         }
 
-        let berths = &inner_solution.assigned_berths().raw;
-        let start_times = &inner_solution.start_times().raw;
+        let berths = inner_solution.assigned_berths();
+        let start_times = inner_solution.start_times();
         let objective = inner_solution.objective_value();
 
         let mut operator = build_operator(&config.operators);

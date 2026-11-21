@@ -49,7 +49,7 @@ impl PySolution {
     /// Returns the start times as a list of i64.
     #[getter]
     pub fn start_times(&self) -> Vec<i64> {
-        self.inner.start_times().raw.to_vec()
+        self.inner.start_times().iter().copied().collect()
     }
 
     /// Returns the number of vessels in the solution.

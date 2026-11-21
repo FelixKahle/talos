@@ -283,8 +283,8 @@ fn run_benchmark(
         operator: &mut operator,
         metaheuristic: &mut gls,
         monitor,
-        berths: &initial.assigned_berths().raw,
-        start_times: &initial.start_times().raw,
+        berths: initial.assigned_berths(),
+        start_times: initial.start_times(),
         objective_value: greedy_obj,
     };
     let outcome = engine.run(params, evaluator, |_| {});
@@ -315,8 +315,8 @@ fn run_benchmark(
         operator: &mut operator,
         metaheuristic: &mut gls,
         monitor: composite,
-        berths: &initial.assigned_berths().raw,
-        start_times: &initial.start_times().raw,
+        berths: initial.assigned_berths(),
+        start_times: initial.start_times(),
         objective_value: greedy_obj,
     };
     let outcome = engine.run(params, evaluator, |_| {});

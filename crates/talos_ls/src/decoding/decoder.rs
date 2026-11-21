@@ -101,7 +101,7 @@ where
     let mut interval_idx = 0;
     let mut berth_cost = T::ZERO;
 
-    for (position, vessel) in sequence.enumerate() {
+    for vessel in sequence {
         let arrival = unsafe { model.vessel_arrival_time_unchecked(vessel) };
         let pt = unsafe { model.vessel_processing_time_unchecked(vessel, berth) }?;
 
@@ -116,7 +116,7 @@ where
         berth_cost = berth_cost + cost_delta;
 
         unsafe {
-            candidate_buffer.set_vessel_unchecked(vessel, berth, start, position);
+            candidate_buffer.set_vessel_unchecked(vessel, berth, start);
         }
     }
 
@@ -300,7 +300,6 @@ mod test_decoder {
         let mut candidate = ScheduleState::new(
             vec![BerthIndex::new(0); num_vessels],
             vec![0; num_vessels],
-            vec![0; num_vessels],
             vec![0; model.num_berths()],
             0,
         );
@@ -387,7 +386,6 @@ mod test_decoder {
         let mut candidate = ScheduleState::new(
             vec![BerthIndex::new(99); 2],
             vec![9999; 2],
-            vec![99; 2],
             vec![9999; 2],
             9999,
         );
@@ -409,8 +407,6 @@ mod test_decoder {
         // Verify buffer got overwritten correctly
         assert_eq!(candidate.vessel_start(VesselIndex::new(0)), 10);
         assert_eq!(candidate.vessel_start(VesselIndex::new(1)), 25);
-        assert_eq!(candidate.vessel_position(VesselIndex::new(0)), 0);
-        assert_eq!(candidate.vessel_position(VesselIndex::new(1)), 1);
         assert_eq!(candidate.vessel_berth(VesselIndex::new(0)), b0);
         assert_eq!(candidate.vessel_berth(VesselIndex::new(1)), b0);
     }
@@ -425,7 +421,6 @@ mod test_decoder {
         let mut candidate = ScheduleState::new(
             vec![BerthIndex::new(99); 2],
             vec![9999; 2],
-            vec![99; 2],
             vec![9999; 2],
             9999,
         );
@@ -451,7 +446,6 @@ mod test_decoder {
         let accepted = ScheduleState::new(
             vec![BerthIndex::new(1), BerthIndex::new(1)],
             vec![10, 20],
-            vec![0, 1],
             vec![0, 50],
             50,
         );
@@ -469,7 +463,6 @@ mod test_decoder {
         let mut candidate_buffer = ScheduleState::new(
             vec![BerthIndex::new(99); 2],
             vec![9999; 2],
-            vec![99; 2],
             vec![9999; 2],
             9999,
         );
@@ -509,7 +502,6 @@ mod test_decoder {
         let accepted = ScheduleState::new(
             vec![BerthIndex::new(0), BerthIndex::new(1)],
             vec![10, 20],
-            vec![0, 0],
             vec![10, 500],
             510, // 10 + 500
         );
@@ -525,7 +517,6 @@ mod test_decoder {
         let mut candidate_buffer = ScheduleState::new(
             vec![BerthIndex::new(99); 2],
             vec![9999; 2],
-            vec![99; 2],
             vec![9999; 2],
             9999,
         );

@@ -3,6 +3,7 @@
 
 use talos_core::SolverNumeric;
 use talos_model::{BerthIndex, Model, VesselIndex};
+use typed_index_collections::TiSlice;
 
 // ----------------------------------------------------------------
 // ModelSolutionMismatchError
@@ -171,8 +172,8 @@ impl std::error::Error for LocalSearchParamsError {
 /// The `LocalSearchParamsError` of the first condition broken, in the order stated.
 pub fn check_initial_solution<T>(
     model: &Model<T>,
-    berths: &[BerthIndex],
-    start_times: &[T],
+    berths: &TiSlice<VesselIndex, BerthIndex>,
+    start_times: &TiSlice<VesselIndex, T>,
 ) -> Result<(), LocalSearchParamsError>
 where
     T: SolverNumeric,
@@ -203,7 +204,7 @@ where
     // Check that the initial solution does not contain out-of-bounds berth indices,
     // AND check that every vessel is actually allowed to dock at its assigned berth.
     let num_berths = model.num_berths();
-    for (v_idx, &berth_idx) in berths.iter().enumerate() {
+    for (vessel, &berth_idx) in berths.iter_enumerated() {
         if berth_idx.index() >= num_berths {
             return Err(LocalSearchParamsError::SolutionBerthOutOfBounds(
                 SolutionBerthOutOfBoundsError {
@@ -213,11 +214,10 @@ where
             ));
         }
 
-        let vessel = VesselIndex::new(v_idx);
         if model.vessel_processing_time(vessel, berth_idx).is_none() {
             return Err(LocalSearchParamsError::SolutionIncompatibleBerth(
                 SolutionIncompatibleBerthError {
-                    vessel_index: v_idx,
+                    vessel_index: vessel.index(),
                     incompatible_berth: berth_idx.index(),
                 },
             ));
@@ -241,8 +241,8 @@ where
     operator: &'a mut O,
     metaheuristic: &'a mut H,
     monitor: M,
-    berths: &'a [BerthIndex], // len = num_vessels
-    start_times: &'a [T],     // len = num_vessels
+    berths: &'a TiSlice<VesselIndex, BerthIndex>,
+    start_times: &'a TiSlice<VesselIndex, T>,
     objective_value: T,
 }
 
@@ -282,8 +282,8 @@ where
         operator: &'a mut O,
         metaheuristic: &'a mut H,
         monitor: M,
-        berths: &'a [BerthIndex],
-        start_times: &'a [T],
+        berths: &'a TiSlice<VesselIndex, BerthIndex>,
+        start_times: &'a TiSlice<VesselIndex, T>,
         objective_value: T,
     ) -> Result<Self, LocalSearchParamsError> {
         check_initial_solution(model, berths, start_times)?;
@@ -313,8 +313,8 @@ where
     pub operator: &'a mut O,
     pub metaheuristic: &'a mut H,
     pub monitor: M,
-    pub berths: &'a [BerthIndex],
-    pub start_times: &'a [T],
+    pub berths: &'a TiSlice<VesselIndex, BerthIndex>,
+    pub start_times: &'a TiSlice<VesselIndex, T>,
     pub objective_value: T,
 }
 

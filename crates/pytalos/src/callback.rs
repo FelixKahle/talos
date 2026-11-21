@@ -13,7 +13,7 @@ pub fn make_callback(py_cb: Option<Py<PyAny>>) -> Box<dyn FnMut(SolutionView<'_,
         Some(cb) => Box::new(move |sol: SolutionView<'_, i64>| {
             let obj = sol.objective_value();
             let berths: Vec<usize> = sol.assigned_berths().iter().map(|bi| bi.index()).collect();
-            let start_times: Vec<i64> = sol.start_times().raw.to_vec();
+            let start_times: Vec<i64> = sol.start_times().iter().copied().collect();
 
             Python::attach(|py| {
                 if let Err(e) = cb.call1(py, (obj, berths, start_times)) {
