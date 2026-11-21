@@ -298,33 +298,49 @@ impl PenaltyMemory {
         self.num_berths
     }
 
-    /// Returns the penalty count for a given edge feature.
+    /// The penalty count of the edge feature from `from` to `to`, each a vessel or the boundary of a berth.
     ///
-    /// # Arguments
+    /// # Panics
     ///
-    /// * `from` — The end the link leaves (a vessel or a berth's boundary).
-    /// * `to` — The end the link reaches (a vessel or a berth's boundary).
+    /// Panics if `from` or `to` is a vessel outside the memory.
     #[inline]
     pub fn edge_penalty(&self, from: LinkEnd, to: LinkEnd) -> u64 {
+        let inside = |end: LinkEnd| match end {
+            LinkEnd::Vessel(vessel) => vessel.index() < self.num_vessels,
+            LinkEnd::Berth(_) => true,
+        };
+        assert!(
+            inside(from) && inside(to),
+            "called `PenaltyMemory::edge_penalty` with a link outside a memory of {} vessels",
+            self.num_vessels
+        );
         let idx = edge_flat_index(from, to, self.num_vessels);
         debug_assert!(idx < self.edge.len());
-
-        // SAFETY: edge_flat_index yields < (num_vessels+1)^2, the allocation size.
+        // SAFETY: both ends are vessels of the memory or boundaries, as the check above found, so `edge_flat_index`
+        // yields less than `(num_vessels + 1)^2`, the length of `edge`.
         unsafe { *self.edge.get_unchecked(idx) }
     }
 
-    /// Returns the penalty count for a given berth-assignment feature.
+    /// The penalty count of the feature that assigns `vessel` to `berth`.
     ///
-    /// # Arguments
+    /// # Panics
     ///
-    /// * `vessel` — The vessel index.
-    /// * `berth` — The berth index.
+    /// Panics if `vessel` or `berth` is outside the memory.
     #[inline]
     pub fn berth_penalty(&self, vessel: VesselIndex, berth: BerthIndex) -> u64 {
+        assert!(
+            vessel.index() < self.num_vessels && berth.index() < self.num_berths,
+            "called `PenaltyMemory::berth_penalty` with vessel {} and berth {}, outside a memory of {} vessels and {} \
+             berths",
+            vessel.index(),
+            berth.index(),
+            self.num_vessels,
+            self.num_berths
+        );
         let idx = vessel.index() * self.num_berths + berth.index();
         debug_assert!(idx < self.berth.len());
-
-        // SAFETY: vessel < num_vessels and berth < num_berths.
+        // SAFETY: `vessel` and `berth` are the memory's, as the check above found, so the index is below
+        // `num_vessels * num_berths`, the length of `berth`.
         unsafe { *self.berth.get_unchecked(idx) }
     }
 
@@ -1366,6 +1382,24 @@ mod tests {
         assert_eq!(outcome, AcceptanceOutcome::Reject);
         assert_eq!(gls.memory().num_vessels(), 2);
         assert_eq!(gls.memory().num_berths(), 2);
+    }
+
+    // A berth beyond the memory must be refused, not read as another vessel's row.
+    #[test]
+    #[should_panic(
+        expected = "called `PenaltyMemory::berth_penalty` with vessel 0 and berth 3, outside a memory of 2 vessels \
+                    and 2 berths"
+    )]
+    fn test_penalty_memory_berth_penalty_refuses_a_berth_outside() {
+        let _ = PenaltyMemory::new(2, 2).berth_penalty(VesselIndex::new(0), BerthIndex::new(3));
+    }
+
+    // A vessel beyond the memory must be refused, not read as the boundary of a berth.
+    #[test]
+    #[should_panic(expected = "called `PenaltyMemory::edge_penalty` with a link outside a memory of 2 vessels")]
+    fn test_penalty_memory_edge_penalty_refuses_a_vessel_outside() {
+        let outside = LinkEnd::Vessel(VesselIndex::new(2));
+        let _ = PenaltyMemory::new(2, 2).edge_penalty(outside, LinkEnd::Vessel(VesselIndex::new(0)));
     }
 
     #[test]
