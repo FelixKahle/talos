@@ -5,11 +5,11 @@
 
 [workspace]
 members = [
-    "crates/talos-core",
-    "crates/talos-model",
-    "crates/talos-ls",
+    "crates/talos_core",
+    "crates/talos_model",
+    "crates/talos_ls",
     "crates/pytalos",
-    "crates/talos-cmd",
+    "crates/talos_cmd",
 ]
 resolver = "3"
 
@@ -23,9 +23,9 @@ publish = false
 
 [workspace.dependencies]
 # The workspace's own crates, each named once here so members refer to them alike.
-talos_core = { path = "crates/talos-core" }
-talos_model = { path = "crates/talos-model" }
-talos_ls = { path = "crates/talos-ls" }
+talos_core = { path = "crates/talos_core" }
+talos_model = { path = "crates/talos_model" }
+talos_ls = { path = "crates/talos_ls" }
 
 # Traits for code generic over the integer types the solver accepts.
 num-traits = { version = "0.2.19", default-features = false, features = ["std"] }

@@ -1,4 +1,4 @@
-# talos-core
+# talos_core
 
 Foundations shared by the Talos crates. Everything is re-exported at the crate root.
 

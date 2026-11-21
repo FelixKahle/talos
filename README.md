@@ -8,9 +8,9 @@ Talos is a high-performance metaheuristic solver built in Rust, specifically tai
 
 | Crate | Description |
 |---|---|
-| **talos-core** | Shared foundational types and algorithms: intervals, ring arenas, typed indices, numeric traits. |
-| **talos-model** | Problem definition and solution representation for the DBAP: model data, vessel/berth indices, SoA solutions. |
-| **talos-ls** | The local search engine: mutation operators, schedule graph, decoding, and pluggable termination monitors. |
+| **talos_core** | Shared foundational types and algorithms: intervals, ring arenas, typed indices, numeric traits. |
+| **talos_model** | Problem definition and solution representation for the DBAP: model data, vessel/berth indices, SoA solutions. |
+| **talos_ls** | The local search engine: mutation operators, schedule graph, decoding, and pluggable termination monitors. |
 
 ## Building
 

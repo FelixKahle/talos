@@ -1,11 +1,11 @@
-# talos-model
+# talos_model
 
 Data model for the Dynamic Berth Allocation Problem (DBAP).
 
 ## Modules
 
 - **index** — Strongly typed indices (`VesselIndex`, `BerthIndex`) built on
-  `talos-core`'s `TypedIndex`. Prevents accidental mixing of vessel and berth
+  `talos_core`'s `TypedIndex`. Prevents accidental mixing of vessel and berth
   indices at compile time with zero runtime cost.
 
 - **model** — The problem definition (`Model`). Stores arrival times, latest
