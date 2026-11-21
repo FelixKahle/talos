@@ -855,6 +855,53 @@ mod benches {
                     },
                 );
             }
+
+            let heads = [
+                (
+                    "Shift To Head Intra-Berth",
+                    VesselIndex::new(40),
+                    BerthIndex::new(0),
+                ),
+                (
+                    "Shift To Head Inter-Berth",
+                    VesselIndex::new(10),
+                    BerthIndex::new(1),
+                ),
+                (
+                    "Shift To Empty Berth",
+                    VesselIndex::new(10),
+                    BerthIndex::new(10),
+                ),
+            ];
+            for (move_name, vessel, berth) in heads {
+                // In the worst case every vessel stands on B0, and B1 is as empty as B10.
+                if *is_worst_case && berth == BerthIndex::new(1) {
+                    continue;
+                }
+                group.bench_with_input(
+                    BenchmarkId::new(move_name, name),
+                    &is_worst_case,
+                    |b, _| {
+                        b.iter(|| {
+                            mutator.clear_diff();
+                            mutator.relocate_to_head(vessel, berth);
+
+                            // SAFETY: the touched berths, the graph, the states and the model have the vessels and
+                            // berths of the scenario.
+                            unsafe {
+                                decode_unchecked::<_, StartTimeCost>(
+                                    mutator.touched(),
+                                    mutator.graph(),
+                                    &mut candidate,
+                                    &accepted,
+                                    &model,
+                                )
+                            };
+                            mutator.rollback();
+                        });
+                    },
+                );
+            }
         }
 
         group.finish();

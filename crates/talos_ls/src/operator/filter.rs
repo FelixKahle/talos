@@ -5,14 +5,15 @@
 //!
 //! Each neighbourhood proposes only the moves its filter lets through. The filters between berths refuse a move
 //! only where the instance rules it out: a vessel may not use the berth it would reach. The filters on one berth
-//! refuse every move of two vessels whose windows from arrival to latest departure do not overlap. That is exact
-//! for a swap, which would reverse the order the windows force, but conservative for a shift: moving a vessel
-//! right after one whose window lies wholly before its own keeps the forced order, and may still be a move an
-//! optimum needs, which such a neighbourhood then does not propose.
+//! refuse every move that sets a vessel next to one whose window from arrival to latest departure does not overlap
+//! its own. That is exact for a swap and for a move to the head of a berth, which would reverse the order the
+//! windows force, but conservative for a move after another vessel: moving a vessel right after one whose window
+//! lies wholly before its own keeps the forced order, and may still be a move an optimum needs, which such a
+//! neighbourhood then does not propose.
 
 use crate::schedule::ScheduleGraph;
 use talos_core::SolverNumeric;
-use talos_model::{Model, VesselIndex};
+use talos_model::{BerthIndex, Model, VesselIndex};
 
 /// Whether the windows of `first` and `second`, each from its arrival to its latest departure, overlap.
 ///
@@ -141,42 +142,61 @@ where
     unsafe { windows_overlap_unchecked(vessel, anchor, model) }
 }
 
-/// Whether moving `vessel` right after `anchor`, onto the berth of `anchor`, may help: `vessel` may use that
-/// berth.
+/// Whether moving `vessel` to the head of the berth it stands on, before `head`, the vessel heading it, may help:
+/// their windows overlap.
+///
+/// The refusal is exact for a feasible schedule. In one, `vessel` stands after `head`; were the windows disjoint,
+/// the window of `head` would lie wholly before that of `vessel` wherever one of the two takes any time to serve,
+/// since the vessel served second could otherwise not leave in time. Moving `vessel` before `head` then ends `head`
+/// no earlier than the arrival of `vessel`, which is at or after the latest departure of `head`, plus the times both
+/// take to serve: the move is infeasible. Only where both take no time at the berth may a refused move be feasible.
 ///
 /// # Safety
 ///
-/// `vessel` and `anchor` must be vessels of `graph`, and `graph` must have the vessels and berths of `model`.
+/// `vessel` and `head` must be `model`'s.
 #[inline]
-pub(super) unsafe fn inter_berth_shift_filter_unchecked<T>(
+pub(super) unsafe fn intra_berth_shift_to_head_filter_unchecked<T>(
     vessel: VesselIndex,
-    anchor: VesselIndex,
-    graph: &ScheduleGraph,
+    head: VesselIndex,
     model: &Model<T>,
 ) -> bool
 where
     T: SolverNumeric,
 {
     debug_assert!(
-        vessel.index() < graph.num_vessels() && anchor.index() < graph.num_vessels(),
-        "called `inter_berth_shift_filter_unchecked` with {vessel} or {anchor}, outside the graph"
+        vessel.index() < model.num_vessels() && head.index() < model.num_vessels(),
+        "called `intra_berth_shift_to_head_filter_unchecked` with {vessel} or {head}, outside the model"
     );
-    // SAFETY: `anchor` is the graph's, the precondition of this function.
-    let anchor_berth = unsafe { graph.vessel_berth_unchecked(anchor) };
+    // SAFETY: both vessels are the model's, the precondition of this function.
+    unsafe { windows_overlap_unchecked(vessel, head, model) }
+}
+
+/// Whether moving `vessel` onto `berth`, another berth than its own, may help: `vessel` may use `berth`.
+///
+/// # Safety
+///
+/// `vessel` and `berth` must be `model`'s.
+#[inline]
+pub(super) unsafe fn inter_berth_shift_filter_unchecked<T>(
+    vessel: VesselIndex,
+    berth: BerthIndex,
+    model: &Model<T>,
+) -> bool
+where
+    T: SolverNumeric,
+{
     debug_assert!(
-        vessel.index() < model.num_vessels() && anchor_berth.index() < model.num_berths(),
-        "called `inter_berth_shift_filter_unchecked` with a graph whose vessels or berths are not the model's"
+        vessel.index() < model.num_vessels() && berth.index() < model.num_berths(),
+        "called `inter_berth_shift_filter_unchecked` with {vessel} or {berth}, outside the model"
     );
-    // SAFETY: `vessel` is the graph's and `anchor_berth` a berth of the graph, whose vessels and berths are the
-    // model's, the precondition of this function.
-    unsafe { model.vessel_processing_time_unchecked(vessel, anchor_berth) }.is_some()
+    // SAFETY: the vessel and the berth are the model's, the precondition of this function.
+    unsafe { model.vessel_processing_time_unchecked(vessel, berth) }.is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use talos_core::ClosedOpenInterval;
-    use talos_model::BerthIndex;
 
     /// V0 has the window [0, 10), V1 [5, 20) and V2 [20, 30). V0 may use only B0; V1 and V2 may use either.
     fn three_vessels() -> Model<i64> {
@@ -252,14 +272,32 @@ mod tests {
             ));
             assert!(!inter_berth_shift_filter_unchecked(
                 vessel(0),
-                vessel(1),
-                &graph,
+                BerthIndex::new(1),
                 &model
             ));
             assert!(inter_berth_shift_filter_unchecked(
                 vessel(1),
+                BerthIndex::new(0),
+                &model
+            ));
+        }
+    }
+
+    #[test]
+    fn test_the_filter_of_a_move_to_the_head_passes_overlapping_windows_and_refuses_disjoint_ones()
+    {
+        let model = three_vessels();
+        // SAFETY: every vessel named is the model's.
+        unsafe {
+            assert!(intra_berth_shift_to_head_filter_unchecked(
+                vessel(1),
                 vessel(0),
-                &graph,
+                &model
+            ));
+            // V2 [20, 30) before V0 [0, 10) would start V0 at 21 at the earliest, past its latest departure.
+            assert!(!intra_berth_shift_to_head_filter_unchecked(
+                vessel(2),
+                vessel(0),
                 &model
             ));
         }

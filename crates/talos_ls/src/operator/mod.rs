@@ -4,7 +4,8 @@
 //! The moves from one schedule to its neighbours, and the operator that proposes them to a run.
 //!
 //! - `filter` holds the tests by which a neighbourhood skips a move no optimum needs.
-//! - `swap` and `shift` hold the scans of the four neighbourhoods.
+//! - `swap` and `shift` hold the scans of the four neighbourhoods: the exchanges of two vessels, and the insertions
+//!   of one vessel at another place.
 //! - [`Neighborhood`] names a neighbourhood, and `LocalSearchOperator` is what the engine draws moves from.
 //! - `CompoundOperator` proposes the moves of several neighbourhoods, chosen among by a [`NeighborhoodSelection`].
 

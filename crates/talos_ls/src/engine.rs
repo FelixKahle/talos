@@ -499,8 +499,8 @@ where
         loop {
             self.engine.mutator.clear_diff();
             debug_assert!(self.engine.is_loaded_for(self.model));
-            // SAFETY: the graph counts the vessels the operator was prepared for and has the vessels and berths of
-            // the model, as checked when the run started (`Engine::assert_loaded_for`); no move changes a count.
+            // SAFETY: the graph counts the vessels and berths the operator was prepared for and has those of the
+            // model, as checked when the run started (`Engine::assert_loaded_for`); no move changes a count.
             if !unsafe {
                 self.operator
                     .next_neighbor_unchecked(self.model, &mut self.engine.mutator)
@@ -992,6 +992,25 @@ mod tests {
             Err(LocalSearchError::InitialSolution(
                 InitialSolutionError::InfeasibleOrder
             ))
+        );
+    }
+
+    // Both vessels on B0 give turnarounds of 5 and 15; the optimum serves V1 alone on the empty B1, for 5 and 10.
+    // Only a move onto an empty berth reaches it, which a shift after another vessel cannot make.
+    #[test]
+    fn test_a_default_run_moves_a_vessel_onto_an_empty_berth_and_reaches_the_optimum() {
+        let parameters = LocalSearchParameters {
+            limits: iterations(1000),
+            ..LocalSearchParameters::default()
+        };
+        let initial = SolutionView::new(&BOTH_ON_FIRST_BERTH, &BOTH_ON_FIRST_BERTH_STARTS, 0);
+        let outcome = Engine::new()
+            .run(&two_vessels(), initial, &parameters, &mut NoMonitor)
+            .expect("the schedule should be one of the model");
+        assert_eq!(outcome.solution.objective_value(), 15);
+        assert_eq!(
+            two_vessels().check_feasibility(outcome.solution.as_view()),
+            Ok(())
         );
     }
 

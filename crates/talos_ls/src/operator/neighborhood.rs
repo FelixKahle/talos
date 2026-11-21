@@ -14,17 +14,21 @@ use talos_model::Model;
 /// A kind of move from one schedule to its neighbours.
 ///
 /// Each neighbourhood proposes its moves in a fixed order and skips a move its filter refuses: where the instance
-/// rules it out, and on one berth wherever the windows of the two vessels do not overlap, which for a shift may skip
-/// a move an optimum needs.
+/// rules it out, and on one berth wherever the move sets a vessel next to one whose window from arrival to latest
+/// departure does not overlap its own, which for a move after another vessel may skip a move an optimum needs.
+/// Together the two shifts insert a vessel at every place of every berth: after any vessel, at the head of any
+/// berth, and onto an empty berth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Neighborhood {
     /// Exchange two vessels on one berth whose windows from arrival to latest departure overlap.
     IntraBerthSwap,
     /// Exchange two vessels on different berths that may each use the other's berth.
     InterBerthSwap,
-    /// Move a vessel to right after another vessel of its berth whose window overlaps its own.
+    /// Move a vessel to another place of its berth: right after another vessel whose window overlaps its own, or
+    /// to the head of the berth before a vessel whose window overlaps its own.
     IntraBerthShift,
-    /// Move a vessel to right after a vessel of another berth that it may use.
+    /// Move a vessel onto another berth that it may use: right after one of its vessels, or to its head, an empty
+    /// berth included.
     InterBerthShift,
 }
 
@@ -53,8 +57,8 @@ where
     ///
     /// # Safety
     ///
-    /// The graph of `mutator` must count the vessels of the graph the operator was last prepared for, and have the
-    /// vessels and berths of `model`.
+    /// The graph of `mutator` must count the vessels and berths of the graph the operator was last prepared for,
+    /// and have the vessels and berths of `model`.
     unsafe fn next_neighbor_unchecked(&mut self, model: &Model<T>, mutator: &mut Mutator) -> bool;
 
     /// Takes note that the move it made last was kept aside as the best candidate of the scan.
@@ -109,8 +113,8 @@ impl NeighborhoodOperator {
     ///
     /// # Safety
     ///
-    /// The graph of `mutator` must count the vessels of the graph the scan was last prepared for, and have the
-    /// vessels and berths of `model`.
+    /// The graph of `mutator` must count the vessels and berths of the graph the scan was last prepared for, and
+    /// have the vessels and berths of `model`.
     #[inline]
     pub(super) unsafe fn next_neighbor_unchecked<T>(
         &mut self,
