@@ -658,7 +658,9 @@ where
 mod tests {
     use super::*;
     use crate::{
-        metaheuristic::{GreedyDescent, GuidedLocalSearch, MoveSelection, PenalizationTrigger},
+        metaheuristic::{
+            GreedyDescent, GuidedLocalSearch, MoveSelection, PenalizationTrigger, TieBreaking,
+        },
         monitor::NoMonitor,
         operator::{MultiArmedBandit, Neighborhood, NeighborhoodSelection},
     };
@@ -785,7 +787,7 @@ mod tests {
             self.steps += 1;
         }
 
-        fn commits_buffered(&mut self) -> bool {
+        fn commits_buffered(&self) -> bool {
             true
         }
 
@@ -1071,8 +1073,7 @@ mod tests {
     #[test]
     fn test_best_improvement_descent_ends_at_a_local_optimum() {
         let settings = GreedyDescent {
-            selection: MoveSelection::BestImprovement,
-            ..GreedyDescent::default()
+            selection: MoveSelection::BestImprovement(TieBreaking::KeepFirst),
         };
         let outcome = search_mocked(
             &two_vessels(),
@@ -1264,8 +1265,7 @@ mod tests {
         for metaheuristic in [
             Metaheuristic::default(),
             Metaheuristic::GreedyDescent(GreedyDescent {
-                selection: MoveSelection::BestImprovement,
-                ..GreedyDescent::default()
+                selection: MoveSelection::BestImprovement(TieBreaking::Random),
             }),
         ] {
             let parameters = LocalSearchParameters {
@@ -1322,7 +1322,9 @@ mod tests {
     // exhaustion penalizes, every later scan repeats it and the search stands still until a limit ends it.
     #[test]
     fn test_a_guided_search_triggered_by_moves_leaves_its_first_local_optimum() {
-        let trigger = PenalizationTrigger::AfterMoves(1_000_000);
+        let trigger = PenalizationTrigger::AfterMoves(
+            std::num::NonZeroU64::new(1_000_000).expect("a million is not zero"),
+        );
         let first = guided_search_on_staggered_instance(trigger, 1);
         let later = guided_search_on_staggered_instance(trigger, 10);
         assert_eq!(

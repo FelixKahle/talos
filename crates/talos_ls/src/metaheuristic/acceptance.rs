@@ -90,8 +90,9 @@ where
     /// the accepted schedule `graph`.
     fn after_step(&mut self, best_objective: T, graph: &ScheduleGraph);
 
-    /// Whether the candidate kept aside in the scan just exhausted becomes the accepted schedule.
-    fn commits_buffered(&mut self) -> bool;
+    /// Whether the candidate kept aside in the scan just exhausted becomes the accepted schedule; the rule is then
+    /// told of it by [`on_accept_unchecked`](Self::on_accept_unchecked).
+    fn commits_buffered(&self) -> bool;
 
     /// What follows the exhausted scan, from the accepted schedule `graph`.
     fn on_neighborhood_exhausted(&mut self, graph: &ScheduleGraph)

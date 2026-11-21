@@ -628,6 +628,8 @@ def test_solver_out_of_bounds_berth(simple_model):
         pytalos.GlsConfig(lambda_strategy=pytalos.LambdaStrategy.Additive, lambda_inc_step=float("inf")),
         pytalos.GlsConfig(lambda_strategy=pytalos.LambdaStrategy.Static, lambda_initial=float("nan")),
         pytalos.GlsConfig(decay=pytalos.Decay.Geometric, decay_factor=1.5),
+        pytalos.GlsConfig(trigger=pytalos.Trigger.AfterMoves, trigger_threshold=0),
+        pytalos.GlsConfig(trigger=pytalos.Trigger.AfterNonImprovements, trigger_threshold=0),
     ],
 )
 def test_solver_refuses_a_penalty_setting_out_of_range(simple_model, simple_solution, gls_config):

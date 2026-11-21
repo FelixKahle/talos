@@ -12,7 +12,104 @@ use crate::{
     metaheuristic::acceptance::{AcceptanceOutcome, AcceptanceRule, NeighborhoodExhaustionOutcome},
     schedule::{ScheduleGraph, ScheduleGraphDiff},
 };
+use std::num::NonZeroU64;
 use talos_core::SolverNumeric;
+
+/// The trigger of a run's penalizations, with what it has counted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TriggerState {
+    /// Penalize at every exhausted scan.
+    OnExhaustion,
+    /// Penalize once `steps` steps in a row passed without a new best.
+    AfterNonImprovements {
+        /// The steps in a row that make the trigger fire.
+        steps: NonZeroU64,
+        /// The steps since the last new best the trigger saw, or since it last fired.
+        count: u64,
+        /// The best objective the trigger has seen.
+        best: f64,
+    },
+    /// Penalize after every `moves` accepted moves, and at every exhausted scan.
+    AfterMoves {
+        /// The accepted moves that make the trigger fire.
+        moves: NonZeroU64,
+        /// The accepted moves since the trigger last fired, or since the start.
+        count: u64,
+    },
+}
+
+impl TriggerState {
+    /// The trigger of `trigger`, before the start of a run.
+    fn new(trigger: PenalizationTrigger) -> Self {
+        match trigger {
+            PenalizationTrigger::OnExhaustion => Self::OnExhaustion,
+            PenalizationTrigger::AfterNonImprovements(steps) => Self::AfterNonImprovements {
+                steps,
+                count: 0,
+                best: f64::INFINITY,
+            },
+            PenalizationTrigger::AfterMoves(moves) => Self::AfterMoves { moves, count: 0 },
+        }
+    }
+
+    /// Starts counting at the start of a run from a schedule of `initial_objective`.
+    fn restart(&mut self, initial_objective: f64) {
+        match self {
+            Self::OnExhaustion => {}
+            Self::AfterNonImprovements { count, best, .. } => {
+                *count = 0;
+                *best = initial_objective;
+            }
+            Self::AfterMoves { count, .. } => *count = 0,
+        }
+    }
+
+    /// Counts an accepted move, and whether the trigger fires.
+    fn on_accept(&mut self) -> bool {
+        match self {
+            Self::AfterMoves { moves, count } => {
+                *count += 1;
+                let fires = *count >= moves.get();
+                if fires {
+                    *count = 0;
+                }
+                fires
+            }
+            Self::OnExhaustion | Self::AfterNonImprovements { .. } => false,
+        }
+    }
+
+    /// Counts a step after which the best objective is `best_objective`, and whether the trigger fires.
+    fn after_step(&mut self, best_objective: f64) -> bool {
+        match self {
+            Self::AfterNonImprovements { steps, count, best } => {
+                if best_objective < *best {
+                    *count = 0;
+                    *best = best_objective;
+                    return false;
+                }
+                *count += 1;
+                let fires = *count >= steps.get();
+                if fires {
+                    *count = 0;
+                }
+                fires
+            }
+            Self::OnExhaustion | Self::AfterMoves { .. } => false,
+        }
+    }
+
+    /// Whether an exhausted scan penalizes.
+    fn penalizes_at_exhaustion(&self) -> bool {
+        match self {
+            // An exhausted scan accepted no move, so a count of accepted moves cannot reach its threshold from
+            // there: without a penalty every later scan would repeat it.
+            Self::OnExhaustion | Self::AfterMoves { .. } => true,
+            // Every candidate of the next scan is a step without a new best, so the count fires within a few scans.
+            Self::AfterNonImprovements { .. } => false,
+        }
+    }
+}
 
 /// A guided local search under way: its settings, its penalty memory, and the sum of the penalties of the
 /// accepted schedule.
@@ -29,12 +126,9 @@ pub struct GuidedLocalSearchRule {
     lambda: LambdaSchedule,
     /// The decay of the penalties.
     decay: DecaySchedule,
-    /// When the search penalizes.
-    trigger: PenalizationTrigger,
-    /// The steps or accepted moves counted toward the trigger.
-    trigger_counter: u64,
-    /// The best objective the trigger has seen, for [`PenalizationTrigger::AfterNonImprovements`].
-    last_best_objective: f64,
+    /// When the search penalizes, with what it has counted.
+    trigger: TriggerState,
+    /// The sum of the penalties of the features of the accepted schedule.
     penalty_sum: i64,
 }
 
@@ -49,9 +143,7 @@ impl GuidedLocalSearchRule {
                 rule: settings.decay,
                 penalizations: 0,
             },
-            trigger: settings.trigger,
-            trigger_counter: 0,
-            last_best_objective: f64::INFINITY,
+            trigger: TriggerState::new(settings.trigger),
             penalty_sum: 0,
         }
     }
@@ -73,9 +165,9 @@ where
     fn on_start(&mut self, graph: &ScheduleGraph, initial_objective: T) {
         self.memory.reset(graph.num_vessels(), graph.num_berths());
         self.penalty_sum = self.memory.penalty_sum(graph);
-        self.trigger_counter = 0;
+        self.trigger
+            .restart(initial_objective.to_f64().unwrap_or(0.0));
         self.decay.penalizations = 0;
-        self.last_best_objective = initial_objective.to_f64().unwrap_or(0.0);
         self.lambda.restart();
     }
 
@@ -121,12 +213,8 @@ where
         // SAFETY: the diff names only vessels and berths of the graph the run searches, which the memory counts
         // from the start of the run on, the precondition of this function.
         self.penalty_sum += unsafe { self.memory.penalty_delta_unchecked(diff) };
-        if let PenalizationTrigger::AfterMoves(moves) = self.trigger {
-            self.trigger_counter += 1;
-            if self.trigger_counter >= moves {
-                self.trigger_counter = 0;
-                self.penalize(graph);
-            }
+        if self.trigger.on_accept() {
+            self.penalize(graph);
         }
     }
 
@@ -135,22 +223,16 @@ where
     }
 
     fn after_step(&mut self, best_objective: T, graph: &ScheduleGraph) {
-        if let PenalizationTrigger::AfterNonImprovements(steps) = self.trigger {
-            let best = best_objective.to_f64().unwrap_or(0.0);
-            if best < self.last_best_objective {
-                self.trigger_counter = 0;
-                self.last_best_objective = best;
-            } else {
-                self.trigger_counter += 1;
-                if self.trigger_counter >= steps {
-                    self.trigger_counter = 0;
-                    self.penalize(graph);
-                }
-            }
+        if let TriggerState::AfterNonImprovements { .. } = self.trigger
+            && self
+                .trigger
+                .after_step(best_objective.to_f64().unwrap_or(0.0))
+        {
+            self.penalize(graph);
         }
     }
 
-    fn commits_buffered(&mut self) -> bool {
+    fn commits_buffered(&self) -> bool {
         false
     }
 
@@ -158,14 +240,8 @@ where
         &mut self,
         graph: &ScheduleGraph,
     ) -> NeighborhoodExhaustionOutcome {
-        match self.trigger {
-            // An exhausted scan accepted no move, so a count of accepted moves cannot reach its threshold from
-            // here: without a penalty every later scan would repeat this one.
-            PenalizationTrigger::OnExhaustion | PenalizationTrigger::AfterMoves(_) => {
-                self.penalize(graph)
-            }
-            // Every candidate of the next scan is a step without a new best, so the count fires within a few scans.
-            PenalizationTrigger::AfterNonImprovements(_) => {}
+        if self.trigger.penalizes_at_exhaustion() {
+            self.penalize(graph);
         }
         NeighborhoodExhaustionOutcome::Restart
     }
@@ -191,6 +267,11 @@ mod tests {
     /// V0 and V1 on B0 in that order, V2 on B1.
     fn three_vessels_on_two_berths() -> ScheduleGraph {
         ScheduleGraph::from_slices(&[berth(0), berth(0), berth(1)], &[0_i64, 1, 0], 2)
+    }
+
+    /// `count` as a count that is not zero.
+    fn nonzero(count: u64) -> NonZeroU64 {
+        NonZeroU64::new(count).expect("the count should not be zero")
     }
 
     fn started(settings: GuidedLocalSearch, graph: &ScheduleGraph) -> GuidedLocalSearchRule {
@@ -257,7 +338,7 @@ mod tests {
     fn test_non_improvement_trigger_fires_after_steps_without_a_new_best() {
         let graph = three_vessels_on_two_berths();
         let settings = GuidedLocalSearch {
-            trigger: PenalizationTrigger::AfterNonImprovements(3),
+            trigger: PenalizationTrigger::AfterNonImprovements(nonzero(3)),
             ..GuidedLocalSearch::default()
         };
         let mut rule = started(settings, &graph);
@@ -273,7 +354,10 @@ mod tests {
         assert_eq!(rule.penalty_sum, 0);
         step(&mut rule, 90);
         assert_eq!(rule.penalty_sum, 8);
-        assert_eq!(rule.trigger_counter, 0);
+        assert!(matches!(
+            rule.trigger,
+            TriggerState::AfterNonImprovements { count: 0, .. }
+        ));
         // Exhaustion does not penalize under this trigger.
         let _ = AcceptanceRule::<i64>::on_neighborhood_exhausted(&mut rule, &graph);
         assert_eq!(rule.penalty_sum, 8);
@@ -283,16 +367,55 @@ mod tests {
     fn test_moves_trigger_fires_at_every_so_many_accepted_moves() {
         let graph = three_vessels_on_two_berths();
         let settings = GuidedLocalSearch {
-            trigger: PenalizationTrigger::AfterMoves(2),
+            trigger: PenalizationTrigger::AfterMoves(nonzero(2)),
             ..GuidedLocalSearch::default()
         };
         let mut rule = started(settings, &graph);
         let empty = ScheduleGraphDiff::new();
-        // SAFETY: an empty diff names no vessel or berth.
-        unsafe { AcceptanceRule::<i64>::on_accept_unchecked(&mut rule, 90, &graph, &empty) };
-        assert_eq!(rule.penalty_sum, 0);
-        // SAFETY: as above.
-        unsafe { AcceptanceRule::<i64>::on_accept_unchecked(&mut rule, 80, &graph, &empty) };
+        let mut accept = |objective: i64| {
+            // SAFETY: an empty diff names no vessel or berth.
+            unsafe {
+                AcceptanceRule::<i64>::on_accept_unchecked(&mut rule, objective, &graph, &empty)
+            };
+            rule.penalty_sum
+        };
+        assert_eq!(accept(90), 0);
+        assert_eq!(accept(80), 8);
+    }
+
+    #[test]
+    fn test_trigger_state_counts_as_its_trigger_says() {
+        let three = nonzero(3);
+        let mut after_steps = TriggerState::new(PenalizationTrigger::AfterNonImprovements(three));
+        after_steps.restart(100.0);
+        assert_eq!(
+            [100.0, 100.0, 90.0, 90.0, 90.0, 90.0].map(|best| after_steps.after_step(best)),
+            [false, false, false, false, false, true]
+        );
+        assert!(!after_steps.on_accept() && !after_steps.penalizes_at_exhaustion());
+
+        let mut after_moves = TriggerState::new(PenalizationTrigger::AfterMoves(three));
+        assert_eq!(
+            [(); 6].map(|()| after_moves.on_accept()),
+            [false, false, true, false, false, true]
+        );
+        assert!(!after_moves.after_step(0.0) && after_moves.penalizes_at_exhaustion());
+
+        let mut on_exhaustion = TriggerState::new(PenalizationTrigger::OnExhaustion);
+        assert!(!on_exhaustion.on_accept() && !on_exhaustion.after_step(0.0));
+        assert!(on_exhaustion.penalizes_at_exhaustion());
+    }
+
+    #[test]
+    fn test_moves_trigger_penalizes_at_an_exhausted_scan() {
+        let graph = three_vessels_on_two_berths();
+        let settings = GuidedLocalSearch {
+            trigger: PenalizationTrigger::AfterMoves(nonzero(1000)),
+            ..GuidedLocalSearch::default()
+        };
+        let mut rule = started(settings, &graph);
+        let outcome = AcceptanceRule::<i64>::on_neighborhood_exhausted(&mut rule, &graph);
+        assert_eq!(outcome, NeighborhoodExhaustionOutcome::Restart);
         assert_eq!(rule.penalty_sum, 8);
     }
 

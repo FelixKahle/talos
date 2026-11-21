@@ -7,8 +7,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use talos_ls::{
-    DynamicLambda, Engine, GuidedLocalSearch, Lambda, LocalSearchMonitor, LocalSearchParameters,
-    Metaheuristic, PenalizationTrigger, SearchLimits, SearchProgress, heuristic_lambda,
+    AtNewBest, DynamicLambda, Engine, GuidedLocalSearch, Lambda, LocalSearchMonitor,
+    LocalSearchParameters, Metaheuristic, PenalizationTrigger, SearchLimits, SearchProgress,
+    heuristic_lambda,
 };
 use talos_model::Model;
 
@@ -231,11 +232,11 @@ fn run_benchmark(
 
     let guided_local_search = Metaheuristic::GuidedLocalSearch(GuidedLocalSearch {
         lambda: Lambda::Dynamic(DynamicLambda::new(
-            lambda_02, // Initial (Alpha 0.2)
-            0.1,       // Increase step
-            0.1,       // Decay step
-            lambda_01, // Min (Alpha 0.1)
-            lambda_03, // Max (Alpha 0.3)
+            lambda_02,                // Initial (Alpha 0.2)
+            0.1,                      // Increase step
+            AtNewBest::Decrease(0.1), // Decay step
+            lambda_01,                // Min (Alpha 0.1)
+            lambda_03,                // Max (Alpha 0.3)
         )),
         trigger: PenalizationTrigger::OnExhaustion,
         ..GuidedLocalSearch::default()

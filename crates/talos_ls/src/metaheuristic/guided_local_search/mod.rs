@@ -26,6 +26,6 @@ mod rule;
 pub use rule::GuidedLocalSearchRule;
 
 pub use settings::{
-    AdditiveDynamicLambda, DynamicLambda, GeometricDecay, GuidedLocalSearch, Lambda,
+    AdditiveDynamicLambda, AtNewBest, DynamicLambda, GeometricDecay, GuidedLocalSearch, Lambda,
     PenalizationTrigger, PenaltyDecay, StaticLambda, heuristic_lambda,
 };

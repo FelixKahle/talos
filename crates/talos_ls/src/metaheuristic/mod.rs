@@ -24,7 +24,7 @@ pub(super) use guided_local_search::GuidedLocalSearchRule;
 pub use acceptance::Metaheuristic;
 pub use greedy_descent::GreedyDescent;
 pub use guided_local_search::{
-    AdditiveDynamicLambda, DynamicLambda, GeometricDecay, GuidedLocalSearch, Lambda,
+    AdditiveDynamicLambda, AtNewBest, DynamicLambda, GeometricDecay, GuidedLocalSearch, Lambda,
     PenalizationTrigger, PenaltyDecay, StaticLambda, heuristic_lambda,
 };
 pub use move_selection::MoveSelection;

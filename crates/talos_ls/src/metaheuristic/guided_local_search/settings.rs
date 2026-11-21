@@ -4,6 +4,8 @@
 //! The settings of a guided local search: the penalty weight and how it evolves, the decay of the penalties, and
 //! the trigger of a penalization.
 
+use std::num::NonZeroU64;
+
 /// The settings of a guided local search: how the penalty weight evolves, how penalties decay, and when the
 /// search penalizes.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -59,71 +61,78 @@ impl StaticLambda {
     pub fn try_new(value: f64) -> Option<Self> {
         is_finite_positive(value).then_some(Self { value })
     }
+}
 
-    /// The weight.
-    pub fn value(self) -> f64 {
-        self.value
-    }
+/// What a penalty weight that evolves does at a new best.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AtNewBest {
+    /// The weight decreases by this, as its kind decreases: a [`DynamicLambda`] by this factor of itself, an
+    /// [`AdditiveDynamicLambda`] by this step.
+    Decrease(f64),
+    /// The weight is set back to its start.
+    Restart,
 }
 
 /// A penalty weight that grows by a factor at each penalization and shrinks by a factor at each new best, kept
 /// within its bounds.
 ///
 /// The weight starts at `initial` clamped to `[min, max]`; a penalization multiplies it by `1 + increase`, and a
-/// new best multiplies it by `1 - decrease` or, with `reset_on_best`, sets it back to its start.
+/// new best multiplies it by `1 - decrease` for [`AtNewBest::Decrease`] or sets it back to its start for
+/// [`AtNewBest::Restart`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DynamicLambda {
     pub(super) initial: f64,
     pub(super) increase: f64,
-    pub(super) decrease: f64,
+    pub(super) at_new_best: AtNewBest,
     pub(super) min: f64,
     pub(super) max: f64,
-    pub(super) reset_on_best: bool,
 }
 
 impl DynamicLambda {
     /// The weight that starts at `initial` and is kept in `[min, max]`, grows by the factor `1 + increase` at each
-    /// penalization and shrinks by the factor `1 - decrease` at each new best.
+    /// penalization, and at each new best does what `at_new_best` says.
     ///
     /// # Panics
     ///
-    /// Panics if `initial`, `increase` or `min` is not finite and positive, if `decrease` is not in `(0, 1)`, or
-    /// if `max` is not finite or below `min`.
-    pub fn new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Self {
-        match Self::try_new(initial, increase, decrease, min, max) {
+    /// Panics if `initial`, `increase` or `min` is not finite and positive, if the decrease of `at_new_best` is
+    /// not in `(0, 1)`, or if `max` is not finite or below `min`.
+    pub fn new(initial: f64, increase: f64, at_new_best: AtNewBest, min: f64, max: f64) -> Self {
+        match Self::try_new(initial, increase, at_new_best, min, max) {
             Some(lambda) => lambda,
             None => panic!(
-                "called `DynamicLambda::new` with initial {initial}, increase {increase}, decrease {decrease}, min \
-                 {min} and max {max}, not finite and positive initial, increase and min, a decrease in (0, 1) and \
-                 a finite max of at least min"
+                "called `DynamicLambda::new` with initial {initial}, increase {increase}, {at_new_best:?} at a new \
+                 best, min {min} and max {max}, not finite and positive initial, increase and min, a decrease in \
+                 (0, 1) and a finite max of at least min"
             ),
         }
     }
 
     /// The weight of [`new`](Self::new), or `None` if `initial`, `increase` or `min` is not finite and positive,
-    /// if `decrease` is not in `(0, 1)`, or if `max` is not finite or below `min`.
-    pub fn try_new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Option<Self> {
+    /// if the decrease of `at_new_best` is not in `(0, 1)`, or if `max` is not finite or below `min`.
+    pub fn try_new(
+        initial: f64,
+        increase: f64,
+        at_new_best: AtNewBest,
+        min: f64,
+        max: f64,
+    ) -> Option<Self> {
+        let decrease_valid = match at_new_best {
+            AtNewBest::Decrease(decrease) => decrease > 0.0 && decrease < 1.0,
+            AtNewBest::Restart => true,
+        };
         let valid = is_finite_positive(initial)
             && is_finite_positive(increase)
-            && decrease > 0.0
-            && decrease < 1.0
+            && decrease_valid
             && is_finite_positive(min)
             && max.is_finite()
             && max >= min;
         valid.then_some(Self {
             initial,
             increase,
-            decrease,
+            at_new_best,
             min,
             max,
-            reset_on_best: false,
         })
-    }
-
-    /// The same weight, which at a new best is set back to its start if `reset` holds, or shrinks otherwise.
-    pub fn with_reset_on_best(mut self, reset: bool) -> Self {
-        self.reset_on_best = reset;
-        self
     }
 }
 
@@ -131,59 +140,61 @@ impl DynamicLambda {
 /// its bounds.
 ///
 /// The weight starts at `initial` clamped to `[min, max]`; a penalization adds `increase`, and a new best subtracts
-/// `decrease` or, with `reset_on_best`, sets it back to its start.
+/// `decrease` for [`AtNewBest::Decrease`] or sets it back to its start for [`AtNewBest::Restart`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdditiveDynamicLambda {
     pub(super) initial: f64,
     pub(super) increase: f64,
-    pub(super) decrease: f64,
+    pub(super) at_new_best: AtNewBest,
     pub(super) min: f64,
     pub(super) max: f64,
-    pub(super) reset_on_best: bool,
 }
 
 impl AdditiveDynamicLambda {
-    /// The weight that starts at `initial` and is kept in `[min, max]`, grows by `increase` at each penalization
-    /// and shrinks by `decrease` at each new best.
+    /// The weight that starts at `initial` and is kept in `[min, max]`, grows by `increase` at each penalization,
+    /// and at each new best does what `at_new_best` says.
     ///
     /// # Panics
     ///
-    /// Panics if `initial`, `increase`, `decrease` or `min` is not finite and positive, or if `max` is not finite
-    /// or below `min`.
-    pub fn new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Self {
-        match Self::try_new(initial, increase, decrease, min, max) {
+    /// Panics if `initial`, `increase`, the decrease of `at_new_best` or `min` is not finite and positive, or if
+    /// `max` is not finite or below `min`.
+    pub fn new(initial: f64, increase: f64, at_new_best: AtNewBest, min: f64, max: f64) -> Self {
+        match Self::try_new(initial, increase, at_new_best, min, max) {
             Some(lambda) => lambda,
             None => panic!(
-                "called `AdditiveDynamicLambda::new` with initial {initial}, increase {increase}, decrease \
-                 {decrease}, min {min} and max {max}, not finite and positive initial, increase, decrease and min \
-                 and a finite max of at least min"
+                "called `AdditiveDynamicLambda::new` with initial {initial}, increase {increase}, {at_new_best:?} \
+                 at a new best, min {min} and max {max}, not finite and positive initial, increase, decrease and \
+                 min and a finite max of at least min"
             ),
         }
     }
 
-    /// The weight of [`new`](Self::new), or `None` if `initial`, `increase`, `decrease` or `min` is not finite and
-    /// positive, or if `max` is not finite or below `min`.
-    pub fn try_new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Option<Self> {
+    /// The weight of [`new`](Self::new), or `None` if `initial`, `increase`, the decrease of `at_new_best` or `min`
+    /// is not finite and positive, or if `max` is not finite or below `min`.
+    pub fn try_new(
+        initial: f64,
+        increase: f64,
+        at_new_best: AtNewBest,
+        min: f64,
+        max: f64,
+    ) -> Option<Self> {
+        let decrease_valid = match at_new_best {
+            AtNewBest::Decrease(decrease) => is_finite_positive(decrease),
+            AtNewBest::Restart => true,
+        };
         let valid = is_finite_positive(initial)
             && is_finite_positive(increase)
-            && is_finite_positive(decrease)
+            && decrease_valid
             && is_finite_positive(min)
             && max.is_finite()
             && max >= min;
         valid.then_some(Self {
             initial,
             increase,
-            decrease,
+            at_new_best,
             min,
             max,
-            reset_on_best: false,
         })
-    }
-
-    /// The same weight, which at a new best is set back to its start if `reset` holds, or shrinks otherwise.
-    pub fn with_reset_on_best(mut self, reset: bool) -> Self {
-        self.reset_on_best = reset;
-        self
     }
 }
 
@@ -233,10 +244,10 @@ pub enum PenalizationTrigger {
     #[default]
     OnExhaustion,
     /// After this many steps in a row without a new best, each candidate and each exhausted scan a step.
-    AfterNonImprovements(u64),
+    AfterNonImprovements(NonZeroU64),
     /// After every this many accepted moves, and when a scan finds no move that lowers the augmented objective,
     /// where no move is accepted and the count would never fire.
-    AfterMoves(u64),
+    AfterMoves(NonZeroU64),
 }
 
 impl std::fmt::Display for PenalizationTrigger {
@@ -295,18 +306,19 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "called `DynamicLambda::new` with initial 1, increase 0.1, decrease 1,"
+        expected = "called `DynamicLambda::new` with initial 1, increase 0.1, Decrease(1.0) at a new best,"
     )]
     fn test_dynamic_lambda_refuses_a_decrease_of_one() {
-        let _ = DynamicLambda::new(1.0, 0.1, 1.0, 0.5, 2.0);
+        let _ = DynamicLambda::new(1.0, 0.1, AtNewBest::Decrease(1.0), 0.5, 2.0);
     }
 
     #[test]
     #[should_panic(
-        expected = "called `AdditiveDynamicLambda::new` with initial 1, increase 0.1, decrease 0.1, min 2 and max 1,"
+        expected = "called `AdditiveDynamicLambda::new` with initial 1, increase 0.1, Decrease(0.1) at a new best, \
+                    min 2 and max 1,"
     )]
     fn test_additive_dynamic_lambda_refuses_max_below_min() {
-        let _ = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 2.0, 1.0);
+        let _ = AdditiveDynamicLambda::new(1.0, 0.1, AtNewBest::Decrease(0.1), 2.0, 1.0);
     }
 
     #[test]
@@ -326,25 +338,25 @@ mod tests {
     #[test]
     #[should_panic(expected = "called `DynamicLambda::new` with")]
     fn test_dynamic_lambda_refuses_an_infinite_bound() {
-        let _ = DynamicLambda::new(1.0, 0.1, 0.5, 0.5, f64::INFINITY);
+        let _ = DynamicLambda::new(1.0, 0.1, AtNewBest::Decrease(0.5), 0.5, f64::INFINITY);
     }
 
     #[test]
     #[should_panic(expected = "called `DynamicLambda::new` with")]
     fn test_dynamic_lambda_refuses_an_infinite_increase() {
-        let _ = DynamicLambda::new(1.0, f64::INFINITY, 0.5, 0.5, 2.0);
+        let _ = DynamicLambda::new(1.0, f64::INFINITY, AtNewBest::Decrease(0.5), 0.5, 2.0);
     }
 
     #[test]
     #[should_panic(expected = "called `AdditiveDynamicLambda::new` with")]
     fn test_additive_dynamic_lambda_refuses_an_infinite_bound() {
-        let _ = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 0.5, f64::INFINITY);
+        let _ = AdditiveDynamicLambda::new(1.0, 0.1, AtNewBest::Decrease(0.1), 0.5, f64::INFINITY);
     }
 
     #[test]
     #[should_panic(expected = "called `AdditiveDynamicLambda::new` with")]
     fn test_additive_dynamic_lambda_refuses_an_infinite_increase() {
-        let _ = AdditiveDynamicLambda::new(1.0, f64::INFINITY, 0.1, 0.5, 2.0);
+        let _ = AdditiveDynamicLambda::new(1.0, f64::INFINITY, AtNewBest::Decrease(0.1), 0.5, 2.0);
     }
 
     #[test]
@@ -356,7 +368,7 @@ mod tests {
                 .iter()
                 .all(|&value| StaticLambda::try_new(value).is_none())
         );
-        assert!(DynamicLambda::try_new(1.0, 0.1, 0.5, 0.5, 2.0).is_some());
+        assert!(DynamicLambda::try_new(1.0, 0.1, AtNewBest::Decrease(0.5), 0.5, 2.0).is_some());
         for (initial, increase, decrease, min, max) in [
             (infinity, 0.1, 0.5, 0.5, 2.0),
             (nan, 0.1, 0.5, 0.5, 2.0),
@@ -368,11 +380,13 @@ mod tests {
             (1.0, 0.1, 0.5, 3.0, 2.0),
         ] {
             assert_eq!(
-                DynamicLambda::try_new(initial, increase, decrease, min, max),
+                DynamicLambda::try_new(initial, increase, AtNewBest::Decrease(decrease), min, max),
                 None
             );
         }
-        assert!(AdditiveDynamicLambda::try_new(1.0, 0.1, 2.0, 0.5, 2.0).is_some());
+        assert!(
+            AdditiveDynamicLambda::try_new(1.0, 0.1, AtNewBest::Decrease(2.0), 0.5, 2.0).is_some()
+        );
         for (initial, increase, decrease, min, max) in [
             (1.0, 0.1, infinity, 0.5, 2.0),
             (1.0, nan, 0.1, 0.5, 2.0),
@@ -381,7 +395,13 @@ mod tests {
             (1.0, 0.1, 0.1, 3.0, 2.0),
         ] {
             assert_eq!(
-                AdditiveDynamicLambda::try_new(initial, increase, decrease, min, max),
+                AdditiveDynamicLambda::try_new(
+                    initial,
+                    increase,
+                    AtNewBest::Decrease(decrease),
+                    min,
+                    max
+                ),
                 None
             );
         }
@@ -391,6 +411,17 @@ mod tests {
         assert_eq!(GeometricDecay::try_new(infinity, 1), None);
     }
 
+    /// `count` as a count that is not zero.
+    fn nonzero(count: u64) -> NonZeroU64 {
+        NonZeroU64::new(count).expect("the count should not be zero")
+    }
+
+    #[test]
+    fn test_restart_at_a_new_best_takes_no_decrease_and_is_always_valid() {
+        assert!(DynamicLambda::try_new(1.0, 0.1, AtNewBest::Restart, 0.5, 2.0).is_some());
+        assert!(AdditiveDynamicLambda::try_new(1.0, 0.1, AtNewBest::Restart, 0.5, 2.0).is_some());
+    }
+
     #[test]
     fn test_trigger_display_names_the_rule() {
         assert_eq!(
@@ -398,11 +429,11 @@ mod tests {
             "on exhaustion"
         );
         assert_eq!(
-            PenalizationTrigger::AfterNonImprovements(5).to_string(),
+            PenalizationTrigger::AfterNonImprovements(nonzero(5)).to_string(),
             "after 5 non-improving steps"
         );
         assert_eq!(
-            PenalizationTrigger::AfterMoves(3).to_string(),
+            PenalizationTrigger::AfterMoves(nonzero(3)).to_string(),
             "after 3 accepted moves"
         );
     }

@@ -46,9 +46,9 @@ mod benchmarks;
 pub use engine::Engine;
 pub use limits::SearchLimits;
 pub use metaheuristic::{
-    AdditiveDynamicLambda, DynamicLambda, GeometricDecay, GreedyDescent, GuidedLocalSearch, Lambda,
-    Metaheuristic, MoveSelection, PenalizationTrigger, PenaltyDecay, StaticLambda, TieBreaking,
-    heuristic_lambda,
+    AdditiveDynamicLambda, AtNewBest, DynamicLambda, GeometricDecay, GreedyDescent,
+    GuidedLocalSearch, Lambda, Metaheuristic, MoveSelection, PenalizationTrigger, PenaltyDecay,
+    StaticLambda, TieBreaking, heuristic_lambda,
 };
 pub use monitor::{LocalSearchMonitor, NoMonitor, SearchProgress};
 pub use objective::{

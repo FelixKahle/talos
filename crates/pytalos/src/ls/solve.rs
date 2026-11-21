@@ -12,10 +12,10 @@ use crate::{
 };
 use itertools::Itertools;
 use pyo3::{exceptions::PyValueError, prelude::*};
-use std::time::Duration;
+use std::{num::NonZeroU64, time::Duration};
 use talos_ls::{
-    AdditiveDynamicLambda, DynamicLambda, Engine, GeometricDecay, GuidedLocalSearch, Lambda,
-    LocalSearchParameters, Metaheuristic, Neighborhood, PenalizationTrigger, PenaltyDecay,
+    AdditiveDynamicLambda, AtNewBest, DynamicLambda, Engine, GeometricDecay, GuidedLocalSearch,
+    Lambda, LocalSearchParameters, Metaheuristic, Neighborhood, PenalizationTrigger, PenaltyDecay,
     SearchLimits, StaticLambda, heuristic_lambda,
 };
 #[pyclass(name = "Operator", eq, eq_int, from_py_object)]
@@ -140,14 +140,18 @@ fn build_limits(config: &PyLocalSearchConfig) -> PyResult<SearchLimits> {
     })
 }
 
-fn build_trigger(config: &PyGlsConfig) -> PenalizationTrigger {
-    match config.trigger {
+/// The trigger `config` asks for; a threshold of zero raises a `ValueError`.
+fn build_trigger(config: &PyGlsConfig) -> PyResult<PenalizationTrigger> {
+    let threshold = || {
+        NonZeroU64::new(config.trigger_threshold).ok_or_else(|| {
+            PyValueError::new_err("a trigger threshold of zero steps or moves never fires")
+        })
+    };
+    Ok(match config.trigger {
         PyTrigger::OnExhaustion => PenalizationTrigger::OnExhaustion,
-        PyTrigger::AfterNonImprovements => {
-            PenalizationTrigger::AfterNonImprovements(config.trigger_threshold)
-        }
-        PyTrigger::AfterMoves => PenalizationTrigger::AfterMoves(config.trigger_threshold),
-    }
+        PyTrigger::AfterNonImprovements => PenalizationTrigger::AfterNonImprovements(threshold()?),
+        PyTrigger::AfterMoves => PenalizationTrigger::AfterMoves(threshold()?),
+    })
 }
 
 /// The guided local search `config` asks for, its default weights derived from the initial objective over the
@@ -169,6 +173,10 @@ fn build_guided_local_search(
         .lambda_max
         .unwrap_or_else(|| heuristic_lambda(objective, features, 0.3));
     let (increase, decrease) = (config.lambda_inc_step, config.lambda_dec_step);
+    let at_new_best = match config.reset_on_best {
+        true => AtNewBest::Restart,
+        false => AtNewBest::Decrease(decrease),
+    };
     let lambda = match config.lambda_strategy {
         PyLambdaStrategy::Static => {
             let initial = base(0.3);
@@ -182,8 +190,8 @@ fn build_guided_local_search(
         }
         PyLambdaStrategy::Dynamic => {
             let initial = base(0.2);
-            DynamicLambda::try_new(initial, increase, decrease, min, max)
-                .map(|lambda| Lambda::Dynamic(lambda.with_reset_on_best(config.reset_on_best)))
+            DynamicLambda::try_new(initial, increase, at_new_best, min, max)
+                .map(Lambda::Dynamic)
                 .ok_or_else(|| {
                     PyValueError::new_err(format!(
                         "a dynamic lambda of initial {initial}, increase {increase}, decrease {decrease}, min \
@@ -194,10 +202,8 @@ fn build_guided_local_search(
         }
         PyLambdaStrategy::Additive => {
             let initial = base(0.2);
-            AdditiveDynamicLambda::try_new(initial, increase, decrease, min, max)
-                .map(|lambda| {
-                    Lambda::AdditiveDynamic(lambda.with_reset_on_best(config.reset_on_best))
-                })
+            AdditiveDynamicLambda::try_new(initial, increase, at_new_best, min, max)
+                .map(Lambda::AdditiveDynamic)
                 .ok_or_else(|| {
                     PyValueError::new_err(format!(
                         "an additive lambda of initial {initial}, increase {increase}, decrease {decrease}, min \
@@ -224,7 +230,7 @@ fn build_guided_local_search(
     Ok(GuidedLocalSearch {
         lambda,
         decay,
-        trigger: build_trigger(config),
+        trigger: build_trigger(config)?,
     })
 }
 

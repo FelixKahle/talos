@@ -5,7 +5,7 @@
 
 use super::{
     penalty_memory::PenaltyMemory,
-    settings::{Lambda, PenaltyDecay},
+    settings::{AtNewBest, Lambda, PenaltyDecay},
 };
 
 /// The penalty weight of a run as it evolves under its [`Lambda`].
@@ -36,15 +36,18 @@ impl LambdaSchedule {
     pub(super) fn on_new_best(&mut self) {
         match self.rule {
             Lambda::Static(_) => {}
-            Lambda::Dynamic(lambda) if lambda.reset_on_best => self.restart(),
-            Lambda::Dynamic(lambda) => {
-                self.current =
-                    (self.current * (1.0 - lambda.decrease)).clamp(lambda.min, lambda.max);
-            }
-            Lambda::AdditiveDynamic(lambda) if lambda.reset_on_best => self.restart(),
-            Lambda::AdditiveDynamic(lambda) => {
-                self.current = (self.current - lambda.decrease).clamp(lambda.min, lambda.max);
-            }
+            Lambda::Dynamic(lambda) => match lambda.at_new_best {
+                AtNewBest::Decrease(decrease) => {
+                    self.current = (self.current * (1.0 - decrease)).clamp(lambda.min, lambda.max);
+                }
+                AtNewBest::Restart => self.restart(),
+            },
+            Lambda::AdditiveDynamic(lambda) => match lambda.at_new_best {
+                AtNewBest::Decrease(decrease) => {
+                    self.current = (self.current - decrease).clamp(lambda.min, lambda.max);
+                }
+                AtNewBest::Restart => self.restart(),
+            },
         }
     }
 
@@ -116,8 +119,13 @@ mod tests {
 
     #[test]
     fn test_dynamic_lambda_multiplies_within_its_bounds() {
-        let mut schedule =
-            LambdaSchedule::new(Lambda::Dynamic(DynamicLambda::new(1.0, 0.5, 0.5, 0.4, 2.0)));
+        let mut schedule = LambdaSchedule::new(Lambda::Dynamic(DynamicLambda::new(
+            1.0,
+            0.5,
+            AtNewBest::Decrease(0.5),
+            0.4,
+            2.0,
+        )));
         schedule.on_penalization();
         assert_eq!(schedule.current, 1.5);
         schedule.on_penalization();
@@ -133,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_dynamic_lambda_starts_clamped_and_resets_on_best_where_asked() {
-        let lambda = DynamicLambda::new(5.0, 0.5, 0.5, 0.4, 2.0).with_reset_on_best(true);
+        let lambda = DynamicLambda::new(5.0, 0.5, AtNewBest::Restart, 0.4, 2.0);
         let mut schedule = LambdaSchedule::new(Lambda::Dynamic(lambda));
         assert_eq!(schedule.current, 2.0);
         schedule.current = 0.5;
@@ -144,7 +152,7 @@ mod tests {
     #[test]
     fn test_additive_dynamic_lambda_steps_within_its_bounds() {
         let mut schedule = LambdaSchedule::new(Lambda::AdditiveDynamic(
-            AdditiveDynamicLambda::new(1.0, 0.25, 0.5, 0.5, 1.5),
+            AdditiveDynamicLambda::new(1.0, 0.25, AtNewBest::Decrease(0.5), 0.5, 1.5),
         ));
         schedule.on_penalization();
         assert_eq!(schedule.current, 1.25);
