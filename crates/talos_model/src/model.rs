@@ -747,12 +747,18 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> ProcessingTime<T> {
-        debug_assert!(vessel_index.index() < self.num_vessels());
-        debug_assert!(berth_index.index() < self.num_berths());
+        assert!(
+            vessel_index.index() < self.num_vessels(),
+            "called `Model::vessel_processing_time` with {vessel_index}, beyond the {} vessels",
+            self.num_vessels()
+        );
+        assert!(
+            berth_index.index() < self.num_berths(),
+            "called `Model::vessel_processing_time` with {berth_index}, beyond the {} berths",
+            self.num_berths()
+        );
 
         let flat_index = flatten_index(self.num_berths(), vessel_index, berth_index);
-        debug_assert!(flat_index < self.processing_times.len());
-
         self.processing_times[flat_index]
     }
 
@@ -783,7 +789,8 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if `vessel_index` is not in `0..num_vessels()`.
+    /// Panics if `vessel_index` is not in `0..num_vessels()` or
+    /// if `berth_index` is not in `0..num_berths()`.
     #[inline]
     pub fn vessel_allowed_on_berth(
         &self,
@@ -1075,6 +1082,15 @@ mod tests {
                 .unwrap(),
             8
         );
+    }
+
+    // Vessel 0 at berth 2 of a two-berth model lands, in the flat matrix, on vessel 1 at berth 0; the accessor must
+    // refuse it in every build rather than answer that entry.
+    #[test]
+    #[should_panic(expected = "called `Model::vessel_processing_time` with BerthIndex 2, beyond the 2 berths")]
+    fn test_vessel_processing_time_refuses_a_berth_beyond_the_last() {
+        let model = build_valid_model();
+        let _ = model.vessel_processing_time(vessel_index(0), berth_index(2));
     }
 
     #[test]
