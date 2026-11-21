@@ -144,13 +144,13 @@ where
     );
     let mut objective = T::ZERO;
     for berth in model.berths() {
-        // SAFETY: `berth` is the model's, whose berths are the graph's and the candidate's, a precondition of this
-        // function; every vessel the graph yields is its own, so the model's and the candidate's too.
-        let berth_cost = unsafe {
-            let sequence = graph.vessel_sequence_iter_unchecked(berth);
-            decode_berth_unchecked(berth, sequence, candidate, model, &evaluator)?
-        };
-        // SAFETY: `berth` is the candidate's, as above.
+        // SAFETY: `berth` is the model's, whose berths are the graph's, a precondition of this function.
+        let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
+        // SAFETY: `berth` is the model's; the walk yields only vessels of the graph (`VesselSequenceIter`), whose
+        // vessels are the model's and the candidate's, a precondition of this function.
+        let berth_cost =
+            unsafe { decode_berth_unchecked(berth, sequence, candidate, model, &evaluator) }?;
+        // SAFETY: `berth` is the model's, whose berths are the candidate's, a precondition of this function.
         unsafe { candidate.set_berth_cost_unchecked(berth, berth_cost) };
         objective = objective + berth_cost;
     }
@@ -194,14 +194,16 @@ where
     );
     let mut objective = accepted.objective();
     for berth in touched.iter_touched_berths() {
-        // SAFETY: every berth `touched` yields is below its count, which is the model's, the graph's and the
-        // states', a precondition of this function; every vessel the graph yields is its own, so the model's and
-        // the candidate's too.
-        let berth_cost = unsafe {
-            let sequence = graph.vessel_sequence_iter_unchecked(berth);
-            decode_berth_unchecked(berth, sequence, candidate, model, &evaluator)?
-        };
-        // SAFETY: `berth` is the states', as above.
+        // SAFETY: every berth `touched` yields is below its count (`TouchedBerths`), which is the graph's, a
+        // precondition of this function.
+        let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
+        // SAFETY: `berth` is below the count of `touched`, which is the model's; the walk yields only vessels of the
+        // graph (`VesselSequenceIter`), whose vessels are the model's and the candidate's, a precondition of this
+        // function.
+        let berth_cost =
+            unsafe { decode_berth_unchecked(berth, sequence, candidate, model, &evaluator) }?;
+        // SAFETY: `berth` is below the count of `touched`, which is that of both states, a precondition of this
+        // function.
         let accepted_cost = unsafe {
             candidate.set_berth_cost_unchecked(berth, berth_cost);
             accepted.berth_cost_unchecked(berth)

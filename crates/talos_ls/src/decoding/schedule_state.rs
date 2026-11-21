@@ -304,14 +304,15 @@ where
              different counts"
         );
         for berth in touched.iter_touched_berths() {
-            // SAFETY: every berth `touched` yields is below its count, which is the graph's and the states', a
+            // SAFETY: every berth `touched` yields is below its count (`TouchedBerths`), which is the states', a
             // precondition of this function.
             unsafe { self.set_berth_cost_unchecked(berth, candidate.berth_cost_unchecked(berth)) };
-            // SAFETY: as above, `berth` is one of the graph's.
+            // SAFETY: every berth `touched` yields is below its count (`TouchedBerths`), which is the graph's, a
+            // precondition of this function.
             let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
             for vessel in sequence {
-                // SAFETY: every vessel the graph yields is one of its vessels, which are the states', a
-                // precondition of this function.
+                // SAFETY: the walk yields only vessels of the graph (`VesselSequenceIter`), which are the states',
+                // a precondition of this function.
                 unsafe {
                     let start = candidate.vessel_start_unchecked(vessel);
                     self.set_vessel_unchecked(vessel, berth, start);

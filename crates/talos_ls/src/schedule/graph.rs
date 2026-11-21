@@ -26,12 +26,48 @@ fn vessel_of(node: Node) -> VesselIndex {
 // ----------------------------------------------------------------
 
 /// The vessels of a berth, or of a segment of one, in their order along it or against it.
+///
+/// The walk yields only vessels of its graph, in every build: it ends at the first node that is not a vessel's,
+/// as well as at the end of the berth or the segment. A graph whose order a move against its preconditions has
+/// broken so gives a wrong or a short order, never an id outside the graph, and a caller may index its columns of
+/// vessels by every vessel the walk yields without a check.
+// Invariant: every node `inner` yields lies in the arena of a graph of `num_vessels` vessels, and the walk yields
+// a node only if it is below `num_vessels`, so only the node of one of the graph's vessels.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct VesselSequenceIter<'a> {
     /// The walk over the nodes, which stops before the berth's sentinel or after the segment.
     inner: RingSequenceIter<'a>,
-    /// The graph's count of vessels, below which every node the walk yields lies.
+    /// The graph's count of vessels; the walk ends at the first node at or beyond it, a sentinel.
     num_vessels: usize,
+}
+
+impl<'a> VesselSequenceIter<'a> {
+    /// The vessels of the segment `first ..= last` of the rings of `arena`, a graph's arena of `num_vessels`
+    /// vessels, from `first` along its ring.
+    ///
+    /// # Safety
+    ///
+    /// `first` and `last` must be below `num_vessels`, and so nodes of `arena`.
+    #[inline(always)]
+    unsafe fn segment_unchecked(
+        arena: &'a RingArena,
+        num_vessels: usize,
+        first: VesselIndex,
+        last: VesselIndex,
+    ) -> Self {
+        debug_assert!(
+            first.index() < num_vessels && last.index() < num_vessels && num_vessels <= arena.len(),
+            "called `VesselSequenceIter::segment_unchecked` with {first} or {last}, outside a graph of \
+             {num_vessels} vessels"
+        );
+        // SAFETY: `first` and `last` are below the count of vessels, the precondition of this function, so their
+        // nodes lie in the arena by the invariant of `ScheduleGraph`, and so does the node read after `last`.
+        let inner = unsafe {
+            let after_last = arena.next_unchecked(node_of(last));
+            arena.sequence_unchecked(node_of(first), after_last)
+        };
+        Self { inner, num_vessels }
+    }
 }
 
 impl Iterator for VesselSequenceIter<'_> {
@@ -40,12 +76,12 @@ impl Iterator for VesselSequenceIter<'_> {
     #[inline(always)]
     fn next(&mut self) -> Option<VesselIndex> {
         let node = self.inner.next()?;
-        debug_assert!(
-            node.index() < self.num_vessels,
-            "the walk over vessels should meet no sentinel, but met {node} in a graph of {} vessels",
-            self.num_vessels
-        );
-        Some(vessel_of(node))
+        if node.index() < self.num_vessels {
+            Some(vessel_of(node))
+        } else {
+            self.inner.end();
+            None
+        }
     }
 }
 
@@ -71,7 +107,7 @@ enum BerthTopologyState {
 #[derive(Clone, Debug)]
 pub struct BerthTopologyIter<'a> {
     /// The walk over the berth's vessels.
-    inner: RingSequenceIter<'a>,
+    inner: VesselSequenceIter<'a>,
     /// The berth's sentinel.
     sentinel: Node,
     /// Where the walk stands.
@@ -88,7 +124,7 @@ impl Iterator for BerthTopologyIter<'_> {
                 self.state = BerthTopologyState::Vessels;
                 Some(self.sentinel)
             }
-            BerthTopologyState::Vessels => self.inner.next().or_else(|| {
+            BerthTopologyState::Vessels => self.inner.next().map(node_of).or_else(|| {
                 self.state = BerthTopologyState::Done;
                 Some(self.sentinel)
             }),
@@ -98,7 +134,7 @@ impl Iterator for BerthTopologyIter<'_> {
 
     #[inline(always)]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (lower, upper) = self.inner.size_hint();
+        let (lower, upper) = self.inner.inner.size_hint();
         let sentinels = match self.state {
             BerthTopologyState::StartSentinel => 2,
             BerthTopologyState::Vessels => 1,
@@ -251,7 +287,9 @@ where
 // takes `&mut self`, so no id proven against the graph outlives a change of them.
 // Further, each ring holds exactly one sentinel, `vessel_berth[v]` is the berth whose sentinel shares the ring of
 // `v`, and `berth_vessel_count[b]` counts the vessels on the ring of `b`'s sentinel. The moves keep these under
-// their preconditions; breaking those gives a wrong order, never an access out of bounds.
+// their preconditions; breaking those gives a wrong order and wrong counts, never an access out of bounds: every
+// column stays in range whatever the rings hold, and every walk over vessels ends at the first node that is not a
+// vessel's (`VesselSequenceIter`), so it yields only the graph's vessels even from rings that hold two sentinels.
 #[derive(Clone)]
 pub struct ScheduleGraph {
     /// The rings: one per berth, through the berth's sentinel and its vessels in order.
@@ -787,8 +825,8 @@ impl ScheduleGraph {
     ///
     /// # Preconditions
     ///
-    /// `last` follows `first` on its berth. Otherwise the walk yields the wrong vessels, and a debug build panics
-    /// when it meets a sentinel; it ends after at most the graph's count of nodes in every build.
+    /// `last` follows `first` on its berth. Otherwise the walk yields the wrong vessels, though only vessels of the
+    /// graph: it ends at the first sentinel it meets, and after at most the graph's count of nodes.
     ///
     /// # Safety
     ///
@@ -804,15 +842,9 @@ impl ScheduleGraph {
             "called `ScheduleGraph::segment_unchecked` with {first} or {last}, outside a graph of {} vessels",
             self.num_vessels()
         );
-        // SAFETY: `first` and `last` are the graph's, the precondition of this function, so their nodes lie in the
-        // arena by the invariant of `ScheduleGraph`, and so does the node read after `last`.
-        let inner = unsafe {
-            let after_last = self.arena.next_unchecked(node_of(last));
-            self.arena.sequence_unchecked(node_of(first), after_last)
-        };
-        VesselSequenceIter {
-            inner,
-            num_vessels: self.num_vessels(),
+        // SAFETY: `first` and `last` are the graph's, the precondition of this function.
+        unsafe {
+            VesselSequenceIter::segment_unchecked(&self.arena, self.num_vessels(), first, last)
         }
     }
 
@@ -842,16 +874,11 @@ impl ScheduleGraph {
             "called `ScheduleGraph::berth_topology_iter_unchecked` with {berth}, outside a graph of {} berths",
             self.num_berths()
         );
-        let sentinel = self.sentinel_of(berth);
-        // SAFETY: `berth` is the graph's, the precondition of this function, so its sentinel lies in the arena by
-        // the invariant of `ScheduleGraph`, and so does the node read after it.
-        let inner = unsafe {
-            let head = self.arena.next_unchecked(sentinel);
-            self.arena.sequence_unchecked(head, sentinel)
-        };
+        // SAFETY: `berth` is the graph's, the precondition of this function.
+        let inner = unsafe { self.vessel_sequence_iter_unchecked(berth) };
         BerthTopologyIter {
             inner,
-            sentinel,
+            sentinel: self.sentinel_of(berth),
             state: BerthTopologyState::StartSentinel,
         }
     }
@@ -1461,7 +1488,8 @@ impl ScheduleGraph {
     /// # Preconditions
     ///
     /// `last` follows `first` on its ring, and every vessel of the segment stood on `from`. Otherwise the berths
-    /// and counts go wrong, and a debug build panics; the walk ends after at most the graph's count of nodes.
+    /// and counts go wrong, and a debug build panics if the walk does not reach `last`; the walk ends at the first
+    /// sentinel it meets, and after at most the graph's count of nodes.
     ///
     /// # Safety
     ///
@@ -1485,24 +1513,27 @@ impl ScheduleGraph {
         if from == to {
             return;
         }
-        let num_vessels = self.num_vessels();
-        // SAFETY: `first` and `last` are the graph's, the precondition of this function, so their nodes lie in the
-        // arena by the invariant of `ScheduleGraph`, and so does the node read after `last`.
+        // SAFETY: `first` and `last` are the graph's, the precondition of this function.
         let segment = unsafe {
-            let after_last = self.arena.next_unchecked(node_of(last));
-            self.arena.sequence_unchecked(node_of(first), after_last)
+            VesselSequenceIter::segment_unchecked(&self.arena, self.vessel_berth.len(), first, last)
         };
         let mut moved = 0;
-        for node in segment {
+        let mut walked_to = first;
+        for vessel in segment {
             debug_assert!(
-                node.index() < num_vessels,
-                "called `ScheduleGraph::move_segment_berth_unchecked` with {last}, which does not follow {first}"
+                vessel.index() < self.vessel_berth.len(),
+                "the walk over a segment should yield only vessels of the graph, but yielded {vessel}"
             );
-            // Checked: that the walk meets only vessels rests on a precondition no type holds, and a sentinel's node
-            // lies beyond the column.
-            self.vessel_berth[vessel_of(node)] = to;
+            // SAFETY: the walk yields only vessels of the graph (`VesselSequenceIter`), which index `vessel_berth`.
+            *unsafe { self.vessel_berth.get_unchecked_mut(vessel) } = to;
             moved += 1;
+            walked_to = vessel;
         }
+        debug_assert!(
+            walked_to == last,
+            "called `ScheduleGraph::move_segment_berth_unchecked` with {last}, which does not follow {first} on its \
+             berth"
+        );
         // SAFETY: `from` and `to` are the graph's, the precondition of this function.
         unsafe {
             *self.berth_vessel_count.get_unchecked_mut(from) -= moved;
@@ -1770,6 +1801,46 @@ mod tests {
         check_berth(&graph, 1, &[4]);
         check_berth(&graph, 2, &[0]);
         check_berth(&graph, 3, &[3, 5]);
+    }
+
+    /// Asserts that every walk over the vessels of `graph`, along each berth and against it, yields only vessels of
+    /// the graph.
+    #[cfg(not(debug_assertions))]
+    fn assert_walks_yield_only_vessels(graph: &ScheduleGraph) {
+        for b in graph.berths() {
+            let along = graph.vessel_sequence_iter(b);
+            let against = graph.vessel_sequence_rev_iter(b);
+            for v in along.chain(against) {
+                assert!(
+                    v.index() < graph.num_vessels(),
+                    "the walk over {b} should yield only vessels of a graph of {} vessels, but yielded {v}",
+                    graph.num_vessels()
+                );
+            }
+        }
+    }
+
+    // B0: V0 V1, B1: V2 V3. The segment V0 ..= V3 runs over the end of B0 into B1, against the precondition of
+    // `swap_segments`, which only a debug build checks; the order then breaks, but no walk may yield a sentinel.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn test_walks_yield_only_vessels_after_a_swap_of_a_segment_across_two_berths() {
+        let mut graph =
+            ScheduleGraph::from_slices(&[berth(0), berth(0), berth(1), berth(1)], &[0, 1, 0, 1], 2);
+        graph.swap_segments(vessel(0), vessel(3), vessel(1), vessel(1));
+        assert_walks_yield_only_vessels(&graph);
+    }
+
+    // B0: V0 V1, B1: V2 V3. The segment V1 ..= V0 runs through the sentinel of B0, against the precondition of
+    // `swap_segments`; swapped with V2 it takes that sentinel into the ring of B1, and the vessels it moves to B1
+    // are recorded by a walk that must stop at the sentinel rather than read past the vessels.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn test_walks_yield_only_vessels_after_a_swap_of_a_segment_through_a_sentinel() {
+        let mut graph =
+            ScheduleGraph::from_slices(&[berth(0), berth(0), berth(1), berth(1)], &[0, 1, 0, 1], 2);
+        graph.swap_segments(vessel(1), vessel(0), vessel(2), vessel(2));
+        assert_walks_yield_only_vessels(&graph);
     }
 
     #[test]

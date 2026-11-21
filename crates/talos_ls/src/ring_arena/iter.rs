@@ -39,6 +39,12 @@ impl<'a> RingSequenceIter<'a> {
         }
     }
 
+    /// Ends the walk: it yields no node after this.
+    #[inline(always)]
+    pub fn end(&mut self) {
+        self.remaining = 0;
+    }
+
     /// The node the walk yields next, without yielding it.
     fn peek(&self) -> Option<Node> {
         (self.current != self.stop && self.remaining > 0).then_some(self.current.node())

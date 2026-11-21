@@ -1048,8 +1048,8 @@ impl<'a> Mutator<'a> {
     ///
     /// # Preconditions
     ///
-    /// `last` follows `first` on its berth. Otherwise the wrong vessels are recorded, and a debug build panics; the
-    /// walk ends after at most the graph's count of nodes.
+    /// `last` follows `first` on its berth. Otherwise the wrong vessels are recorded, though only vessels of the
+    /// graph: the walk ends at the first sentinel it meets, and after at most the graph's count of nodes.
     ///
     /// # Safety
     ///
