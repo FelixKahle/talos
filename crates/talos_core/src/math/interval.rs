@@ -228,10 +228,16 @@ where
     #[inline]
     #[track_caller]
     pub fn len(&self) -> T {
-        match self.end_exclusive.checked_sub(&self.start_inclusive) {
+        match self.checked_len() {
             Some(length) => length,
             None => panic_length_overflow(),
         }
+    }
+
+    /// The number of integers in the interval, or `None` if `T` cannot hold it.
+    #[inline]
+    fn checked_len(&self) -> Option<T> {
+        self.end_exclusive.checked_sub(&self.start_inclusive)
     }
 
     /// Whether the interval holds no integer (`start == end`).
@@ -773,7 +779,10 @@ mod tests {
 
     #[test]
     fn test_a_range_that_starts_after_its_end_is_refused() {
-        let refused = ClosedOpenInterval::try_from(Range { start: 10i64, end: 5 });
+        let refused = ClosedOpenInterval::try_from(Range {
+            start: 10i64,
+            end: 5,
+        });
         assert_eq!(refused, Err(StartAfterEnd { start: 10, end: 5 }));
         assert_eq!(
             refused.unwrap_err().to_string(),
@@ -795,6 +804,43 @@ mod tests {
 
     fn small_interval() -> impl Strategy<Value = ClosedOpenInterval<i64>> {
         (-20i64..20, 0i64..20).prop_map(|(start, length)| interval(start, start + length))
+    }
+
+    fn non_empty_interval() -> impl Strategy<Value = ClosedOpenInterval<i64>> {
+        (-20i64..20, 1i64..20).prop_map(|(start, length)| interval(start, start + length))
+    }
+
+    /// Any `i64`, with the extremes and the numbers around zero drawn often.
+    fn bound() -> impl Strategy<Value = i64> {
+        prop_oneof![
+            any::<i64>(),
+            Just(i64::MIN),
+            Just(i64::MIN + 1),
+            Just(i64::MAX - 1),
+            Just(i64::MAX),
+            -3i64..3,
+        ]
+    }
+
+    /// `floor((start + end) / 2)`, with neither sum leaving `i64`: each half is at most half the range.
+    fn floor_of_mean(start: i64, end: i64) -> i64 {
+        start.div_euclid(2) + end.div_euclid(2) + (start.rem_euclid(2) + end.rem_euclid(2)) / 2
+    }
+
+    /// Whether `end - start`, for `start <= end`, fits an `i64`: always from a start that is not negative, and
+    /// otherwise up to `start + i64::MAX`, which a negative start cannot overflow.
+    fn length_fits(start: i64, end: i64) -> bool {
+        start >= 0 || end <= start + i64::MAX
+    }
+
+    /// The integers that lie after every point of one interval and before every point of the other.
+    fn points_between(a: ClosedOpenInterval<i64>, b: ClosedOpenInterval<i64>) -> BTreeSet<i64> {
+        let (a, b) = (points(a), points(b));
+        let after = |set: &BTreeSet<i64>| set.last().map_or(i64::MAX, |&last| last + 1);
+        let before = |set: &BTreeSet<i64>| set.first().map_or(i64::MIN, |&first| first);
+        (after(&a)..before(&b))
+            .chain(after(&b)..before(&a))
+            .collect()
     }
 
     proptest! {
@@ -842,11 +888,63 @@ mod tests {
         }
 
         #[test]
-        fn test_midpoint_is_the_floor_of_the_mean(a in any::<i32>(), b in any::<i32>()) {
-            // In `i64` the sum of two `i32` cannot overflow, so the plain mean is the reference.
-            let narrow = ClosedOpenInterval::new(a.min(b), a.max(b));
-            let mean = (i64::from(a) + i64::from(b)).div_euclid(2);
-            prop_assert_eq!(i64::from(narrow.midpoint()), mean);
+        fn test_midpoint_is_the_floor_of_the_mean(a in bound(), b in bound()) {
+            let (start, end) = (a.min(b), a.max(b));
+            prop_assert_eq!(interval(start, end).midpoint(), floor_of_mean(start, end));
+        }
+
+        #[test]
+        fn test_checked_len_counts_exactly_the_lengths_an_i64_holds(a in bound(), b in bound()) {
+            let a_interval = interval(a.min(b), a.max(b));
+            let (start, end) = (a_interval.start(), a_interval.end());
+            match a_interval.checked_len() {
+                Some(length) => {
+                    prop_assert!(length_fits(start, end));
+                    prop_assert_eq!(start + length, end);
+                }
+                None => prop_assert!(!length_fits(start, end)),
+            }
+        }
+
+        #[test]
+        fn test_size_hint_counts_the_points_or_is_unbounded(a in bound(), b in bound()) {
+            let (start, end) = (a.min(b), a.max(b));
+            let count = length_fits(start, end).then(|| end - start).and_then(|count| usize::try_from(count).ok());
+            let expected = count.map_or((usize::MAX, None), |count| (count, Some(count)));
+            prop_assert_eq!(interval(start, end).iter().size_hint(), expected);
+        }
+
+        #[test]
+        fn test_gap_holds_the_points_strictly_between(a in non_empty_interval(), b in non_empty_interval()) {
+            let between = points_between(a, b);
+            prop_assert_eq!(a.gap(b).map(points), (!between.is_empty()).then_some(between));
+        }
+
+        #[test]
+        fn test_adjacent_intervals_share_no_point_and_cover_a_run(
+            a in non_empty_interval(),
+            b in non_empty_interval(),
+        ) {
+            let shared = points(a).intersection(&points(b)).count();
+            prop_assert_eq!(a.adjacent(b), shared == 0 && points_between(a, b).is_empty());
+        }
+
+        #[test]
+        fn test_disjoint_intervals_have_a_point_between(a in non_empty_interval(), b in non_empty_interval()) {
+            prop_assert_eq!(a.disjoint(b), !points_between(a, b).is_empty());
+        }
+
+        #[test]
+        fn test_contains_interval_matches_the_point_sets(a in small_interval(), b in non_empty_interval()) {
+            prop_assert_eq!(a.contains_interval(b), points(b).is_subset(&points(a)));
+        }
+
+        #[test]
+        fn test_split_at_cuts_the_point_set(a in small_interval(), value in -50i64..50) {
+            let (below, rest): (BTreeSet<i64>, BTreeSet<i64>) = points(a).into_iter().partition(|&x| x < value);
+            let both_hold_a_point = !below.is_empty() && !rest.is_empty();
+            let parts = a.split_at(value).map(|(lower, upper)| (points(lower), points(upper)));
+            prop_assert_eq!(parts, both_hold_a_point.then_some((below, rest)));
         }
     }
 }
