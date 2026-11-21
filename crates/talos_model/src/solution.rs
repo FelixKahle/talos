@@ -14,7 +14,8 @@ use typed_index_collections::{TiSlice, TiVec};
 /// of the schedule.
 ///
 /// The berths and the start times are tables keyed by the vessel, one entry per vessel each. A solution does not
-/// know its model: whether its berths are those of a model and its times feasible is a question for the model.
+/// know its model: whether its berths are those of a model and its times feasible is what
+/// [`Model::check_feasibility`](crate::Model::check_feasibility) answers.
 /// [`SolutionView`] is the same schedule borrowed from tables another owner keeps.
 ///
 /// # Examples

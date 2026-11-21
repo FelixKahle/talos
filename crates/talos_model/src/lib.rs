@@ -11,9 +11,12 @@
 //! - [`Solution`] is a schedule of every vessel, a berth and a start time each as an [`Assignment`], and
 //!   [`SolutionView`] the same schedule borrowed; tables of different lengths are refused as a
 //!   [`SolutionLengthMismatch`].
+//! - [`Model::check_feasibility`] tells whether a schedule keeps every condition of its model, or answers the
+//!   first it breaks as an [`Infeasibility`].
 
 mod assignment;
 mod index;
+mod infeasibility;
 mod model;
 mod solution;
 
@@ -22,5 +25,6 @@ pub use index::{
     BerthIndex, BerthIndexIter, BerthIndexTag, TypedIndexIter, VesselIndex, VesselIndexIter,
     VesselIndexTag,
 };
+pub use infeasibility::Infeasibility;
 pub use model::{Model, ModelError};
 pub use solution::{Solution, SolutionIter, SolutionLengthMismatch, SolutionView};

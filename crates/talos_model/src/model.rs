@@ -3,7 +3,10 @@
 
 //! A problem instance: the vessels, the berths, and which vessel may use which berth for how long.
 
+use crate::assignment::Assignment;
 use crate::index::{BerthIndex, BerthIndexIter, VesselIndex, VesselIndexIter};
+use crate::infeasibility::Infeasibility;
+use crate::solution::SolutionView;
 use std::fmt;
 use talos_core::{ClosedOpenInterval, SolverNumeric};
 use typed_index_collections::TiVec;
@@ -12,7 +15,9 @@ use typed_index_collections::TiVec;
 ///
 /// Each vessel arrives at a time, must have left by its latest departure time, and weighs its time in port by a
 /// weight. Each pair of a vessel and a berth has a processing time, or none where the vessel may not use the
-/// berth. Each berth is open during a set of intervals, and a vessel's service must lie within one of them.
+/// berth. Each berth is open during a set of intervals, and a vessel's service must fit one of them, as
+/// [`service_fits_opening`](Model::service_fits_opening) states. [`check_feasibility`](Model::check_feasibility)
+/// tells whether a schedule keeps every condition of the model.
 ///
 /// A model is cold data: it is built once, checked as it is built, and read by the solver. Every accessor
 /// answers in constant time. The accessors indexed by a vessel or a berth come as a checked form, which panics on
@@ -327,6 +332,182 @@ where
         unsafe { self.openings.of_berth_unchecked(berth) }
     }
 
+    /// Whether a service of length `processing_time` that starts at `start` fits `opening`.
+    ///
+    /// This is the one rule by which a service fits the openings of its berth: the berth must be open when the
+    /// service starts, and stay open until it ends. For an opening `[a, b)` the service fits exactly when
+    /// `a <= start < b` and `start + processing_time <= b`. A service of length zero so fits an opening exactly
+    /// when its start lies inside it, and none fits at the end of an opening.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use talos_core::ClosedOpenInterval;
+    /// use talos_model::Model;
+    ///
+    /// let opening = ClosedOpenInterval::new(0, 10);
+    /// assert!(Model::service_fits_opening(opening, 4, 6));
+    /// assert!(!Model::service_fits_opening(opening, 5, 6));
+    /// assert!(Model::service_fits_opening(opening, 9, 0));
+    /// assert!(!Model::service_fits_opening(opening, 10, 0));
+    /// ```
+    #[inline]
+    pub fn service_fits_opening(
+        opening: ClosedOpenInterval<T>,
+        start: T,
+        processing_time: T,
+    ) -> bool {
+        opening.contains_point(start) && start + processing_time <= opening.end()
+    }
+
+    /// The earliest start no earlier than `earliest` at which a service of length `processing_time` fits
+    /// `opening`, or `None` if none does.
+    ///
+    /// The start is the later of `earliest` and the start of the opening, as
+    /// [`service_fits_opening`](Model::service_fits_opening) decides whether it fits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use talos_core::ClosedOpenInterval;
+    /// use talos_model::Model;
+    ///
+    /// let opening = ClosedOpenInterval::new(20, 30);
+    /// assert_eq!(Model::earliest_start_in_opening(opening, 10, 5), Some(20));
+    /// assert_eq!(Model::earliest_start_in_opening(opening, 26, 5), None);
+    /// ```
+    #[inline]
+    pub fn earliest_start_in_opening(
+        opening: ClosedOpenInterval<T>,
+        earliest: T,
+        processing_time: T,
+    ) -> Option<T> {
+        // A later start leaves less of the opening, so the earliest candidate is the only one to try.
+        let start = earliest.max(opening.start());
+        Self::service_fits_opening(opening, start, processing_time).then_some(start)
+    }
+
+    /// Whether `schedule` is a feasible schedule of the model, or the first condition it breaks.
+    ///
+    /// A schedule is feasible when it assigns every vessel of the model and nothing else, and each vessel's
+    /// assignment keeps these conditions:
+    ///
+    /// - its berth is a berth of the model that the vessel may use;
+    /// - its service starts no earlier than the vessel arrives;
+    /// - its service fits one opening of its berth, as [`service_fits_opening`](Model::service_fits_opening)
+    ///   states;
+    /// - its service ends no later than the vessel's latest departure time. The latest departure time is a hard
+    ///   bound, as the engine's objectives hold it: they refuse a service that ends after it rather than charge
+    ///   for it.
+    ///
+    /// Besides, no two services at one berth share a moment of time; a service of length zero shares none.
+    ///
+    /// The schedule's objective value is not checked: it is the value of whichever objective a solver minimised,
+    /// which the model does not know.
+    ///
+    /// The check costs a sort of the vessels and allocates; it is meant for validating answers, not for a loop.
+    ///
+    /// # Errors
+    ///
+    /// The [`Infeasibility`] of the first condition broken: [`Infeasibility::VesselCount`] first, then the
+    /// conditions of each vessel in the order of the vessels and of the list above, then
+    /// [`Infeasibility::Overlap`] in the order of the berths.
+    pub fn check_feasibility(&self, schedule: SolutionView<'_, T>) -> Result<(), Infeasibility<T>> {
+        if schedule.num_vessels() != self.num_vessels() {
+            return Err(Infeasibility::VesselCount {
+                scheduled: schedule.num_vessels(),
+                num_vessels: self.num_vessels(),
+            });
+        }
+
+        let mut services = Vec::with_capacity(self.num_vessels());
+        for (vessel, assignment) in self.vessel_iter().zip(schedule) {
+            let processing_time = self.check_assignment(vessel, assignment)?;
+            services.push(Service {
+                berth: assignment.berth,
+                span: ClosedOpenInterval::new(
+                    assignment.start_time,
+                    assignment.start_time + processing_time,
+                ),
+                vessel,
+            });
+        }
+
+        first_overlap(&mut services).map_or(Ok(()), Err)
+    }
+
+    /// The processing time of `vessel` in `assignment`, or the first condition of a vessel that the assignment
+    /// breaks, in the order [`check_feasibility`](Model::check_feasibility) states.
+    ///
+    /// # Errors
+    ///
+    /// [`Infeasibility::BerthBeyondModel`], [`Infeasibility::BerthNotAllowed`],
+    /// [`Infeasibility::StartBeforeArrival`], [`Infeasibility::OutsideOpenings`] or
+    /// [`Infeasibility::LateDeparture`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `vessel` is not a vessel of the model.
+    fn check_assignment(
+        &self,
+        vessel: VesselIndex,
+        assignment: Assignment<T>,
+    ) -> Result<T, Infeasibility<T>> {
+        let Assignment { start_time, berth } = assignment;
+        if berth.index() >= self.num_berths() {
+            return Err(Infeasibility::BerthBeyondModel {
+                vessel,
+                berth,
+                num_berths: self.num_berths(),
+            });
+        }
+        let Some(processing_time) = self.vessel_processing_time(vessel, berth) else {
+            return Err(Infeasibility::BerthNotAllowed { vessel, berth });
+        };
+
+        let arrival_time = self.vessel_arrival_time(vessel);
+        if start_time < arrival_time {
+            return Err(Infeasibility::StartBeforeArrival {
+                vessel,
+                start_time,
+                arrival_time,
+            });
+        }
+        if !self.service_fits_berth(berth, start_time, processing_time) {
+            return Err(Infeasibility::OutsideOpenings {
+                vessel,
+                berth,
+                start_time,
+                processing_time,
+            });
+        }
+        let departure_time = start_time + processing_time;
+        let latest_departure_time = self.vessel_latest_departure_time(vessel);
+        if departure_time > latest_departure_time {
+            return Err(Infeasibility::LateDeparture {
+                vessel,
+                departure_time,
+                latest_departure_time,
+            });
+        }
+
+        Ok(processing_time)
+    }
+
+    /// Whether a service of length `processing_time` that starts at `start` fits one opening of `berth`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `berth` is not a berth of the model.
+    fn service_fits_berth(&self, berth: BerthIndex, start: T, processing_time: T) -> bool {
+        // The openings are ordered by start and disjoint, so only the last one to start by `start` can hold it.
+        let openings = self.berth_opening_times(berth);
+        let started = openings.partition_point(|opening| opening.start() <= start);
+        started
+            .checked_sub(1)
+            .is_some_and(|last| Self::service_fits_opening(openings[last], start, processing_time))
+    }
+
     /// The position of the pair of `vessel` and `berth` in `processing_times`.
     #[inline]
     fn processing_entry(&self, vessel: VesselIndex, berth: BerthIndex) -> usize {
@@ -386,6 +567,54 @@ fn processing_time_at_berth_beyond_model(berth: BerthIndex, num_berths: usize) -
 #[track_caller]
 fn opening_times_of_berth_beyond_model(berth: BerthIndex, num_berths: usize) -> ! {
     panic!("called `Model::berth_opening_times` with {berth}, beyond the {num_berths} berths")
+}
+
+/// The time a vessel is served at a berth, as a feasibility check compares it with the others at that berth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Service<T>
+where
+    T: SolverNumeric,
+{
+    /// The berth.
+    berth: BerthIndex,
+    /// From the start of the service to its end.
+    span: ClosedOpenInterval<T>,
+    /// The vessel served.
+    vessel: VesselIndex,
+}
+
+/// The first two services of `services` at one berth that share a moment of time, in the order of the berths, or
+/// `None` if no two do.
+///
+/// `services` is left ordered by berth, start and vessel.
+fn first_overlap<T>(services: &mut [Service<T>]) -> Option<Infeasibility<T>>
+where
+    T: SolverNumeric,
+{
+    services.sort_unstable_by_key(|service| (service.berth, service.span.start(), service.vessel));
+
+    // Of the services of a berth met so far, the one that ends last is the one a later service could share a
+    // moment with first: a later service starts no earlier than every one met, so it shares a moment with one of
+    // them exactly when it starts before the latest end. A service of length zero shares no moment with any.
+    let mut ends_last: Option<Service<T>> = None;
+    for &service in services.iter().filter(|service| !service.span.is_empty()) {
+        match ends_last {
+            Some(last) if last.berth == service.berth => {
+                if service.span.start() < last.span.end() {
+                    return Some(Infeasibility::Overlap {
+                        berth: service.berth,
+                        first: last.vessel,
+                        second: service.vessel,
+                    });
+                }
+                if service.span.end() > last.span.end() {
+                    ends_last = Some(service);
+                }
+            }
+            _ => ends_last = Some(service),
+        }
+    }
+    None
 }
 
 /// Refuses more vessels or berths than ids can name.
@@ -1080,6 +1309,215 @@ mod tests {
         assert_eq!(model.berth_opening_times(BerthIndex::new(2)), []);
     }
 
+    // The fit rule on the opening [10, 20): the berth must be open when the service starts and until it ends.
+    #[test]
+    fn test_a_service_fits_an_opening_exactly_when_it_starts_inside_and_ends_by_its_end() {
+        let opening = interval(10, 20);
+        let fits =
+            |start, processing_time| Model::service_fits_opening(opening, start, processing_time);
+        assert!(fits(10, 10));
+        assert!(fits(15, 5));
+        assert!(!fits(15, 6));
+        assert!(!fits(9, 1));
+        assert!(fits(10, 0));
+        assert!(fits(19, 0));
+        assert!(!fits(20, 0));
+        assert!(!fits(9, 0));
+    }
+
+    #[test]
+    fn test_no_service_fits_an_empty_opening() {
+        assert!(!Model::service_fits_opening(interval(5, 5), 5, 0));
+    }
+
+    #[test]
+    fn test_earliest_start_in_opening_is_the_later_of_the_earliest_and_the_opening_start() {
+        let opening = interval(20, 30);
+        let earliest = |earliest, processing_time| {
+            Model::earliest_start_in_opening(opening, earliest, processing_time)
+        };
+        assert_eq!(earliest(10, 5), Some(20));
+        assert_eq!(earliest(22, 8), Some(22));
+        assert_eq!(earliest(22, 9), None);
+        assert_eq!(earliest(10, 0), Some(20));
+        assert_eq!(earliest(29, 0), Some(29));
+        assert_eq!(earliest(30, 0), None);
+    }
+
+    /// Three vessels and two berths, the berths open on [0, 10) and [20, 30) and on [0, 100); the first vessel
+    /// arrives at 0 and takes 5 at either berth, the second arrives at 10 and takes 0 at the first berth only, the
+    /// third arrives at 0 and takes 8 at either berth; every vessel must have left by 40.
+    fn three_by_two() -> Model<i64> {
+        Model::new(
+            vec![0, 10, 0],
+            vec![40, 40, 40],
+            vec![1, 1, 1],
+            vec![Some(5), Some(5), Some(0), None, Some(8), Some(8)],
+            vec![
+                vec![interval(20, 30), interval(0, 10)],
+                vec![interval(0, 100)],
+            ],
+        )
+    }
+
+    fn feasibility(
+        model: &Model<i64>,
+        berths: &[usize],
+        start_times: &[i64],
+    ) -> Result<(), Infeasibility<i64>> {
+        let berths: Vec<BerthIndex> = berths.iter().copied().map(BerthIndex::new).collect();
+        model.check_feasibility(SolutionView::new(&berths, start_times, 0))
+    }
+
+    #[test]
+    fn test_check_feasibility_accepts_a_schedule_that_keeps_every_condition() {
+        let model = three_by_two();
+        assert_eq!(feasibility(&model, &[0, 0, 1], &[0, 20, 0]), Ok(()));
+        // The second vessel's service of length zero at 20 shares no moment with the third's [20, 28).
+        assert_eq!(feasibility(&model, &[0, 0, 0], &[0, 20, 20]), Ok(()));
+    }
+
+    // A service of length zero arriving at 10 cannot start at 10, the end of [0, 10): the berth is closed then.
+    #[test]
+    fn test_check_feasibility_refuses_a_zero_length_service_at_the_end_of_an_opening() {
+        assert_eq!(
+            feasibility(&three_by_two(), &[1, 0, 1], &[0, 10, 5]),
+            Err(Infeasibility::OutsideOpenings {
+                vessel: VesselIndex::new(1),
+                berth: BerthIndex::new(0),
+                start_time: 10,
+                processing_time: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_check_feasibility_refuses_a_schedule_of_another_vessel_count() {
+        assert_eq!(
+            feasibility(&three_by_two(), &[0, 0], &[0, 20]),
+            Err(Infeasibility::VesselCount {
+                scheduled: 2,
+                num_vessels: 3
+            })
+        );
+    }
+
+    #[test]
+    fn test_check_feasibility_names_the_first_condition_a_vessel_breaks() {
+        let model = three_by_two();
+        let (first, second, third) = (
+            VesselIndex::new(0),
+            VesselIndex::new(1),
+            VesselIndex::new(2),
+        );
+        assert_eq!(
+            feasibility(&model, &[2, 0, 1], &[0, 20, 0]),
+            Err(Infeasibility::BerthBeyondModel {
+                vessel: first,
+                berth: BerthIndex::new(2),
+                num_berths: 2
+            })
+        );
+        assert_eq!(
+            feasibility(&model, &[0, 1, 1], &[0, 20, 0]),
+            Err(Infeasibility::BerthNotAllowed {
+                vessel: second,
+                berth: BerthIndex::new(1)
+            })
+        );
+        assert_eq!(
+            feasibility(&model, &[0, 0, 1], &[0, 5, 0]),
+            Err(Infeasibility::StartBeforeArrival {
+                vessel: second,
+                start_time: 5,
+                arrival_time: 10
+            })
+        );
+        assert_eq!(
+            feasibility(&model, &[0, 0, 0], &[0, 20, 6]),
+            Err(Infeasibility::OutsideOpenings {
+                vessel: third,
+                berth: BerthIndex::new(0),
+                start_time: 6,
+                processing_time: 8
+            })
+        );
+        assert_eq!(
+            feasibility(&model, &[0, 0, 1], &[0, 20, 33]),
+            Err(Infeasibility::LateDeparture {
+                vessel: third,
+                departure_time: 41,
+                latest_departure_time: 40
+            })
+        );
+    }
+
+    #[test]
+    fn test_check_feasibility_refuses_two_services_at_one_berth_at_once() {
+        assert_eq!(
+            feasibility(&three_by_two(), &[1, 0, 1], &[0, 20, 4]),
+            Err(Infeasibility::Overlap {
+                berth: BerthIndex::new(1),
+                first: VesselIndex::new(0),
+                second: VesselIndex::new(2)
+            })
+        );
+    }
+
+    fn service(berth: usize, start: i64, end: i64, vessel: usize) -> Service<i64> {
+        Service {
+            berth: BerthIndex::new(berth),
+            span: interval(start, end),
+            vessel: VesselIndex::new(vessel),
+        }
+    }
+
+    // A zero-length service between two that overlap must not hide their overlap.
+    #[test]
+    fn test_first_overlap_looks_past_a_zero_length_service() {
+        let mut services = [
+            service(0, 6, 8, 2),
+            service(0, 0, 10, 0),
+            service(0, 5, 5, 1),
+        ];
+        assert_eq!(
+            first_overlap(&mut services),
+            Some(Infeasibility::Overlap {
+                berth: BerthIndex::new(0),
+                first: VesselIndex::new(0),
+                second: VesselIndex::new(2)
+            })
+        );
+    }
+
+    #[test]
+    fn test_first_overlap_finds_none_between_touching_services_or_across_berths() {
+        let mut services = [
+            service(0, 0, 5, 0),
+            service(0, 5, 10, 1),
+            service(1, 2, 7, 2),
+        ];
+        assert_eq!(first_overlap(&mut services), None);
+    }
+
+    // [0, 10) ends after [2, 4), so [5, 7) overlaps the first though not the one met just before it.
+    #[test]
+    fn test_first_overlap_compares_with_the_service_that_ends_last() {
+        let mut services = [
+            service(0, 0, 10, 0),
+            service(0, 2, 4, 1),
+            service(0, 5, 7, 2),
+        ];
+        assert_eq!(
+            first_overlap(&mut services),
+            Some(Infeasibility::Overlap {
+                berth: BerthIndex::new(0),
+                first: VesselIndex::new(0),
+                second: VesselIndex::new(1)
+            })
+        );
+    }
+
     /// The integers in `[0, 40)` that one of `intervals` holds: the model the union is checked against.
     fn covered_points(intervals: &[ClosedOpenInterval<i64>]) -> Vec<i64> {
         (0..40)
@@ -1133,6 +1571,31 @@ mod tests {
             prop_assert_eq!(covered_points(&union), covered_points(&openings));
             prop_assert!(union.iter().all(|interval| !interval.is_empty()));
             prop_assert!(union.windows(2).all(|pair| pair[0].end() < pair[1].start()));
+        }
+
+        #[test]
+        fn test_first_overlap_finds_one_exactly_when_two_services_at_one_berth_share_a_moment(
+            bounds in prop::collection::vec((0usize..3, 0i64..20, 0i64..6), 0..8),
+        ) {
+            let mut services: Vec<Service<i64>> = bounds
+                .iter()
+                .enumerate()
+                .map(|(vessel, &(berth, start, length))| service(berth, start, start + length, vessel))
+                .collect();
+            // Two services share a moment when some integer time lies in both.
+            let shares_a_moment = |a: &Service<i64>, b: &Service<i64>| {
+                a.berth == b.berth && (0..30).any(|time| a.span.contains_point(time) && b.span.contains_point(time))
+            };
+            let any_pair = services
+                .iter()
+                .enumerate()
+                .any(|(i, a)| services[i + 1..].iter().any(|b| shares_a_moment(a, b)));
+            let found = first_overlap(&mut services);
+            prop_assert_eq!(found.is_some(), any_pair);
+            if let Some(Infeasibility::Overlap { first, second, .. }) = found {
+                let of = |vessel: VesselIndex| services.iter().find(|s| s.vessel == vessel).copied().unwrap();
+                prop_assert!(shares_a_moment(&of(first), &of(second)));
+            }
         }
 
         #[test]
