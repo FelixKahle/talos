@@ -138,7 +138,7 @@ impl PenalizationStrategy for MaxUtilityPenalization {
             }
         };
 
-        for berth in graph.berth_iter() {
+        for berth in graph.berths() {
             let topo_iter = graph.berth_topology_iter(berth);
 
             for (prev_node, next_node) in topo_iter.clone().zip(topo_iter.skip(1)) {
@@ -1046,7 +1046,7 @@ where
         let num_berths = graph.num_berths();
         let mut sum: i64 = 0;
 
-        for berth in graph.berth_iter() {
+        for berth in graph.berths() {
             let sentinel = graph.sentinel(berth);
             let mut prev_node = sentinel;
             loop {
@@ -1065,7 +1065,7 @@ where
             }
         }
 
-        for vessel in graph.vessel_iter() {
+        for vessel in graph.vessels() {
             let berth = graph.vessel_berth(vessel);
             let idx = vessel.index() * num_berths + berth.index();
             debug_assert!(idx < self.memory.berth.len());

@@ -46,7 +46,7 @@ use typed_index_collections::TiVec;
 // Invariant: the three vessel columns have one entry per vessel, and `processing_times` has one entry per pair of a
 // vessel and a berth, the pair `(v, b)` at `v * num_berths() + b`. There are at most `u32::MAX` vessels and at most
 // `u32::MAX` berths, as `check_counts` refuses more, so that an id names each of them and the count itself, which
-// `vessel_iter` and `berth_iter` rely on to walk them.
+// `vessels` and `berths` rely on to walk them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Model<T>
 where
@@ -144,13 +144,13 @@ where
 
     /// The ids of every vessel, in increasing order.
     #[inline]
-    pub fn vessel_iter(&self) -> VesselIndexIter {
+    pub fn vessels(&self) -> VesselIndexIter {
         VesselIndexIter::new(self.num_vessels())
     }
 
     /// The ids of every berth, in increasing order.
     #[inline]
-    pub fn berth_iter(&self) -> BerthIndexIter {
+    pub fn berths(&self) -> BerthIndexIter {
         BerthIndexIter::new(self.num_berths())
     }
 
@@ -421,7 +421,7 @@ where
         }
 
         let mut services = Vec::with_capacity(self.num_vessels());
-        for (vessel, assignment) in self.vessel_iter().zip(schedule) {
+        for (vessel, assignment) in self.vessels().zip(schedule) {
             let processing_time = self.check_assignment(vessel, assignment)?;
             services.push(Service {
                 berth: assignment.berth,
@@ -967,15 +967,15 @@ mod tests {
         let model = two_by_two();
         assert_eq!(model.num_vessels(), 2);
         assert_eq!(model.num_berths(), 2);
-        assert_eq!(model.vessel_iter().len(), 2);
-        assert_eq!(model.berth_iter().len(), 2);
+        assert_eq!(model.vessels().len(), 2);
+        assert_eq!(model.berths().len(), 2);
     }
 
     #[test]
     fn test_a_model_may_have_no_vessels_and_no_berths() {
         let model = Model::<i64>::new(vec![], vec![], vec![], vec![], vec![]);
         assert_eq!((model.num_vessels(), model.num_berths()), (0, 0));
-        assert_eq!(model.vessel_iter().next(), None);
+        assert_eq!(model.vessels().next(), None);
     }
 
     #[test]
@@ -1600,7 +1600,7 @@ mod tests {
 
         #[test]
         fn test_checked_and_unchecked_accessors_agree_on_every_id_of_the_model(model in small_model()) {
-            for vessel in model.vessel_iter() {
+            for vessel in model.vessels() {
                 // SAFETY: `vessel` is one of those the model's own walk yields.
                 let unchecked = unsafe {
                     (
@@ -1615,13 +1615,13 @@ mod tests {
                     model.vessel_weight(vessel),
                 );
                 prop_assert_eq!(checked, unchecked);
-                for berth in model.berth_iter() {
+                for berth in model.berths() {
                     // SAFETY: `vessel` and `berth` are among those the model's own walks yield.
                     let unchecked = unsafe { model.vessel_processing_time_unchecked(vessel, berth) };
                     prop_assert_eq!(model.vessel_processing_time(vessel, berth), unchecked);
                 }
             }
-            for berth in model.berth_iter() {
+            for berth in model.berths() {
                 // SAFETY: `berth` is one of those the model's own walk yields.
                 let unchecked = unsafe { model.berth_opening_times_unchecked(berth) };
                 prop_assert_eq!(model.berth_opening_times(berth), unchecked);

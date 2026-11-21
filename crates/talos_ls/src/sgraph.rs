@@ -245,7 +245,7 @@ impl PartialEq for ScheduleGraph {
         if self.num_berths != other.num_berths || self.num_vessels != other.num_vessels {
             return false;
         }
-        for berth in self.berth_iter() {
+        for berth in self.berths() {
             if !self
                 .vessel_sequence_iter(berth)
                 .eq(other.vessel_sequence_iter(berth))
@@ -288,7 +288,7 @@ impl std::fmt::Display for ScheduleGraph {
             "ScheduleGraph (Berths: {}, Total Vessels: {})",
             self.num_berths, self.num_vessels
         )?;
-        for berth in self.berth_iter() {
+        for berth in self.berths() {
             write!(f, "  Berth {}: ", berth.index())?;
             let mut iter = self.vessel_sequence_iter(berth);
             if let Some(first) = iter.next() {
@@ -308,7 +308,7 @@ impl std::fmt::Display for ScheduleGraph {
 impl std::hash::Hash for ScheduleGraph {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.num_berths.hash(state);
-        for berth in self.berth_iter() {
+        for berth in self.berths() {
             for vessel in self.vessel_sequence_iter(berth) {
                 vessel.hash(state);
             }
@@ -407,7 +407,7 @@ impl ScheduleGraph {
             self.berth_vessel_count[berth.index()] += 1;
         }
 
-        for berth in self.berth_iter() {
+        for berth in self.berths() {
             let sentinel = self.num_vessels + berth.index();
             self.vessel_berth[sentinel] = berth;
         }
@@ -863,13 +863,13 @@ impl ScheduleGraph {
 
     /// Returns an iterator over all berth indices.
     #[inline(always)]
-    pub fn berth_iter(&self) -> BerthIndexIter {
+    pub fn berths(&self) -> BerthIndexIter {
         BerthIndexIter::new(self.num_berths)
     }
 
     /// Returns an iterator over all vessel indices.
     #[inline(always)]
-    pub fn vessel_iter(&self) -> impl Iterator<Item = VesselIndex> + '_ {
+    pub fn vessels(&self) -> impl Iterator<Item = VesselIndex> + '_ {
         VesselIndexIter::new(self.num_vessels)
     }
 

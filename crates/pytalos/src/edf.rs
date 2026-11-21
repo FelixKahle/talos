@@ -191,7 +191,7 @@ where
 
     // 3. Compute total objective function
     let mut total_objective = T::default();
-    for vessel in model.vessel_iter() {
+    for vessel in model.vessels() {
         let berth = final_berths[vessel.index()];
         let start = final_starts[vessel.index()];
 

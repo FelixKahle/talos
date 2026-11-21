@@ -152,7 +152,7 @@ where
 {
     let mut total_obj = T::ZERO;
 
-    for berth in model.berth_iter() {
+    for berth in model.berths() {
         let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
 
         let berth_cost = unsafe {
