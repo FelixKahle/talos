@@ -1,6 +1,6 @@
 [package]
 name = "talos_core"
-description = "Foundations shared by the Talos crates: typed ids, intervals, the ring arena and the numeric trait."
+description = "Foundations shared by the Talos crates: typed ids, intervals and the numeric trait."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -11,6 +11,7 @@ pub mod mutator;
 pub mod operator;
 pub mod outcome;
 pub mod params;
+mod ring_arena;
 pub mod sgraph;
 pub mod sgraphundo;
 pub mod state;

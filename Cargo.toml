@@ -1,5 +1,5 @@
 # Talos is a local-search solver for the dynamic berth allocation problem. The crates form a stack:
-# `talos_core` holds the shared foundations (typed ids, intervals, the ring arena, the numeric trait);
+# `talos_core` holds the shared foundations (typed ids, intervals, the numeric trait);
 # `talos_model` describes a problem instance on top of it; `talos_ls` is the local-search engine over the
 # model; `talos_cmd` is the command-line binary and `pytalos` the Python bindings, both on top of the engine.
 

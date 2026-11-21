@@ -29,7 +29,7 @@
 //! ```
 
 use std::iter::FusedIterator;
-use talos_core::{Node, RingArena, RingEdgeIter, RingSequenceIter, RingSequenceRevIter};
+use crate::ring_arena::{Node, RingArena, RingEdgeIter, RingSequenceIter, RingSequenceRevIter};
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::{BerthIndexIter, VesselIndexIter},

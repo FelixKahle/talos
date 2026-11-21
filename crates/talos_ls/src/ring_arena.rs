@@ -3,7 +3,7 @@
 
 //! A fixed set of nodes arranged in closed rings, spliced in constant time.
 
-use crate::index::{TypedIndex, TypedIndexTag};
+use talos_core::{TypedIndex, TypedIndexTag};
 use std::fmt;
 use std::iter::FusedIterator;
 
@@ -33,20 +33,6 @@ pub type Node = TypedIndex<NodeIndexTag>;
 /// the successors, and the segments or the anchor they are given do not overlap. It is stated in each step's
 /// `# Preconditions` and checked in debug builds. Breaking it breaks the rings (a wrong answer), but never makes an
 /// access out of bounds: every link the arena holds names one of its nodes, whatever the steps are handed.
-///
-/// # Examples
-///
-/// ```rust
-/// use talos_core::{Node, RingArena};
-///
-/// let mut arena = RingArena::default();
-/// arena.reset_to_self_loops(4);
-/// let [a, b, c, d] = [0, 1, 2, 3].map(Node::new);
-/// arena.relocate_after(b, a);
-/// arena.relocate_after(c, b);
-/// arena.relocate_after(d, c);
-/// assert_eq!(arena.sequence_iter(b, a).collect::<Vec<_>>(), [b, c, d]);
-/// ```
 // Invariant: `prev` and `next` have the same length, every entry of both is a node below that length, and
 // `prev[next[v]] == v` for every node `v`, so that `next` is a permutation whose cycles are the rings and `prev` is
 // its inverse. The first two parts are what memory rests on: they make every link a valid index into both columns,
@@ -156,19 +142,6 @@ impl RingArena {
     ///
     /// Panics unless the two columns describe closed rings: they must have the same length, every link must name
     /// a node below that length, and the predecessor of each node's successor must be the node.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use talos_core::{Node, RingArena};
-    ///
-    /// // One ring 0 -> 1 -> 2 -> 0 and node 3 alone.
-    /// let arena = RingArena::new(
-    ///     [2, 0, 1, 3].map(Node::new).to_vec(),
-    ///     [1, 2, 0, 3].map(Node::new).to_vec(),
-    /// );
-    /// assert_eq!(arena.next(Node::new(2)), Node::new(0));
-    /// ```
     #[track_caller]
     pub fn new(prev: Vec<Node>, next: Vec<Node>) -> Self {
         if let Some(violation) = ring_violation(&prev, &next) {

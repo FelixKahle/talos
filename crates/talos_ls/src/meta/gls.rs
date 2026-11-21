@@ -16,7 +16,8 @@ use crate::{
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use num_traits::ToPrimitive;
-use talos_core::{Node, SolverNumeric};
+use crate::ring_arena::Node;
+use talos_core::SolverNumeric;
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::Model,

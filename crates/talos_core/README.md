@@ -7,6 +7,3 @@ Foundations shared by the Talos crates. Everything is re-exported at the crate r
 - **`SolverNumeric`** — the signed integer types (`i8` to `i64`, `isize`) a problem's numbers may have.
 - **`ClosedOpenInterval<T>`** — the interval `[start, end)` of integers, with intersection, union, gap, split,
   midpoint and iteration over its points (`ClosedOpenIntervalIter`).
-- **`RingArena`** — a fixed set of `Node`s arranged in closed rings, with constant-time splicing (moving and
-  swapping nodes and segments), segment reversal and walks along a ring. Every step comes as a checked method and
-  an `unsafe` `_unchecked` twin for callers whose own invariant proves the nodes lie in the arena.

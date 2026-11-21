@@ -733,6 +733,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "num-traits",
+ "proptest",
  "rand",
  "talos_core",
  "talos_model",
