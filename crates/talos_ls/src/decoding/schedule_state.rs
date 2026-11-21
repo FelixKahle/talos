@@ -15,7 +15,7 @@ use typed_index_collections::TiVec;
 /// in place, so that a run allocates only when it starts.
 // Invariant: `assigned_berths` and `start_times` have the same length, the number of vessels. Unchecked reads by a
 // vessel rest on it: a vessel below `num_vessels` indexes both columns.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ScheduleState<T> {
     /// The berth each vessel is served at, per vessel.
     assigned_berths: TiVec<VesselIndex, BerthIndex>,
@@ -25,6 +25,31 @@ pub struct ScheduleState<T> {
     berth_costs: TiVec<BerthIndex, T>,
     /// The sum of the berths' costs.
     objective: T,
+}
+
+impl<T> Clone for ScheduleState<T>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            assigned_berths: self.assigned_berths.clone(),
+            start_times: self.start_times.clone(),
+            berth_costs: self.berth_costs.clone(),
+            objective: self.objective.clone(),
+        }
+    }
+
+    // Written out so that overwriting a state reuses the buffers of its columns, which their own `clone_from`
+    // would replace.
+    fn clone_from(&mut self, source: &Self) {
+        self.assigned_berths
+            .raw
+            .clone_from(&source.assigned_berths.raw);
+        self.start_times.raw.clone_from(&source.start_times.raw);
+        self.berth_costs.raw.clone_from(&source.berth_costs.raw);
+        self.objective.clone_from(&source.objective);
+    }
 }
 
 impl<T> std::fmt::Display for ScheduleState<T>
@@ -92,10 +117,7 @@ where
     /// Makes the state a copy of `other`, reusing its memory.
     #[inline]
     pub fn overwrite_from_state(&mut self, other: &Self) {
-        self.assigned_berths.clone_from(&other.assigned_berths);
-        self.start_times.clone_from(&other.start_times);
-        self.berth_costs.clone_from(&other.berth_costs);
-        self.objective = other.objective;
+        self.clone_from(other);
     }
 
     /// The number of vessels.
@@ -402,6 +424,28 @@ mod tests {
         let other = ScheduleState::new(vec![berth(2); 4], vec![1, 2, 3, 4], vec![0, 0, 9], 9);
         state.overwrite_from_state(&other);
         assert_eq!(state, other);
+    }
+
+    // The target counts more vessels and berths than the source, so its buffers hold the copy without growing.
+    #[test]
+    fn test_overwrite_from_state_reuses_the_buffers() {
+        let source = three_vessels();
+        let mut state = ScheduleState::new(vec![berth(0); 5], vec![0; 5], vec![0; 4], 0);
+        let buffers = (
+            state.assigned_berths.as_ptr(),
+            state.start_times.as_ptr(),
+            state.berth_costs.as_ptr(),
+        );
+        state.overwrite_from_state(&source);
+        assert_eq!(state, source);
+        assert_eq!(
+            (
+                state.assigned_berths.as_ptr(),
+                state.start_times.as_ptr(),
+                state.berth_costs.as_ptr()
+            ),
+            buffers
+        );
     }
 
     #[test]

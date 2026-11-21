@@ -290,7 +290,6 @@ where
 // their preconditions; breaking those gives a wrong order and wrong counts, never an access out of bounds: every
 // column stays in range whatever the rings hold, and every walk over vessels ends at the first node that is not a
 // vessel's (`VesselSequenceIter`), so it yields only the graph's vessels even from rings that hold two sentinels.
-#[derive(Clone)]
 pub struct ScheduleGraph {
     /// The rings: one per berth, through the berth's sentinel and its vessels in order.
     arena: RingArena,
@@ -298,6 +297,26 @@ pub struct ScheduleGraph {
     vessel_berth: TiVec<VesselIndex, BerthIndex>,
     /// The number of vessels on each berth, per berth.
     berth_vessel_count: TiVec<BerthIndex, usize>,
+}
+
+impl Clone for ScheduleGraph {
+    fn clone(&self) -> Self {
+        Self {
+            arena: self.arena.clone(),
+            vessel_berth: self.vessel_berth.clone(),
+            berth_vessel_count: self.berth_vessel_count.clone(),
+        }
+    }
+
+    // Written out so that overwriting a graph reuses the buffers of its arena and its columns; the derived form
+    // would build a new graph, and the columns' own `clone_from` a new buffer each.
+    fn clone_from(&mut self, source: &Self) {
+        self.arena.clone_from(&source.arena);
+        self.vessel_berth.raw.clone_from(&source.vessel_berth.raw);
+        self.berth_vessel_count
+            .raw
+            .clone_from(&source.berth_vessel_count.raw);
+    }
 }
 
 impl PartialEq for ScheduleGraph {
@@ -1785,6 +1804,26 @@ mod tests {
 
         clone.swap_vessels(vessel(0), vessel(2));
         assert_ne!(original, clone);
+    }
+
+    // The target is larger than the source in both counts, so its buffers hold the copy without growing.
+    #[test]
+    fn test_overwrite_from_graph_reuses_the_buffers() {
+        let source = standard_fixture();
+        let mut target = ScheduleGraph::from_slices(&[berth(0); 10], &[0; 10], 6);
+        let buffers = (
+            target.vessel_berth.as_ptr(),
+            target.berth_vessel_count.as_ptr(),
+        );
+        target.overwrite_from_graph(&source);
+        assert_eq!(target, source);
+        assert_eq!(
+            (
+                target.vessel_berth.as_ptr(),
+                target.berth_vessel_count.as_ptr()
+            ),
+            buffers
+        );
     }
 
     #[test]
