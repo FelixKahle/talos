@@ -38,8 +38,10 @@ use typed_index_collections::TiVec;
 /// assert_eq!(model.vessel_processing_time(second, berth), None);
 /// assert_eq!(model.berth_opening_times(berth), [ClosedOpenInterval::new(0, 100)]);
 /// ```
-// Invariant: the three vessel columns have one entry per vessel, and there are at most `u32::MAX` vessels;
-// `processing_times` has one entry per pair of a vessel and a berth, the pair `(v, b)` at `v * num_berths() + b`.
+// Invariant: the three vessel columns have one entry per vessel, and `processing_times` has one entry per pair of a
+// vessel and a berth, the pair `(v, b)` at `v * num_berths() + b`. There are at most `u32::MAX` vessels and at most
+// `u32::MAX` berths, as `check_counts` refuses more, so that an id names each of them and the count itself, which
+// `vessel_iter` and `berth_iter` rely on to walk them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Model<T>
 where
@@ -155,12 +157,11 @@ where
     #[inline]
     #[track_caller]
     pub fn vessel_arrival_time(&self, vessel: VesselIndex) -> T {
-        assert!(
-            vessel.index() < self.num_vessels(),
-            "called `Model::vessel_arrival_time` with {vessel}, beyond the {} vessels",
-            self.num_vessels()
-        );
-        self.arrival_times[vessel]
+        if vessel.index() >= self.num_vessels() {
+            arrival_time_of_vessel_beyond_model(vessel, self.num_vessels());
+        }
+        // SAFETY: `vessel` is a vessel of the model, as the check above found in every build.
+        unsafe { self.vessel_arrival_time_unchecked(vessel) }
     }
 
     /// The time `vessel` arrives, without checking the id.
@@ -188,12 +189,11 @@ where
     #[inline]
     #[track_caller]
     pub fn vessel_latest_departure_time(&self, vessel: VesselIndex) -> T {
-        assert!(
-            vessel.index() < self.num_vessels(),
-            "called `Model::vessel_latest_departure_time` with {vessel}, beyond the {} vessels",
-            self.num_vessels()
-        );
-        self.latest_departure_times[vessel]
+        if vessel.index() >= self.num_vessels() {
+            latest_departure_time_of_vessel_beyond_model(vessel, self.num_vessels());
+        }
+        // SAFETY: `vessel` is a vessel of the model, as the check above found in every build.
+        unsafe { self.vessel_latest_departure_time_unchecked(vessel) }
     }
 
     /// The time by which `vessel` must have left, without checking the id.
@@ -222,12 +222,11 @@ where
     #[inline]
     #[track_caller]
     pub fn vessel_weight(&self, vessel: VesselIndex) -> T {
-        assert!(
-            vessel.index() < self.num_vessels(),
-            "called `Model::vessel_weight` with {vessel}, beyond the {} vessels",
-            self.num_vessels()
-        );
-        self.weights[vessel]
+        if vessel.index() >= self.num_vessels() {
+            weight_of_vessel_beyond_model(vessel, self.num_vessels());
+        }
+        // SAFETY: `vessel` is a vessel of the model, as the check above found in every build.
+        unsafe { self.vessel_weight_unchecked(vessel) }
     }
 
     /// The weight of `vessel`, without checking the id.
@@ -257,17 +256,14 @@ where
     #[inline]
     #[track_caller]
     pub fn vessel_processing_time(&self, vessel: VesselIndex, berth: BerthIndex) -> Option<T> {
-        assert!(
-            vessel.index() < self.num_vessels(),
-            "called `Model::vessel_processing_time` with {vessel}, beyond the {} vessels",
-            self.num_vessels()
-        );
-        assert!(
-            berth.index() < self.num_berths(),
-            "called `Model::vessel_processing_time` with {berth}, beyond the {} berths",
-            self.num_berths()
-        );
-        self.processing_times[self.processing_entry(vessel, berth)].get()
+        if vessel.index() >= self.num_vessels() {
+            processing_time_of_vessel_beyond_model(vessel, self.num_vessels());
+        }
+        if berth.index() >= self.num_berths() {
+            processing_time_at_berth_beyond_model(berth, self.num_berths());
+        }
+        // SAFETY: `vessel` is a vessel and `berth` a berth of the model, as the checks above found in every build.
+        unsafe { self.vessel_processing_time_unchecked(vessel, berth) }
     }
 
     /// How long serving `vessel` at `berth` takes, or `None` if the vessel may not use the berth, without
@@ -305,12 +301,11 @@ where
     #[inline]
     #[track_caller]
     pub fn berth_opening_times(&self, berth: BerthIndex) -> &[ClosedOpenInterval<T>] {
-        assert!(
-            berth.index() < self.num_berths(),
-            "called `Model::berth_opening_times` with {berth}, beyond the {} berths",
-            self.num_berths()
-        );
-        self.openings.of_berth(berth)
+        if berth.index() >= self.num_berths() {
+            opening_times_of_berth_beyond_model(berth, self.num_berths());
+        }
+        // SAFETY: `berth` is a berth of the model, as the check above found in every build.
+        unsafe { self.berth_opening_times_unchecked(berth) }
     }
 
     /// The intervals during which `berth` is open, without checking the id.
@@ -337,6 +332,60 @@ where
     fn processing_entry(&self, vessel: VesselIndex, berth: BerthIndex) -> usize {
         vessel.index() * self.num_berths() + berth.index()
     }
+}
+
+// The panics of the checked accessors stay out of line, so that an inlined accessor is a compare and a read. Each
+// is `#[cold]` because a caller reaches it only by a mistake, `#[inline(never)]` so that its formatting is never
+// copied into a caller, and `#[track_caller]` so that the panic names the caller's line.
+
+/// Panics for [`Model::vessel_arrival_time`] with a vessel beyond the model's `num_vessels`.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn arrival_time_of_vessel_beyond_model(vessel: VesselIndex, num_vessels: usize) -> ! {
+    panic!("called `Model::vessel_arrival_time` with {vessel}, beyond the {num_vessels} vessels")
+}
+
+/// Panics for [`Model::vessel_latest_departure_time`] with a vessel beyond the model's `num_vessels`.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn latest_departure_time_of_vessel_beyond_model(vessel: VesselIndex, num_vessels: usize) -> ! {
+    panic!(
+        "called `Model::vessel_latest_departure_time` with {vessel}, beyond the {num_vessels} vessels"
+    )
+}
+
+/// Panics for [`Model::vessel_weight`] with a vessel beyond the model's `num_vessels`.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn weight_of_vessel_beyond_model(vessel: VesselIndex, num_vessels: usize) -> ! {
+    panic!("called `Model::vessel_weight` with {vessel}, beyond the {num_vessels} vessels")
+}
+
+/// Panics for [`Model::vessel_processing_time`] with a vessel beyond the model's `num_vessels`.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn processing_time_of_vessel_beyond_model(vessel: VesselIndex, num_vessels: usize) -> ! {
+    panic!("called `Model::vessel_processing_time` with {vessel}, beyond the {num_vessels} vessels")
+}
+
+/// Panics for [`Model::vessel_processing_time`] with a berth beyond the model's `num_berths`.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn processing_time_at_berth_beyond_model(berth: BerthIndex, num_berths: usize) -> ! {
+    panic!("called `Model::vessel_processing_time` with {berth}, beyond the {num_berths} berths")
+}
+
+/// Panics for [`Model::berth_opening_times`] with a berth beyond the model's `num_berths`.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn opening_times_of_berth_beyond_model(berth: BerthIndex, num_berths: usize) -> ! {
+    panic!("called `Model::berth_opening_times` with {berth}, beyond the {num_berths} berths")
 }
 
 /// Refuses more vessels or berths than ids can name.
@@ -472,6 +521,9 @@ where
 // Invariant: `offsets` has one entry per berth and one more; it starts at 0, never decreases and ends at
 // `intervals.len()`, so the openings of berth `b` are `intervals[offsets[b]..offsets[b + 1]]`. The openings of each
 // berth are non-empty, ordered by start and separated by gaps, as `union_of_openings` makes them.
+//
+// An offset is a position in `intervals`, a count of the openings before a berth's, and so a `usize`: no id names
+// an opening, so no `u32` bound is held for them, and the length of `intervals` is bounded only as any `Vec`'s is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Openings<T>
 where
@@ -503,18 +555,6 @@ where
         self.offsets.len() - 1
     }
 
-    /// The openings of `berth`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `berth` is not one of the berths.
-    #[inline]
-    #[track_caller]
-    fn of_berth(&self, berth: BerthIndex) -> &[ClosedOpenInterval<T>] {
-        let (start, end) = (self.offsets[berth.index()], self.offsets[berth.index() + 1]);
-        &self.intervals[start..end]
-    }
-
     /// The openings of `berth`, without checking the id.
     ///
     /// # Safety
@@ -523,12 +563,16 @@ where
     #[inline]
     unsafe fn of_berth_unchecked(&self, berth: BerthIndex) -> &[ClosedOpenInterval<T>] {
         debug_assert!(
-            berth.index() < self.num_berths(),
-            "called `Openings::of_berth_unchecked` with {berth}, beyond the {} berths",
-            self.num_berths()
+            berth.index() < self.num_berths()
+                && self.offsets[berth.index()] <= self.offsets[berth.index() + 1]
+                && self.offsets[berth.index() + 1] <= self.intervals.len(),
+            "called `Openings::of_berth_unchecked` with {berth}, beyond the {} berths or without ordered offsets \
+             within the {} intervals",
+            self.num_berths(),
+            self.intervals.len()
         );
-        // SAFETY: `berth` is below the berth count, as the caller guarantees, so `offsets` holds the entries at it
-        // and after it, and they bound a range of `intervals`, as the invariant of `Openings` states.
+        // SAFETY: `berth` is below the number of berths, as the caller guarantees, so `offsets` holds the entries at
+        // it and after it, and they bound a range of `intervals`, as the invariant of `Openings` states.
         unsafe {
             let (start, end) = (
                 *self.offsets.get_unchecked(berth.index()),
@@ -767,6 +811,22 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(
+        expected = "called `Model::vessel_arrival_time` with Vessel 2, beyond the 2 vessels"
+    )]
+    fn test_vessel_arrival_time_refuses_a_vessel_beyond_the_last() {
+        let _ = two_by_two().vessel_arrival_time(VesselIndex::new(2));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "called `Model::vessel_latest_departure_time` with Vessel 2, beyond the 2 vessels"
+    )]
+    fn test_vessel_latest_departure_time_refuses_a_vessel_beyond_the_last() {
+        let _ = two_by_two().vessel_latest_departure_time(VesselIndex::new(2));
+    }
+
+    #[test]
     #[should_panic(expected = "called `Model::vessel_weight` with Vessel 2, beyond the 2 vessels")]
     fn test_vessel_weight_refuses_a_vessel_beyond_the_last() {
         let _ = two_by_two().vessel_weight(VesselIndex::new(2));
@@ -908,26 +968,52 @@ mod tests {
         );
     }
 
+    #[cfg(target_pointer_width = "64")]
     #[test]
-    fn test_errors_state_what_went_wrong() {
-        let negative: ModelError<i64> = ModelError::NegativeProcessingTime {
-            vessel: VesselIndex::new(1),
-            berth: BerthIndex::new(0),
-            processing_time: -3,
-        };
-        assert_eq!(
-            negative.to_string(),
-            "negative processing time -3 of Vessel 1 at Berth 0"
-        );
-        let length: ModelError<i64> = ModelError::ProcessingTimesLength {
-            len: 3,
-            num_vessels: 2,
-            num_berths: 2,
-        };
-        assert_eq!(
-            length.to_string(),
-            "3 processing times for 2 vessels and 2 berths, which need one per pair"
-        );
+    fn test_every_error_states_what_went_wrong_with_its_values() {
+        let cases: [(ModelError<i64>, &str); 6] = [
+            (
+                ModelError::TooManyVessels { count: 1 << 33 },
+                "8589934592 vessels, more than the 4294967295 that ids can name",
+            ),
+            (
+                ModelError::TooManyBerths { count: 1 << 33 },
+                "8589934592 berths, more than the 4294967295 that ids can name",
+            ),
+            (
+                ModelError::LatestDepartureTimesLength {
+                    len: 1,
+                    num_vessels: 2,
+                },
+                "1 latest departure times for 2 vessels",
+            ),
+            (
+                ModelError::WeightsLength {
+                    len: 3,
+                    num_vessels: 2,
+                },
+                "3 weights for 2 vessels",
+            ),
+            (
+                ModelError::ProcessingTimesLength {
+                    len: 3,
+                    num_vessels: 2,
+                    num_berths: 2,
+                },
+                "3 processing times for 2 vessels and 2 berths, which need one per pair",
+            ),
+            (
+                ModelError::NegativeProcessingTime {
+                    vessel: VesselIndex::new(1),
+                    berth: BerthIndex::new(0),
+                    processing_time: -3,
+                },
+                "negative processing time -3 of Vessel 1 at Berth 0",
+            ),
+        ];
+        for (error, message) in cases {
+            assert_eq!(error.to_string(), message);
+        }
     }
 
     #[test]
@@ -978,11 +1064,20 @@ mod tests {
 
     #[test]
     fn test_openings_of_berths_without_any_are_empty() {
-        let openings = Openings::new(&[vec![], vec![interval(0, 5)], vec![]]);
-        assert_eq!(openings.num_berths(), 3);
-        assert_eq!(openings.of_berth(BerthIndex::new(0)), []);
-        assert_eq!(openings.of_berth(BerthIndex::new(1)), [interval(0, 5)]);
-        assert_eq!(openings.of_berth(BerthIndex::new(2)), []);
+        let model = Model::<i64>::new(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![vec![], vec![interval(0, 5)], vec![]],
+        );
+        assert_eq!(model.num_berths(), 3);
+        assert_eq!(model.berth_opening_times(BerthIndex::new(0)), []);
+        assert_eq!(
+            model.berth_opening_times(BerthIndex::new(1)),
+            [interval(0, 5)]
+        );
+        assert_eq!(model.berth_opening_times(BerthIndex::new(2)), []);
     }
 
     /// The integers in `[0, 40)` that one of `intervals` holds: the model the union is checked against.
