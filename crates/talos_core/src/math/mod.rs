@@ -6,5 +6,5 @@
 mod interval;
 mod num;
 
-pub use interval::{ClosedOpenInterval, ClosedOpenIntervalIter};
+pub use interval::{ClosedOpenInterval, ClosedOpenIntervalIter, StartAfterEnd};
 pub use num::SolverNumeric;

@@ -456,21 +456,45 @@ where
     }
 }
 
-impl<T> From<Range<T>> for ClosedOpenInterval<T>
+impl<T> TryFrom<Range<T>> for ClosedOpenInterval<T>
 where
-    T: PrimInt + fmt::Debug,
+    T: PrimInt,
 {
+    type Error = StartAfterEnd<T>;
+
     /// The interval of the same integers as `range`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the range starts after its end, as [`ClosedOpenInterval::new`].
+    /// [`StartAfterEnd`] if the range starts after its end.
     #[inline]
-    #[track_caller]
-    fn from(range: Range<T>) -> Self {
-        Self::new(range.start, range.end)
+    fn try_from(range: Range<T>) -> Result<Self, Self::Error> {
+        Self::try_new(range.start, range.end).ok_or(StartAfterEnd {
+            start: range.start,
+            end: range.end,
+        })
     }
 }
+
+/// Bounds that make no interval, because the start lies after the end.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct StartAfterEnd<T> {
+    /// The start that was handed over.
+    pub start: T,
+    /// The end that was handed over, before the start.
+    pub end: T,
+}
+
+impl<T> fmt::Display for StartAfterEnd<T>
+where
+    T: fmt::Display,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "start {} lies after end {}", self.start, self.end)
+    }
+}
+
+impl<T> std::error::Error for StartAfterEnd<T> where T: fmt::Debug + fmt::Display {}
 
 impl<T> From<ClosedOpenInterval<T>> for Range<T>
 where
@@ -742,8 +766,19 @@ mod tests {
 
     #[test]
     fn test_conversions_with_range() {
-        assert_eq!(ClosedOpenInterval::from(0..10), interval(0, 10));
+        assert_eq!(ClosedOpenInterval::try_from(0..10), Ok(interval(0, 10)));
+        assert_eq!(ClosedOpenInterval::try_from(5..5), Ok(interval(5, 5)));
         assert_eq!(Range::from(interval(0, 10)), 0..10);
+    }
+
+    #[test]
+    fn test_a_range_that_starts_after_its_end_is_refused() {
+        let refused = ClosedOpenInterval::try_from(Range { start: 10i64, end: 5 });
+        assert_eq!(refused, Err(StartAfterEnd { start: 10, end: 5 }));
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "start 10 lies after end 5"
+        );
     }
 
     #[test]
