@@ -179,7 +179,7 @@ Reusable solver instance. Internal buffers are retained across calls and grow au
 |---|---|
 | `IntraSwap` | Swap two vessels on the same berth |
 | `InterSwap` | Swap two vessels across different berths |
-| `IntraShift` | Move a vessel to a new position on the same berth |
+| `IntraShift` | Move a vessel at least two places along the same berth; exchanging two adjacent vessels is `IntraSwap`'s |
 | `InterShift` | Move a vessel to a different berth |
 
 ### `GlsConfig`

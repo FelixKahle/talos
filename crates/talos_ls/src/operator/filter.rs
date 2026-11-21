@@ -6,10 +6,10 @@
 //! Each neighbourhood proposes only the moves its filter lets through. The filters between berths refuse a move
 //! only where the instance rules it out: a vessel may not use the berth it would reach. The filters on one berth
 //! refuse every move that sets a vessel next to one whose window from arrival to latest departure does not overlap
-//! its own. That is exact for a swap and for a move to the head of a berth, which would reverse the order the
-//! windows force, unless both vessels take no time to serve; it is conservative for a move after another vessel:
-//! moving a vessel right after one whose window lies wholly before its own keeps the forced order, and may still be
-//! a move an optimum needs, which such a neighbourhood then does not propose.
+//! its own. From a feasible schedule that is exact for a swap and for a move to the head of a berth, which would
+//! reverse the order the windows force, unless both vessels take no time to serve; it is conservative for a move
+//! after another vessel: moving a vessel right after one whose window lies wholly before its own keeps the forced
+//! order, and may still be a move an optimum needs, which such a neighbourhood then does not propose.
 
 use talos_core::SolverNumeric;
 use talos_model::{BerthIndex, Model, VesselIndex};

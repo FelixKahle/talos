@@ -56,9 +56,18 @@ pub(super) fn model(windows: &[(i64, i64); NUM_VESSELS]) -> Model<i64> {
 
 /// The graph of the start.
 pub(super) fn start_graph() -> ScheduleGraph {
+    graph_of(&start())
+}
+
+/// The graph of `order`, which holds every vessel once on one of the instance's berths.
+pub(super) fn graph_of(order: &Order) -> ScheduleGraph {
+    debug_assert!(
+        order.len() == NUM_BERTHS && order.iter().map(Vec::len).sum::<usize>() == NUM_VESSELS,
+        "called `graph_of` with {order:?}, not an order of {NUM_VESSELS} vessels on {NUM_BERTHS} berths"
+    );
     let mut berths = vec![BerthIndex::new(0); NUM_VESSELS];
     let mut starts = vec![0_i64; NUM_VESSELS];
-    for (berth, vessels) in START.iter().enumerate() {
+    for (berth, vessels) in order.iter().enumerate() {
         for (place, &vessel) in vessels.iter().enumerate() {
             berths[vessel] = BerthIndex::new(berth);
             starts[vessel] = i64::try_from(place).expect("a place should fit an `i64`");
@@ -68,7 +77,7 @@ pub(super) fn start_graph() -> ScheduleGraph {
 }
 
 /// The order of the start.
-fn start() -> Order {
+pub(super) fn start() -> Order {
     START.iter().map(|vessels| vessels.to_vec()).collect()
 }
 
@@ -209,32 +218,57 @@ pub(super) fn inter_berth_shifts() -> Vec<Order> {
     moves
 }
 
-/// Every order one swap of two vessels or one insertion of a vessel anywhere makes from the start, other than the
-/// start, that the plain decoder finds feasible under `model`, each once.
-pub(super) fn feasible_neighbors(model: &Model<i64>) -> Vec<Order> {
-    let start = start();
+/// Every order other than `start` that one swap of two vessels or one insertion of a vessel at the head of a
+/// berth makes from `start`, each once, in increasing order.
+pub(super) fn swap_or_head_neighbors(start: &Order) -> Vec<Order> {
     let mut orders = Vec::new();
     for vessel in 0..NUM_VESSELS {
         for partner in vessel + 1..NUM_VESSELS {
-            orders.push(swapped(&start, vessel, partner));
+            orders.push(swapped(start, vessel, partner));
         }
         for berth in 0..NUM_BERTHS {
-            let (own, _) = locate(&start, vessel);
+            orders.push(inserted(start, vessel, berth, 0));
+        }
+    }
+    distinct_neighbors(orders, start)
+}
+
+/// Every order other than `start` that one swap of two vessels or one insertion of a vessel anywhere makes from
+/// `start`, each once, in increasing order.
+pub(super) fn neighbors(start: &Order) -> Vec<Order> {
+    let mut orders = Vec::new();
+    for vessel in 0..NUM_VESSELS {
+        for partner in vessel + 1..NUM_VESSELS {
+            orders.push(swapped(start, vessel, partner));
+        }
+        let (own, _) = locate(start, vessel);
+        for berth in 0..NUM_BERTHS {
             let places = start[berth].len() + usize::from(berth != own);
             for position in 0..places {
-                orders.push(inserted(&start, vessel, berth, position));
+                orders.push(inserted(start, vessel, berth, position));
             }
         }
     }
+    distinct_neighbors(orders, start)
+}
+
+/// `orders` sorted, each once, without `start`.
+fn distinct_neighbors(mut orders: Vec<Order>, start: &Order) -> Vec<Order> {
     orders.sort();
     orders.dedup();
-    orders.retain(|order| *order != start && is_feasible(order, model));
+    orders.retain(|order| order != start);
+    orders
+}
+
+/// The orders of `orders` that the plain decoder finds feasible under `model`, in their order.
+pub(super) fn feasible(mut orders: Vec<Order>, model: &Model<i64>) -> Vec<Order> {
+    orders.retain(|order| is_feasible(order, model));
     orders
 }
 
 /// Whether `order` is feasible: each berth served in its order, every vessel from the later of its arrival and
 /// the end of the service before it, checked by the model.
-fn is_feasible(order: &Order, model: &Model<i64>) -> bool {
+pub(super) fn is_feasible(order: &Order, model: &Model<i64>) -> bool {
     let mut berths = vec![BerthIndex::new(0); NUM_VESSELS];
     let mut starts = vec![0_i64; NUM_VESSELS];
     for (berth, vessels) in order.iter().enumerate() {

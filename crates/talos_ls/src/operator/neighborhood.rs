@@ -16,9 +16,9 @@ use talos_model::Model;
 ///
 /// Each neighbourhood proposes its moves in a fixed order, vessel by vessel in increasing order, and skips a move
 /// its filter refuses: where the instance rules it out, and on one berth wherever the move sets a vessel next to
-/// one whose window from arrival to latest departure does not overlap its own. For a swap and a move to the head of
-/// a berth that refuses only infeasible moves, unless both vessels take no time to serve; for a move after another
-/// vessel it may skip a move an optimum needs.
+/// one whose window from arrival to latest departure does not overlap its own. From a feasible schedule, for a swap
+/// and a move to the head of a berth, that refuses only infeasible moves, unless both vessels take no time to serve;
+/// for a move after another vessel it may skip a move an optimum needs.
 ///
 /// No two moves of the four neighbourhoods make the same schedule: the swap of two neighbours on a berth is
 /// [`IntraBerthSwap`](Self::IntraBerthSwap)'s alone, and the shifts on one berth move a vessel by at least two
@@ -159,42 +159,119 @@ impl NeighborhoodOperator {
 
 #[cfg(test)]
 mod tests {
-    use super::super::reference::{self, OVERLAPPING_WINDOWS, Order};
+    use super::super::reference::{self, OVERLAPPING_WINDOWS, Order, WINDOWS};
     use super::*;
     use std::collections::BTreeMap;
 
-    // A round of the four neighbourhoods proposes every feasible neighbour of the start once: no two moves of any
-    // two neighbourhoods make the same order, and every order one swap or one insertion makes, that decodes to a
-    // feasible schedule, is proposed. The windows all overlap, so only the berths a vessel may not use rule a
-    // neighbour out.
-    #[test]
-    fn test_a_round_of_the_neighborhoods_proposes_each_feasible_neighbor_once() {
-        let model = reference::model(&OVERLAPPING_WINDOWS);
-        let mut mutator = Mutator::new(reference::start_graph());
+    /// Feasible starts under both fixtures: the reference start, berths of two and three vessels, and a berth of
+    /// three that does not hold the vessels in the order of their indices.
+    fn starts() -> [Order; 3] {
+        [
+            reference::start(),
+            vec![vec![0, 1], vec![2, 3, 4], vec![6], vec![5], vec![]],
+            vec![vec![2, 0, 6], vec![1, 4], vec![], vec![3, 5], vec![]],
+        ]
+    }
+
+    /// The order each move of a round of the four neighbourhoods on `start` makes, with the neighbourhoods that
+    /// proposed it.
+    fn proposed_by_round(model: &Model<i64>, start: &Order) -> BTreeMap<Order, Vec<Neighborhood>> {
+        let mut mutator = Mutator::new(reference::graph_of(start));
         let mut proposed: BTreeMap<Order, Vec<Neighborhood>> = BTreeMap::new();
         for neighborhood in Neighborhood::ALL {
             let mut operator = NeighborhoodOperator::new(neighborhood);
             operator.prepare(mutator.graph());
             // No neighbourhood holds more than a move per vessel and per place, 7 * (7 + 5) of them.
+            let mut exhausted = false;
             for _ in 0..=84 {
                 // SAFETY: the mutator's graph, rolled back after each move, has the counts the operator was
                 // prepared for, which are the model's.
-                if !unsafe { operator.next_neighbor_unchecked(&model, &mut mutator) } {
+                if !unsafe { operator.next_neighbor_unchecked(model, &mut mutator) } {
+                    exhausted = true;
                     break;
                 }
                 let order = reference::order_of(mutator.graph());
                 proposed.entry(order).or_default().push(neighborhood);
                 mutator.rollback();
             }
+            assert!(
+                exhausted,
+                "{neighborhood:?} should end within its 84 placements from {start:?}"
+            );
         }
-        let duplicates: Vec<_> = proposed.iter().filter(|(_, by)| by.len() > 1).collect();
-        assert!(
-            duplicates.is_empty(),
-            "proposed more than once: {duplicates:?}"
-        );
-        let orders: Vec<Order> = proposed.into_keys().collect();
-        assert_eq!(orders, reference::feasible_neighbors(&model));
-        // Ten swaps and twelve shifts on B0, six swaps and forty-two shifts across berths.
-        assert_eq!(orders.len(), 10 + 6 + 12 + 42);
+        proposed
+    }
+
+    /// The orders of `proposed` that more than one move made.
+    fn duplicates(
+        proposed: &BTreeMap<Order, Vec<Neighborhood>>,
+    ) -> Vec<(&Order, &Vec<Neighborhood>)> {
+        proposed.iter().filter(|(_, by)| by.len() > 1).collect()
+    }
+
+    // A round of the four neighbourhoods proposes every feasible neighbour of a start once: no two moves of any
+    // two neighbourhoods make the same order, and every order one swap or one insertion makes, that decodes to a
+    // feasible schedule, is proposed. The windows all overlap, so only the berths a vessel may not use rule a
+    // neighbour out.
+    #[test]
+    fn test_a_round_of_the_neighborhoods_proposes_each_feasible_neighbor_once() {
+        let model = reference::model(&OVERLAPPING_WINDOWS);
+        for start in starts() {
+            assert!(
+                reference::is_feasible(&start, &model),
+                "the start {start:?} should be feasible"
+            );
+            let proposed = proposed_by_round(&model, &start);
+            assert!(
+                duplicates(&proposed).is_empty(),
+                "proposed more than once from {start:?}: {:?}",
+                duplicates(&proposed)
+            );
+            let orders: Vec<Order> = proposed.into_keys().collect();
+            let expected = reference::feasible(reference::neighbors(&start), &model);
+            assert_eq!(orders, expected, "from {start:?}");
+            if start == reference::start() {
+                // Ten swaps and twelve shifts on B0, six swaps and forty-two shifts across berths.
+                assert_eq!(orders.len(), 10 + 6 + 12 + 42);
+            }
+        }
+    }
+
+    // Where windows are disjoint, a round still proposes each move once and only neighbours, and it misses no
+    // feasible neighbour that a swap or a move to the head of a berth makes: the filters refuse those only where
+    // the neighbour is infeasible. A move after a vessel whose window lies wholly before its own may be skipped.
+    #[test]
+    fn test_a_round_under_disjoint_windows_proposes_every_feasible_swap_and_move_to_a_head() {
+        let model = reference::model(&WINDOWS);
+        for start in starts() {
+            assert!(
+                reference::is_feasible(&start, &model),
+                "the start {start:?} should be feasible"
+            );
+            let proposed = proposed_by_round(&model, &start);
+            assert!(
+                duplicates(&proposed).is_empty(),
+                "proposed more than once from {start:?}: {:?}",
+                duplicates(&proposed)
+            );
+            let neighbors = reference::neighbors(&start);
+            let strays: Vec<&Order> = proposed
+                .keys()
+                .filter(|order| !neighbors.contains(order))
+                .collect();
+            assert!(
+                strays.is_empty(),
+                "proposed from {start:?} orders that are no neighbours: {strays:?}"
+            );
+            let missed: Vec<Order> =
+                reference::feasible(reference::swap_or_head_neighbors(&start), &model)
+                    .into_iter()
+                    .filter(|order| !proposed.contains_key(order))
+                    .collect();
+            assert!(
+                missed.is_empty(),
+                "missed from {start:?} feasible neighbours: {missed:?}"
+            );
+        }
     }
 }

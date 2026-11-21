@@ -62,9 +62,13 @@ class Operator(IntEnum):
     """Neighbourhood operator."""
 
     IntraSwap = 0
+    """Swap two vessels on the same berth, adjacent ones included."""
     InterSwap = 1
+    """Swap two vessels across different berths."""
     IntraShift = 2
+    """Move a vessel at least two places along its berth; an exchange of two adjacent vessels is ``IntraSwap``'s."""
     InterShift = 3
+    """Move a vessel to a different berth."""
 
 class LocalSearchConfig:
     """Configuration for the local search engine."""
