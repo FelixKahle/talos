@@ -59,6 +59,9 @@ missing_panics_doc = "deny"
 missing_errors_doc = "deny"
 unnecessary_safety_comment = "deny"
 unnecessary_safety_doc = "deny"
+# Every cast says what it is: a lossy one stands under an `#[expect]` that states the bound making it exact.
+as_conversions = "deny"
+cast_possible_truncation = "deny"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

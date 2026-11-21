@@ -13,6 +13,16 @@ const _: () = assert!(
     "a `usize` should hold every `u32`"
 );
 
+/// `value` as a `usize`, which holds every `u32`.
+// A `const fn` cannot call `From`, so the one widening cast of the module stands here.
+#[expect(
+    clippy::as_conversions,
+    reason = "exact: a `usize` holds every `u32`, as the assertion above states"
+)]
+const fn widen(value: u32) -> usize {
+    value as usize
+}
+
 /// The marker that makes a [`TypedIndex`] an id of one kind.
 ///
 /// A tag is a zero-sized type that exists only to tell one kind of id from another. Each kind of id declares
@@ -59,13 +69,17 @@ where
     /// The id at position `index`, or `None` if `index` is greater than `u32::MAX`.
     #[inline]
     pub const fn try_new(index: usize) -> Option<Self> {
-        // Both casts are exact: a `usize` holds every `u32`, as the assertion at the top of this module states,
-        // and `index` is at most `u32::MAX` once past the check.
-        if index > u32::MAX as usize {
+        if index > widen(u32::MAX) {
             return None;
         }
+        #[expect(
+            clippy::as_conversions,
+            clippy::cast_possible_truncation,
+            reason = "exact: `index` is at most `u32::MAX`, as the check above found"
+        )]
+        let index = index as u32;
         Some(Self {
-            index: index as u32,
+            index,
             tag: PhantomData,
         })
     }
@@ -73,8 +87,7 @@ where
     /// The position this id stands for.
     #[inline]
     pub const fn index(self) -> usize {
-        // Exact: a `usize` holds every `u32`, as the assertion at the top of this module states.
-        self.index as usize
+        widen(self.index)
     }
 
     /// The id of kind `U` at the same position.
