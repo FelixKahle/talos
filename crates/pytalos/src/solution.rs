@@ -39,7 +39,11 @@ impl PySolution {
     /// Returns the berth assignments as a list of usize.
     #[getter]
     pub fn berths(&self) -> Vec<usize> {
-        self.inner.berths().iter().map(|b| b.index()).collect()
+        self.inner
+            .assigned_berths()
+            .iter()
+            .map(|b| b.index())
+            .collect()
     }
 
     /// Returns the start times as a list of i64.

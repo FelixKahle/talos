@@ -26,7 +26,7 @@ use typed_index_collections::{TiSlice, TiVec};
 /// let solution = Solution::new(vec![BerthIndex::new(1), BerthIndex::new(0)], vec![10, 20], 30);
 ///
 /// assert_eq!(solution.num_vessels(), 2);
-/// assert_eq!(solution.berths()[VesselIndex::new(0)], BerthIndex::new(1));
+/// assert_eq!(solution.assigned_berths()[VesselIndex::new(0)], BerthIndex::new(1));
 /// assert_eq!(
 ///     solution.iter().last(),
 ///     Some(Assignment { start_time: 20, berth: BerthIndex::new(0) })
@@ -80,9 +80,9 @@ impl<T> Solution<T> {
         self.berths.len()
     }
 
-    /// The berth of each vessel.
+    /// The berth each vessel is assigned to.
     #[inline]
-    pub fn berths(&self) -> &TiSlice<VesselIndex, BerthIndex> {
+    pub fn assigned_berths(&self) -> &TiSlice<VesselIndex, BerthIndex> {
         &self.berths
     }
 
@@ -229,9 +229,9 @@ impl<'a, T> SolutionView<'a, T> {
         self.berths.len()
     }
 
-    /// The berth of each vessel.
+    /// The berth each vessel is assigned to.
     #[inline]
-    pub fn berths(&self) -> &'a TiSlice<VesselIndex, BerthIndex> {
+    pub fn assigned_berths(&self) -> &'a TiSlice<VesselIndex, BerthIndex> {
         self.berths
     }
 
@@ -408,7 +408,7 @@ mod tests {
         let solution = Solution::new(vec![berth(1), berth(0)], vec![10i64, 20], 123);
         let second = VesselIndex::new(1);
         assert_eq!(solution.num_vessels(), 2);
-        assert_eq!(solution.berths()[second], berth(0));
+        assert_eq!(solution.assigned_berths()[second], berth(0));
         assert_eq!(solution.start_times()[second], 20);
         assert_eq!(solution.objective_value(), 123);
     }
@@ -467,7 +467,7 @@ mod tests {
         let solution = Solution::new(vec![berth(1), berth(0)], vec![10i64, 20], 77);
         let view = solution.as_view();
         assert_eq!(view.num_vessels(), 2);
-        assert_eq!(view.berths(), solution.berths());
+        assert_eq!(view.assigned_berths(), solution.assigned_berths());
         assert_eq!(view.start_times(), solution.start_times());
         assert_eq!(view.objective_value(), 77);
         assert_eq!(

@@ -337,7 +337,7 @@ impl PySolver {
         if config.operators.is_empty() {
             return Err(PyValueError::new_err("operators list must not be empty"));
         }
-        for (i, &berth) in inner_solution.berths().iter().enumerate() {
+        for (i, &berth) in inner_solution.assigned_berths().iter().enumerate() {
             if berth.index() >= num_berths {
                 return Err(PyValueError::new_err(format!(
                     "berth index {} for vessel {i} out of bounds (num_berths = {num_berths})",
@@ -346,7 +346,7 @@ impl PySolver {
             }
         }
 
-        let berths = &inner_solution.berths().raw;
+        let berths = &inner_solution.assigned_berths().raw;
         let start_times = &inner_solution.start_times().raw;
         let objective = inner_solution.objective_value();
 

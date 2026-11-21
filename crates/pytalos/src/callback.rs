@@ -12,7 +12,7 @@ pub fn make_callback(py_cb: Option<Py<PyAny>>) -> Box<dyn FnMut(SolutionView<'_,
     match py_cb {
         Some(cb) => Box::new(move |sol: SolutionView<'_, i64>| {
             let obj = sol.objective_value();
-            let berths: Vec<usize> = sol.berths().iter().map(|bi| bi.index()).collect();
+            let berths: Vec<usize> = sol.assigned_berths().iter().map(|bi| bi.index()).collect();
             let start_times: Vec<i64> = sol.start_times().raw.to_vec();
 
             Python::attach(|py| {
