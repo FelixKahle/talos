@@ -4,27 +4,113 @@
 //! The rings of an arena as lists of node indices: the model the arena's tests check it against.
 
 use super::arena::RingArena;
+use super::iter::RingSequenceIter;
 use super::node::Node;
 use proptest::prelude::*;
 
+/// Asserts that every node of `nodes` lies in `arena`, the condition of each unchecked step.
+#[track_caller]
+fn assert_in(arena: &RingArena, nodes: &[Node]) {
+    for node in nodes {
+        assert!(
+            node.index() < arena.len(),
+            "{node} should lie in an arena of {} nodes",
+            arena.len()
+        );
+    }
+}
+
+/// The steps of an arena for nodes the test asserts to lie in it: each asserts its nodes and runs the unchecked
+/// step of the same name.
+pub(super) trait InArena {
+    /// The walk of `sequence_unchecked`.
+    fn sequence(&self, start: Node, stop: Node) -> RingSequenceIter<'_>;
+    /// The walk of `sequence_rev_unchecked`.
+    fn sequence_rev(&self, start: Node, stop: Node) -> RingSequenceIter<'_>;
+    /// The step `swap_nodes_unchecked`.
+    fn swap_nodes(&mut self, first: Node, second: Node);
+    /// The step `swap_segments_unchecked`.
+    fn swap_segments(&mut self, a_first: Node, a_last: Node, b_first: Node, b_last: Node);
+    /// The step `relocate_after_unchecked`.
+    fn relocate_after(&mut self, node: Node, anchor: Node);
+    /// The step `relocate_before_unchecked`.
+    fn relocate_before(&mut self, node: Node, anchor: Node);
+    /// The step `relocate_segment_after_unchecked`.
+    fn relocate_segment_after(&mut self, first: Node, last: Node, anchor: Node);
+    /// The step `reverse_segment_unchecked`.
+    fn reverse_segment(&mut self, first: Node, last: Node);
+}
+
+impl InArena for RingArena {
+    #[track_caller]
+    fn sequence(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
+        assert_in(self, &[start, stop]);
+        // SAFETY: both nodes lie in the arena, as the assertion above found.
+        unsafe { self.sequence_unchecked(start, stop) }
+    }
+
+    #[track_caller]
+    fn sequence_rev(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
+        assert_in(self, &[start, stop]);
+        // SAFETY: both nodes lie in the arena, as the assertion above found.
+        unsafe { self.sequence_rev_unchecked(start, stop) }
+    }
+
+    #[track_caller]
+    fn swap_nodes(&mut self, first: Node, second: Node) {
+        assert_in(self, &[first, second]);
+        // SAFETY: both nodes lie in the arena, as the assertion above found.
+        unsafe { self.swap_nodes_unchecked(first, second) }
+    }
+
+    #[track_caller]
+    fn swap_segments(&mut self, a_first: Node, a_last: Node, b_first: Node, b_last: Node) {
+        assert_in(self, &[a_first, a_last, b_first, b_last]);
+        // SAFETY: the four nodes lie in the arena, as the assertion above found.
+        unsafe { self.swap_segments_unchecked(a_first, a_last, b_first, b_last) }
+    }
+
+    #[track_caller]
+    fn relocate_after(&mut self, node: Node, anchor: Node) {
+        assert_in(self, &[node, anchor]);
+        // SAFETY: both nodes lie in the arena, as the assertion above found.
+        unsafe { self.relocate_after_unchecked(node, anchor) }
+    }
+
+    #[track_caller]
+    fn relocate_before(&mut self, node: Node, anchor: Node) {
+        assert_in(self, &[node, anchor]);
+        // SAFETY: both nodes lie in the arena, as the assertion above found.
+        unsafe { self.relocate_before_unchecked(node, anchor) }
+    }
+
+    #[track_caller]
+    fn relocate_segment_after(&mut self, first: Node, last: Node, anchor: Node) {
+        assert_in(self, &[first, last, anchor]);
+        // SAFETY: the three nodes lie in the arena, as the assertion above found.
+        unsafe { self.relocate_segment_after_unchecked(first, last, anchor) }
+    }
+
+    #[track_caller]
+    fn reverse_segment(&mut self, first: Node, last: Node) {
+        assert_in(self, &[first, last]);
+        // SAFETY: both nodes lie in the arena, as the assertion above found.
+        unsafe { self.reverse_segment_unchecked(first, last) }
+    }
+}
+
 /// The successor of `node`, which the test asserts to lie in `arena`.
+#[track_caller]
 pub(super) fn next(arena: &RingArena, node: Node) -> Node {
-    assert!(
-        node.index() < arena.len(),
-        "{node} should lie in an arena of {} nodes",
-        arena.len()
-    );
+    assert_in(arena, &[node]);
     // SAFETY: `node` lies in the arena, as the assertion above found.
     unsafe { arena.next_unchecked(node) }
 }
 
 /// The predecessor of `node`, which the test asserts to lie in `arena`.
+#[track_caller]
 pub(super) fn prev(arena: &RingArena, node: Node) -> Node {
-    assert!(
-        node.index() < arena.len(),
-        "{node} should lie in an arena of {} nodes",
-        arena.len()
-    );
+    assert_in(arena, &[node]);
     // SAFETY: `node` lies in the arena, as the assertion above found.
     unsafe { arena.prev_unchecked(node) }
 }

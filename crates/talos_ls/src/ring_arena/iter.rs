@@ -87,66 +87,17 @@ impl Iterator for RingSequenceIter<'_> {
 
 impl FusedIterator for RingSequenceIter<'_> {}
 
-/// The links `(node, successor)` between consecutive nodes of a [`RingSequenceIter`] along the successors.
-// Invariant: that of the sequence it walks; it reads no column of its own.
-#[derive(Clone, PartialEq, Eq, Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the links of a walk, which only the checked step `links` makes"
-    )
-)]
-pub struct RingLinkIter<'a> {
-    /// The nodes whose consecutive pairs are the links.
-    sequence: RingSequenceIter<'a>,
-}
-
-impl<'a> RingLinkIter<'a> {
-    /// The links between consecutive nodes of `sequence`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the links of a walk, which only the checked step `links` makes"
-        )
-    )]
-    pub(super) fn new(sequence: RingSequenceIter<'a>) -> Self {
-        Self { sequence }
-    }
-}
-
-impl Iterator for RingLinkIter<'_> {
-    type Item = (Node, Node);
-
-    #[inline]
-    fn next(&mut self) -> Option<(Node, Node)> {
-        let from = self.sequence.next()?;
-        let to = self.sequence.peek()?;
-        Some((from, to))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let (_, upper) = self.sequence.size_hint();
-        (0, upper.map(|nodes| nodes.saturating_sub(1)))
-    }
-}
-
-impl FusedIterator for RingLinkIter<'_> {}
-
 #[cfg(test)]
 mod tests {
     use super::super::arena::RingArena;
-    use super::super::ring_lists::{arena_of, locate, rotated_to, some_rings, three_rings};
+    use super::super::ring_lists::{
+        InArena, arena_of, locate, rotated_to, some_rings, three_rings,
+    };
     use super::*;
     use proptest::prelude::*;
 
     fn indices(nodes: impl Iterator<Item = Node>) -> Vec<usize> {
         nodes.map(Node::index).collect()
-    }
-
-    fn index_pairs(links: impl Iterator<Item = (Node, Node)>) -> Vec<(usize, usize)> {
-        links.map(|(from, to)| (from.index(), to.index())).collect()
     }
 
     /// The nodes a walk from `start` along `ring`, which holds it, yields up to `stop` in an arena of `len` nodes:
@@ -226,68 +177,19 @@ mod tests {
     }
 
     #[test]
-    fn test_links_join_consecutive_nodes_of_the_sequence() {
-        let arena = three_rings();
-        assert_eq!(
-            index_pairs(arena.links(Node::new(0), Node::new(3))),
-            [(0, 1), (1, 2)]
-        );
-        assert_eq!(
-            index_pairs(arena.links(Node::new(5), Node::new(4))),
-            [(5, 6)]
-        );
-        assert_eq!(index_pairs(arena.links(Node::new(3), Node::new(0))), []);
-        assert_eq!(index_pairs(arena.links(Node::new(4), Node::new(4))), []);
-    }
-
-    #[test]
     fn test_size_hint_of_a_finished_walk_is_zero() {
         let arena = three_rings();
         let mut walk = arena.sequence(Node::new(1), Node::new(0));
         assert_eq!(walk.size_hint(), (0, Some(8)));
         walk.by_ref().for_each(drop);
         assert_eq!(walk.size_hint(), (0, Some(0)));
-        let mut links = arena.links(Node::new(1), Node::new(0));
-        links.by_ref().for_each(drop);
-        assert_eq!(links.size_hint(), (0, Some(0)));
     }
 
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::sequence` with Node 99, outside an arena of 8 nodes"
-    )]
-    fn test_sequence_refuses_a_node_outside() {
-        let _ = three_rings().sequence(Node::new(99), Node::new(0));
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::sequence_rev` with Node 8, outside an arena of 8 nodes"
-    )]
-    fn test_sequence_rev_refuses_a_node_outside() {
-        let _ = three_rings().sequence_rev(Node::new(0), Node::new(8));
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::links` with Node 99, outside an arena of 8 nodes"
-    )]
-    fn test_links_refuses_a_node_outside() {
-        let _ = three_rings().links(Node::new(99), Node::new(0));
-    }
-
-    /// The walks of `arena` from `start` to `stop`, forwards and backwards, each checked and unchecked.
-    fn walks(arena: &RingArena, start: Node, stop: Node) -> [(Vec<usize>, Vec<usize>); 2] {
-        // SAFETY: the tests hand over only nodes of the arena.
-        let (forwards, backwards) = unsafe {
-            (
-                arena.sequence_unchecked(start, stop),
-                arena.sequence_rev_unchecked(start, stop),
-            )
-        };
+    /// The walks of `arena` from `start` to `stop`, forwards and backwards.
+    fn walks(arena: &RingArena, start: Node, stop: Node) -> [Vec<usize>; 2] {
         [
-            (indices(arena.sequence(start, stop)), indices(forwards)),
-            (indices(arena.sequence_rev(start, stop)), indices(backwards)),
+            indices(arena.sequence(start, stop)),
+            indices(arena.sequence_rev(start, stop)),
         ]
     }
 
@@ -306,22 +208,13 @@ mod tests {
             let backwards: Vec<usize> = rotated_to(&rings, start)[1..].iter().rev().copied().collect();
             let backwards: Vec<usize> = std::iter::once(start).chain(backwards).collect();
 
-            let [(forwards_checked, forwards_unchecked), (backwards_checked, backwards_unchecked)] =
-                walks(&arena, Node::new(start), Node::new(stop));
-            let expected = expected_walk(ring, start, stop, len);
-            prop_assert_eq!(&forwards_checked, &expected);
-            prop_assert_eq!(&forwards_unchecked, &expected);
-            let expected_backwards = expected_walk(&backwards, start, stop, len);
-            prop_assert_eq!(&backwards_checked, &expected_backwards);
-            prop_assert_eq!(&backwards_unchecked, &expected_backwards);
+            let [forwards, backwards_walked] = walks(&arena, Node::new(start), Node::new(stop));
+            prop_assert_eq!(&forwards, &expected_walk(ring, start, stop, len));
+            prop_assert_eq!(&backwards_walked, &expected_walk(&backwards, start, stop, len));
 
-            let pairs: Vec<(usize, usize)> = expected.windows(2).map(|pair| (pair[0], pair[1])).collect();
             let (start, stop) = (Node::new(start), Node::new(stop));
-            prop_assert_eq!(index_pairs(arena.links(start, stop)), pairs);
-
             assert_hints_bound_what_is_left(arena.sequence(start, stop), len);
             assert_hints_bound_what_is_left(arena.sequence_rev(start, stop), len);
-            assert_hints_bound_what_is_left(arena.links(start, stop), len);
         }
     }
 }

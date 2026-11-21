@@ -5,7 +5,7 @@
 //!
 //! - [`Node`] names a node of an arena.
 //! - `Slot` is a node its arena knows to lie inside it, the proof behind every unchecked access.
-//! - [`RingSequenceIter`] walks along a ring in either direction, and [`RingLinkIter`] yields the links it passes.
+//! - [`RingSequenceIter`] walks along a ring in either direction.
 //! - [`RingArena`] holds the rings and the steps that rearrange them.
 
 mod node;
