@@ -1,95 +1,74 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Schedule graph decoding routines.
+//! The decoder: from the order of the vessels on each berth to the schedule that serves each as early as it can.
 //!
-//! This module translates a ScheduleGraph — which encodes the assignment of
-//! vessels to berths and their relative ordering — into concrete start times,
-//! positions, and cost values stored in a ScheduleState.
+//! Each berth is decoded on its own and left-justified: its vessels are served in their order, each from the
+//! earliest time that is no earlier than its arrival and the end of the service before it, at which its service
+//! fits an opening of the berth by [`Model::service_fits_opening`]. A caller-supplied evaluator prices each
+//! service; a berth whose vessel fits no opening, or that the evaluator refuses, makes the schedule infeasible.
 //!
-//! Two entry points are provided:
-//!
-//! - `decode_full_unchecked` decodes every berth in the graph from scratch,
-//!   producing a complete ScheduleState with all vessel assignments and a
-//!   total objective value.
-//!
-//! - `decode_unchecked` performs a delta decode, re-evaluating only the berths
-//!   marked in a TouchedBerths mask while carrying forward untouched berth
-//!   costs from a previously accepted ScheduleState.
-//!
-//! Both functions rely on `decode_berth` to iterate through the vessel sequence
-//! on a single berth, calling `find_earliest_start_unchecked` to place each
-//! vessel into the earliest feasible opening-time interval that satisfies the
-//! vessel's arrival time, processing duration, and the berth's free-time
-//! constraint. A caller-supplied evaluator closure computes the per-vessel cost
-//! contribution.
-//!
-//! All public functions in this module are marked `unsafe` because they bypass
-//! bounds checks on berth and vessel indices for performance. Callers must
-//! uphold the invariants documented on each function.
+//! [`decode_full_unchecked`] decodes every berth; [`decode_unchecked`] decodes only the berths a move touched and
+//! carries the others' costs over from the accepted schedule.
 
 use super::schedule_state::ScheduleState;
 use crate::schedule::{ScheduleGraph, TouchedBerths, VesselSequenceIter};
 use talos_core::SolverNumeric;
 use talos_model::{BerthIndex, Model, VesselIndex};
 
-/// Finds the earliest feasible start time for a vessel on a given berth,
-/// searching forward through the berth's opening time intervals starting
-/// from `cached_index`. A start is feasible in an opening by the model's rule,
-/// `Model::earliest_start_in_opening`.
+/// The earliest start no earlier than `earliest` at which a service of `processing_time` fits an opening of
+/// `berth`, searching the openings from the one at `first_opening` on, and the opening it fits; or `None` if it
+/// fits none of them.
 ///
-/// Returns `Some((start_time, interval_index))` if the vessel can be scheduled,
-/// or `None` if no feasible interval exists. The returned `interval_index` can
-/// be passed as `cached_index` to the next call to avoid re-scanning earlier
-/// intervals.
+/// The openings are ordered and apart, so the first that admits the service gives the earliest start, and a later
+/// service on the berth, which starts no earlier, can resume the search from that opening.
 ///
 /// # Safety
 ///
-/// - `berth_index.get()` must be `< model.num_berths()`.
-/// - `cached_index` must be `<= model.berth_opening_times_unchecked(berth_index).len()`.
-#[inline]
-unsafe fn find_earliest_start_unchecked<T>(
+/// `berth` must be one of `model`'s, and `first_opening` at most its count of openings.
+#[inline(always)]
+unsafe fn earliest_start_unchecked<T>(
     model: &Model<T>,
-    berth_index: BerthIndex,
-    vessel_arrival: T,
-    duration: T,
-    berth_free_time: T,
-    cached_index: usize,
+    berth: BerthIndex,
+    earliest: T,
+    processing_time: T,
+    first_opening: usize,
 ) -> Option<(T, usize)>
 where
     T: SolverNumeric,
 {
-    debug_assert!(berth_index.index() < model.num_berths());
-
-    let earliest = berth_free_time.max(vessel_arrival);
-
-    let intervals = unsafe { model.berth_opening_times_unchecked(berth_index) };
-
-    for (offset, &interval) in intervals[cached_index..].iter().enumerate() {
-        if let Some(start) = Model::earliest_start_in_opening(interval, earliest, duration) {
-            return Some((start, cached_index + offset));
-        }
-    }
-    None
+    debug_assert!(
+        berth.index() < model.num_berths(),
+        "called `earliest_start_unchecked` with {berth}, outside a model of {} berths",
+        model.num_berths()
+    );
+    // SAFETY: `berth` is the model's, the precondition of this function.
+    let openings = unsafe { model.berth_opening_times_unchecked(berth) };
+    debug_assert!(
+        first_opening <= openings.len(),
+        "called `earliest_start_unchecked` with opening {first_opening} of a berth of {} openings",
+        openings.len()
+    );
+    // SAFETY: `first_opening` is at most the count of openings, the precondition of this function.
+    let rest = unsafe { openings.get_unchecked(first_opening..) };
+    rest.iter().enumerate().find_map(|(offset, &opening)| {
+        Model::earliest_start_in_opening(opening, earliest, processing_time)
+            .map(|start| (start, first_opening + offset))
+    })
 }
 
-/// Decodes a single berth's vessel sequence into `candidate_buffer`, computing start times,
-/// positions, and the berth's total cost contribution.
-///
-/// Returns `Some(berth_cost)` on success, or `None` if any vessel cannot be
-/// feasibly scheduled (no valid opening interval or the evaluator returns `None`).
+/// Serves the vessels of `sequence` on `berth` in their order, each as early as it fits, writes each one's berth
+/// and start into `candidate`, and answers the sum of their costs; or `None` if a vessel fits no opening or the
+/// evaluator refuses it, with `candidate` then partly written.
 ///
 /// # Safety
 ///
-/// - `berth.get()` must be `< model.num_berths()`.
-/// - Every `VesselIndex` yielded by `sequence` must be `< candidate_buffer.num_vessels()`
-///   and `< model.num_vessels()`.
-/// - `candidate_buffer` must have sufficient capacity for all vessels in the sequence.
+/// `berth` must be one of `model`'s, and every vessel `sequence` yields one of `model`'s and of `candidate`'s.
 #[inline(always)]
-unsafe fn decode_berth_unchecked<'a, T, F>(
+unsafe fn decode_berth_unchecked<T, F>(
     berth: BerthIndex,
-    sequence: VesselSequenceIter<'a>,
-    candidate_buffer: &mut ScheduleState<T>,
+    sequence: VesselSequenceIter<'_>,
+    candidate: &mut ScheduleState<T>,
     model: &Model<T>,
     evaluator: &F,
 ) -> Option<T>
@@ -97,49 +76,58 @@ where
     T: SolverNumeric,
     F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
 {
-    let mut free_time = T::ZERO;
-    let mut interval_idx = 0;
+    debug_assert!(
+        berth.index() < model.num_berths(),
+        "called `decode_berth_unchecked` with {berth}, outside a model of {} berths",
+        model.num_berths()
+    );
+    let mut free_from = T::ZERO;
+    let mut opening = 0;
     let mut berth_cost = T::ZERO;
-
     for vessel in sequence {
-        let arrival = unsafe { model.vessel_arrival_time_unchecked(vessel) };
-        let pt = unsafe { model.vessel_processing_time_unchecked(vessel, berth) }?;
-
-        let (start, next_idx) = unsafe {
-            find_earliest_start_unchecked(model, berth, arrival, pt, free_time, interval_idx)
+        debug_assert!(
+            vessel.index() < model.num_vessels() && vessel.index() < candidate.num_vessels(),
+            "called `decode_berth_unchecked` with {vessel}, outside the model or the candidate"
+        );
+        // SAFETY: `berth` and every vessel of the sequence are the model's, the precondition of this function.
+        let (arrival, processing_time) = unsafe {
+            (
+                model.vessel_arrival_time_unchecked(vessel),
+                model.vessel_processing_time_unchecked(vessel, berth)?,
+            )
+        };
+        // SAFETY: `berth` is the model's, the precondition of this function, and `opening` is 0 or an opening the
+        // last search found, so at most the berth's count of openings.
+        let (start, found) = unsafe {
+            earliest_start_unchecked(
+                model,
+                berth,
+                free_from.max(arrival),
+                processing_time,
+                opening,
+            )
         }?;
-
-        let cost_delta = evaluator(model, vessel, berth, start)?;
-
-        free_time = start + pt;
-        interval_idx = next_idx;
-        berth_cost = berth_cost + cost_delta;
-
-        unsafe {
-            candidate_buffer.set_vessel_unchecked(vessel, berth, start);
-        }
+        berth_cost = berth_cost + evaluator(model, vessel, berth, start)?;
+        free_from = start + processing_time;
+        opening = found;
+        // SAFETY: every vessel of the sequence is the candidate's, the precondition of this function.
+        unsafe { candidate.set_vessel_unchecked(vessel, berth, start) };
     }
-
     Some(berth_cost)
 }
 
-/// Performs a full decode of every berth in the schedule graph, writing all vessel
-/// assignments, berth costs, and the total objective into `candidate_buffer`.
-///
-/// Returns `Some(())` on success, or `None` if any vessel cannot be feasibly
-/// scheduled.
+/// Decodes every berth of `graph` into `candidate`: each vessel's berth and start, each berth's cost and their
+/// sum as the objective; or `None` if a vessel fits no opening or the evaluator refuses it, with `candidate` then
+/// partly written.
 ///
 /// # Safety
 ///
-/// - `graph.num_berths()` must equal `model.num_berths()`.
-/// - `graph.num_vessels()` must be `<= candidate_buffer.num_vessels()` and `<= model.num_vessels()`.
-/// - `candidate_buffer.num_berths()` must be `>= model.num_berths()`.
-/// - The `graph` must be structurally valid and only yield vessel indices within
-///   the bounds of both `candidate_buffer` and `model`.
+/// `graph`, `candidate` and `model` must have the same vessels and the same berths: each must count as many of
+/// each as the others.
 #[inline]
 pub unsafe fn decode_full_unchecked<T, F>(
     graph: &ScheduleGraph,
-    candidate_buffer: &mut ScheduleState<T>,
+    candidate: &mut ScheduleState<T>,
     model: &Model<T>,
     evaluator: F,
 ) -> Option<()>
@@ -147,52 +135,45 @@ where
     T: SolverNumeric,
     F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
 {
-    let mut total_obj = T::ZERO;
-
+    debug_assert!(
+        graph.num_vessels() == model.num_vessels()
+            && candidate.num_vessels() == model.num_vessels()
+            && graph.num_berths() == model.num_berths()
+            && candidate.num_berths() == model.num_berths(),
+        "called `decode_full_unchecked` with a graph, a candidate and a model of different counts"
+    );
+    let mut objective = T::ZERO;
     for berth in model.berths() {
-        let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
-
+        // SAFETY: `berth` is the model's, whose berths are the graph's and the candidate's, a precondition of this
+        // function; every vessel the graph yields is its own, so the model's and the candidate's too.
         let berth_cost = unsafe {
-            decode_berth_unchecked(berth, sequence, candidate_buffer, model, &evaluator)
-        }?;
-
-        unsafe { candidate_buffer.set_berth_cost_unchecked(berth, berth_cost) };
-        total_obj = total_obj + berth_cost;
+            let sequence = graph.vessel_sequence_iter_unchecked(berth);
+            decode_berth_unchecked(berth, sequence, candidate, model, &evaluator)?
+        };
+        // SAFETY: `berth` is the candidate's, as above.
+        unsafe { candidate.set_berth_cost_unchecked(berth, berth_cost) };
+        objective = objective + berth_cost;
     }
-
-    candidate_buffer.set_objective(total_obj);
+    candidate.set_objective(objective);
     Some(())
 }
 
-/// Decodes only the berths marked as `true` in `touched`, writing their vessel
-/// assignments and berth costs into `candidate_buffer`. The total objective is computed by
-/// summing touched berth costs from `candidate_buffer` and untouched berth costs from `accepted`.
+/// Decodes only the berths `touched` marks into `candidate`, and sets its objective to that of `accepted` with the
+/// touched berths' costs exchanged for their new ones; or `None` if a vessel fits no opening or the evaluator
+/// refuses it.
 ///
-/// Returns `Some(())` on success, or `None` if any vessel on a touched berth
-/// cannot be feasibly scheduled.
-///
-/// # Note
-///
-/// **Important invariant:** After this call, `candidate_buffer`'s berth costs and vessel data
-/// for untouched berths are *not* updated and may contain stale or uninitialized
-/// values. Callers must not read `candidate_buffer` data for untouched berths directly. The
-/// intended consumption path is `ScheduleState::patch_from_delta_unchecked`,
-/// which respects the same `touched` mask.
+/// `candidate` is written only on the touched berths and their vessels; elsewhere it holds what it held, which
+/// [`ScheduleState::patch_from_delta_unchecked`] with the same `touched` never reads.
 ///
 /// # Safety
 ///
-/// - `touched.len()` must equal `model.num_berths()`.
-/// - `canditate_graph.num_berths()` must equal `model.num_berths()`.
-/// - `canditate_graph.num_vessels()` must be `<= candidate_buffer.num_vessels()`, `<= accepted.num_vessels()`,
-///   and `<= model.num_vessels()`.
-/// - `candidate_buffer.num_berths()` and `accepted.num_berths()` must be `>= model.num_berths()`.
-/// - The `canditate_graph` must be structurally valid and only yield vessel indices within
-///   the bounds of `candidate_buffer`, `accepted`, and `model`.
+/// `touched`, `graph`, `candidate`, `accepted` and `model` must have the same berths, and the last four the same
+/// vessels: each must count as many of each as the others.
 #[inline]
 pub unsafe fn decode_unchecked<T, F>(
     touched: &TouchedBerths,
-    canditate_graph: &ScheduleGraph,
-    candidate_buffer: &mut ScheduleState<T>,
+    graph: &ScheduleGraph,
+    candidate: &mut ScheduleState<T>,
     accepted: &ScheduleState<T>,
     model: &Model<T>,
     evaluator: F,
@@ -201,36 +182,41 @@ where
     T: SolverNumeric,
     F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
 {
-    debug_assert_eq!(
-        touched.num_berths(),
-        model.num_berths(),
-        "called `decode_unchecked` with mismatched touched length and model berths: touched.num_berths() = {}, model.num_berths() = {}",
-        touched.num_berths(),
-        model.num_berths()
+    debug_assert!(
+        touched.num_berths() == model.num_berths()
+            && graph.num_berths() == model.num_berths()
+            && candidate.num_berths() == model.num_berths()
+            && accepted.num_berths() == model.num_berths()
+            && graph.num_vessels() == model.num_vessels()
+            && candidate.num_vessels() == model.num_vessels()
+            && accepted.num_vessels() == model.num_vessels(),
+        "called `decode_unchecked` with touched berths, a graph, states and a model of different counts"
     );
-
-    let mut total_obj = accepted.objective();
+    let mut objective = accepted.objective();
     for berth in touched.iter_touched_berths() {
-        let sequence = unsafe { canditate_graph.vessel_sequence_iter_unchecked(berth) };
+        // SAFETY: every berth `touched` yields is below its count, which is the model's, the graph's and the
+        // states', a precondition of this function; every vessel the graph yields is its own, so the model's and
+        // the candidate's too.
         let berth_cost = unsafe {
-            decode_berth_unchecked(berth, sequence, candidate_buffer, model, &evaluator)
-        }?;
-        unsafe { candidate_buffer.set_berth_cost_unchecked(berth, berth_cost) };
-        let old_cost = unsafe { accepted.berth_cost_unchecked(berth) };
-        total_obj = total_obj - old_cost + berth_cost;
+            let sequence = graph.vessel_sequence_iter_unchecked(berth);
+            decode_berth_unchecked(berth, sequence, candidate, model, &evaluator)?
+        };
+        // SAFETY: `berth` is the states', as above.
+        let accepted_cost = unsafe {
+            candidate.set_berth_cost_unchecked(berth, berth_cost);
+            accepted.berth_cost_unchecked(berth)
+        };
+        objective = objective - accepted_cost + berth_cost;
     }
-
-    candidate_buffer.set_objective(total_obj);
+    candidate.set_objective(objective);
     Some(())
 }
 
-// ----------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------
-
 #[cfg(test)]
-mod test_decoder {
+mod tests {
     use super::*;
+    use crate::objective::calculate_weighted_completion_time;
+    use proptest::prelude::*;
     use talos_core::ClosedOpenInterval;
 
     // Helper to build a valid 2-vessel, 2-berth model for testing.
@@ -263,34 +249,25 @@ mod test_decoder {
         Some(start_time)
     }
 
+    // B0 is open on [0, 15) and [25, 100).
     #[test]
-    fn test_find_earliest_start_unchecked() {
+    fn test_earliest_start_is_the_first_that_fits_an_opening() {
         let model = build_test_model();
         let b0 = BerthIndex::new(0);
-
+        // SAFETY: B0 is the model's, and every first opening is at most its count of 2.
         unsafe {
-            // Test 1: Fits perfectly in the first interval
-            // Arrives at 5, needs 5. B0 open [0, 15). Free time 0.
-            // Starts at 5, ends at 10.
-            let res1 = find_earliest_start_unchecked(&model, b0, 5, 5, 0, 0);
-            assert_eq!(res1, Some((5, 0))); // start time 5, interval index 0
-
-            // Test 2: Pushed by free time
-            // Arrives at 0, needs 5. Free time is 10.
-            // Starts at 10, ends at 15.
-            let res2 = find_earliest_start_unchecked(&model, b0, 0, 5, 10, 0);
-            assert_eq!(res2, Some((10, 0)));
-
-            // Test 3: Interval gap skip
-            // Arrives at 12, needs 5. First interval [0, 15) is too tight (ends 15, needs 17).
-            // Must skip to second interval [25, 100).
-            let res3 = find_earliest_start_unchecked(&model, b0, 12, 5, 0, 0);
-            assert_eq!(res3, Some((25, 1))); // starts at 25 (start of 2nd interval), index 1
-
-            // Test 4: Does not fit anywhere
-            // Needs 200 time, max interval is 75.
-            let res4 = find_earliest_start_unchecked(&model, b0, 0, 200, 0, 0);
-            assert_eq!(res4, None);
+            // From 5 a service of 5 fits [0, 15).
+            assert_eq!(earliest_start_unchecked(&model, b0, 5, 5, 0), Some((5, 0)));
+            // From 12 it would end at 17, past 15, so it starts at 25 in the second opening.
+            assert_eq!(
+                earliest_start_unchecked(&model, b0, 12, 5, 0),
+                Some((25, 1))
+            );
+            // A search that resumes at the second opening does not look back at the first.
+            assert_eq!(earliest_start_unchecked(&model, b0, 0, 5, 1), Some((25, 1)));
+            // A service of 200 fits no opening, nor does any service once no opening is left.
+            assert_eq!(earliest_start_unchecked(&model, b0, 0, 200, 0), None);
+            assert_eq!(earliest_start_unchecked(&model, b0, 0, 1, 2), None);
         }
     }
 
@@ -373,13 +350,14 @@ mod test_decoder {
     }
 
     #[test]
-    fn test_decode_berth_success() {
+    fn test_decode_berth_serves_each_vessel_as_early_as_it_fits() {
         let model = build_test_model();
 
         // Setup a sequence: V0 -> V1
         let graph =
             ScheduleGraph::from_slices(&[BerthIndex::new(0), BerthIndex::new(0)], &[0, 0], 2);
         let b0 = BerthIndex::new(0);
+        // SAFETY: B0 is the graph's.
         let sequence = unsafe { graph.vessel_sequence_iter_unchecked(b0) };
 
         // Create buffer with garbage data
@@ -390,6 +368,7 @@ mod test_decoder {
             9999,
         );
 
+        // SAFETY: B0 and both vessels are the model's and the candidate's.
         let berth_cost = unsafe {
             decode_berth_unchecked(b0, sequence, &mut candidate, &model, &mock_evaluator)
         };
@@ -412,7 +391,7 @@ mod test_decoder {
     }
 
     #[test]
-    fn test_decode_full_unchecked() {
+    fn test_decode_full_sums_the_costs_of_every_berth() {
         let model = build_test_model();
         // V0 -> B0, V1 -> B1
         let graph =
@@ -425,6 +404,7 @@ mod test_decoder {
             9999,
         );
 
+        // SAFETY: the graph, the candidate and the model have two vessels and two berths.
         let res = unsafe { decode_full_unchecked(&graph, &mut candidate, &model, mock_evaluator) };
         assert!(res.is_some());
 
@@ -438,7 +418,7 @@ mod test_decoder {
     }
 
     #[test]
-    fn test_decode_unchecked_with_delta_and_garbage_data() {
+    fn test_decode_exchanges_the_costs_of_the_touched_berths() {
         let model = build_test_model();
 
         // Let's pretend our ACCEPTED state had V0 and V1 on B1
@@ -468,6 +448,7 @@ mod test_decoder {
         );
 
         // Run partial decode!
+        // SAFETY: the touched berths, the graph, the states and the model have two vessels and two berths.
         let res = unsafe {
             decode_unchecked(
                 &touched,
@@ -495,7 +476,7 @@ mod test_decoder {
     }
 
     #[test]
-    fn test_decode_unchecked_ignores_untouched_garbage() {
+    fn test_decode_leaves_the_untouched_berths_unwritten() {
         let model = build_test_model();
 
         // Accepted state where B1 has cost 500
@@ -521,6 +502,7 @@ mod test_decoder {
             9999,
         );
 
+        // SAFETY: the touched berths, the graph, the states and the model have two vessels and two berths.
         let res = unsafe {
             decode_unchecked(
                 &touched,
@@ -547,5 +529,112 @@ mod test_decoder {
         // This proves we aren't wasting cycles writing to arrays we don't need to.
         assert_eq!(candidate_buffer.berth_cost(BerthIndex::new(1)), 9999);
         assert_eq!(candidate_buffer.vessel_start(VesselIndex::new(1)), 9999);
+    }
+
+    /// The schedule a left-justified placement by brute force gives the vessels of `order` on each berth: each one
+    /// from the first time, scanned one by one from the later of its arrival and the end of the service before
+    /// it, at which its service fits an opening; and the sum of their weighted completion times. `None` if a
+    /// vessel fits nowhere before `horizon`, may not use its berth, or ends after its latest departure.
+    fn brute_force(
+        model: &Model<i64>,
+        order: &[Vec<VesselIndex>],
+        horizon: i64,
+    ) -> Option<(Vec<i64>, i64)> {
+        let mut starts = vec![0; model.num_vessels()];
+        let mut objective = 0;
+        for (berth, vessels) in model.berths().zip(order) {
+            let mut free_from = 0;
+            for &vessel in vessels {
+                let processing_time = model.vessel_processing_time(vessel, berth)?;
+                let start =
+                    (free_from.max(model.vessel_arrival_time(vessel))..horizon).find(|&time| {
+                        model.berth_opening_times(berth).iter().any(|&opening| {
+                            Model::service_fits_opening(opening, time, processing_time)
+                        })
+                    })?;
+                let end = start + processing_time;
+                if end > model.vessel_latest_departure_time(vessel) {
+                    return None;
+                }
+                starts[vessel.index()] = start;
+                objective += end * model.vessel_weight(vessel);
+                free_from = end;
+            }
+        }
+        Some((starts, objective))
+    }
+
+    /// A model of up to five vessels on up to three berths, with times below 40 and openings that may touch,
+    /// overlap or leave gaps, and the berth and the place in its order of each vessel.
+    fn small_instance() -> impl Strategy<Value = (Model<i64>, Vec<BerthIndex>)> {
+        (1_usize..=5, 1_usize..=3).prop_flat_map(|(num_vessels, num_berths)| {
+            (
+                proptest::collection::vec((0_i64..20, 0_i64..60, 1_i64..4), num_vessels),
+                proptest::collection::vec(
+                    proptest::option::weighted(0.85, 0_i64..8),
+                    num_vessels * num_berths,
+                ),
+                proptest::collection::vec(
+                    proptest::collection::vec((0_i64..40, 0_i64..15), 1..4),
+                    num_berths,
+                ),
+                proptest::collection::vec(0..num_berths, num_vessels),
+            )
+                .prop_map(|(vessels, processing_times, openings, berths)| {
+                    let model = Model::new(
+                        vessels.iter().map(|&(arrival, _, _)| arrival).collect(),
+                        vessels
+                            .iter()
+                            .map(|&(arrival, slack, _)| arrival + slack)
+                            .collect(),
+                        vessels.iter().map(|&(_, _, weight)| weight).collect(),
+                        processing_times,
+                        openings
+                            .into_iter()
+                            .map(|berth| {
+                                berth
+                                    .into_iter()
+                                    .map(|(start, length)| {
+                                        ClosedOpenInterval::new(start, start + length)
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                    );
+                    (model, berths.into_iter().map(BerthIndex::new).collect())
+                })
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn test_decode_matches_a_brute_force_left_justified_placement(
+            (model, berths) in small_instance(),
+            order_keys in proptest::collection::vec(0_i64..100, 5),
+        ) {
+            let keys = &order_keys[..model.num_vessels()];
+            let graph = ScheduleGraph::from_slices(&berths, keys, model.num_berths());
+            let order: Vec<Vec<VesselIndex>> =
+                graph.berths().map(|berth| graph.vessel_sequence_iter(berth).collect()).collect();
+            let mut candidate = ScheduleState::new(
+                vec![BerthIndex::new(0); model.num_vessels()],
+                vec![0; model.num_vessels()],
+                vec![0; model.num_berths()],
+                0,
+            );
+            // SAFETY: the graph, the candidate and the model have the same vessels and berths, as built above.
+            let decoded = unsafe {
+                decode_full_unchecked(&graph, &mut candidate, &model, |model, vessel, berth, start| {
+                    calculate_weighted_completion_time(model, vessel, berth, start)
+                })
+            };
+            let expected = brute_force(&model, &order, 200);
+            prop_assert_eq!(decoded.is_some(), expected.is_some());
+            if let Some((starts, objective)) = expected {
+                prop_assert_eq!(&candidate.as_solution_view().start_times().raw, &starts);
+                prop_assert_eq!(candidate.objective(), objective);
+                prop_assert_eq!(model.check_feasibility(candidate.as_solution_view()), Ok(()));
+            }
+        }
     }
 }
