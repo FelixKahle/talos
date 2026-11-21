@@ -14,7 +14,7 @@
 //! `BerthIndex::get()`. Marking and querying are both $O(1)$; resetting
 //! the entire mask is $O(B)$ via `fill(false)`.
 
-use talos_model::index::BerthIndex;
+use talos_model::BerthIndex;
 
 // ----------------------------------------------------------------
 // TouchedIndicesIter

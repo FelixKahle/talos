@@ -3,7 +3,7 @@
 
 use pyo3::{exceptions::PyValueError, prelude::*};
 use talos_core::ClosedOpenInterval;
-use talos_model::model::{Model, ProcessingTime};
+use talos_model::Model;
 
 /// The DBAP problem model.
 #[pyclass(name = "Model", skip_from_py_object)]
@@ -18,10 +18,8 @@ impl PyModel {
     ///
     /// # Panics
     ///
-    /// Panics if the lengths of the input vectors do not match the expected
-    /// sizes based on `num_vessels` and `num_berths`.
-    /// Also panics if any of the processing times are negative or if any of the
-    /// time windows are invalid (lo >= hi).
+    /// Panics if any of the time windows are invalid (lo > hi). Lengths that do not match
+    /// `num_vessels` and `num_berths`, and negative processing times, raise a `ValueError`.
     #[new]
     #[pyo3(signature = (num_vessels, num_berths, arrivals, deadlines, weights, processing_times, time_windows))]
     pub fn new(
@@ -65,14 +63,6 @@ impl PyModel {
             )));
         }
 
-        let pts: Vec<ProcessingTime<i64>> = processing_times
-            .into_iter()
-            .map(|opt| match opt {
-                Some(v) => ProcessingTime::some(v),
-                None => ProcessingTime::none(),
-            })
-            .collect();
-
         let tw: Vec<Vec<ClosedOpenInterval<i64>>> = time_windows
             .into_iter()
             .map(|intervals| {
@@ -83,17 +73,9 @@ impl PyModel {
             })
             .collect();
 
-        Ok(Self {
-            inner: Model::new(
-                num_vessels,
-                num_berths,
-                arrivals,
-                deadlines,
-                weights,
-                pts,
-                tw,
-            ),
-        })
+        let inner = Model::try_new(arrivals, deadlines, weights, processing_times, tw)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(Self { inner })
     }
 
     /// Returns the number of vessels in the model.

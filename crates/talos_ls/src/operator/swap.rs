@@ -7,7 +7,7 @@ use crate::{
 };
 use std::marker::PhantomData;
 use talos_core::SolverNumeric;
-use talos_model::{index::VesselIndex, model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView, VesselIndex};
 
 // ----------------------------------------------------------------
 // IntraBerthSwapOperator

@@ -18,11 +18,7 @@ use crate::{
 };
 use num_traits::ToPrimitive;
 use talos_core::SolverNumeric;
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::Model,
-    solution::SolutionView,
-};
+use talos_model::{BerthIndex, Model, SolutionView, VesselIndex};
 
 // ----------------------------------------------------------------
 // Feature Cost

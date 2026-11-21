@@ -22,8 +22,7 @@ use talos_ls::operator::lsoperator::LocalSearchOperator;
 use talos_ls::operator::shift::{InterBerthShiftOperator, IntraBerthShiftOperator};
 use talos_ls::operator::swap::{InterBerthSwapOperator, IntraBerthSwapOperator};
 use talos_ls::params::MutableLocalSearchParams;
-use talos_model::index::{BerthIndex, VesselIndex};
-use talos_model::model::Model;
+use talos_model::{BerthIndex, Model, VesselIndex};
 
 mod edf;
 mod loading;
@@ -274,8 +273,8 @@ fn run_benchmark(
         operator: &mut operator,
         metaheuristic: &mut gls,
         monitor,
-        berths: initial.berths(),
-        start_times: initial.start_times(),
+        berths: &initial.berths().raw,
+        start_times: &initial.start_times().raw,
         objective_value: greedy_obj,
     };
     let outcome = engine.run(params, evaluator, |_| {});
@@ -306,8 +305,8 @@ fn run_benchmark(
         operator: &mut operator,
         metaheuristic: &mut gls,
         monitor: composite,
-        berths: initial.berths(),
-        start_times: initial.start_times(),
+        berths: &initial.berths().raw,
+        start_times: &initial.start_times().raw,
         objective_value: greedy_obj,
     };
     let outcome = engine.run(params, evaluator, |_| {});

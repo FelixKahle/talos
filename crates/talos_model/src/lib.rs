@@ -1,7 +1,26 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-pub mod assignment;
-pub mod index;
-pub mod model;
-pub mod solution;
+//! The problem and the answer of the dynamic berth allocation problem.
+//!
+//! - [`VesselIndex`] and [`BerthIndex`] are the ids of a problem's vessels and berths, and [`VesselIndexIter`]
+//!   and [`BerthIndexIter`] walk over all of one kind.
+//! - [`Model`] is a problem instance: when each vessel arrives and must have left, its weight, its processing time
+//!   at each berth it may use, and when each berth is open. Input that makes no model is refused as a
+//!   [`ModelError`].
+//! - [`Solution`] is a schedule of every vessel, a berth and a start time each as an [`Assignment`], and
+//!   [`SolutionView`] the same schedule borrowed; tables of different lengths are refused as a
+//!   [`SolutionLengthMismatch`].
+
+mod assignment;
+mod index;
+mod model;
+mod solution;
+
+pub use assignment::Assignment;
+pub use index::{
+    BerthIndex, BerthIndexIter, BerthIndexTag, TypedIndexIter, VesselIndex, VesselIndexIter,
+    VesselIndexTag,
+};
+pub use model::{Model, ModelError};
+pub use solution::{Solution, SolutionIter, SolutionLengthMismatch, SolutionView};

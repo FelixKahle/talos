@@ -18,11 +18,7 @@ use crate::{
 };
 use std::time::Instant;
 use talos_core::SolverNumeric;
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::Model,
-    solution::{Solution, SolutionView},
-};
+use talos_model::{BerthIndex, Model, Solution, SolutionView, VesselIndex};
 
 /// The core orchestration unit for the local search metaheuristic.
 ///
@@ -656,12 +652,7 @@ impl<T> Engine<T> {
             &self.topology_graph,
         );
 
-        let best_view = self.best_state.as_solution_view();
-        let solution = Solution::from_slices(
-            best_view.berths(),
-            best_view.start_times(),
-            best_view.objective_value(),
-        );
+        let solution = Solution::from(self.best_state.as_solution_view());
 
         LocalSearchOutcome::new(solution, termination_reason, stats)
     }
@@ -783,9 +774,7 @@ mod tests {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
     use talos_core::ClosedOpenInterval;
-    use talos_model::index::{BerthIndex, VesselIndex};
-    use talos_model::model::{Model, ProcessingTime};
-    use talos_model::solution::SolutionView;
+    use talos_model::{BerthIndex, Model, SolutionView, VesselIndex};
 
     /// Builds a minimal 2-vessel / 2-berth model.
     /// V0: arrival=0, deadline=100, weight=1, p(B0)=5, p(B1)=5
@@ -793,17 +782,10 @@ mod tests {
     /// Both berths open [0, 200).
     fn build_test_model() -> Model<i64> {
         Model::new(
-            2,
-            2,
             vec![0, 0],
             vec![100, 100],
             vec![1, 1],
-            vec![
-                ProcessingTime::some(5),
-                ProcessingTime::some(5),
-                ProcessingTime::some(10),
-                ProcessingTime::some(10),
-            ],
+            vec![Some(5), Some(5), Some(10), Some(10)],
             vec![
                 vec![ClosedOpenInterval::new(0, 200)],
                 vec![ClosedOpenInterval::new(0, 200)],
@@ -819,18 +801,10 @@ mod tests {
         let arrivals = vec![0; num_vessels];
         let deadlines = vec![1000; num_vessels];
         let weights = vec![1; num_vessels];
-        let processing_times = vec![ProcessingTime::some(10); num_vessels * num_berths];
+        let processing_times = vec![Some(10); num_vessels * num_berths];
         let time_windows = vec![vec![ClosedOpenInterval::new(0, 2000)]; num_berths];
 
-        Model::new(
-            num_vessels,
-            num_berths,
-            arrivals,
-            deadlines,
-            weights,
-            processing_times,
-            time_windows,
-        )
+        Model::new(arrivals, deadlines, weights, processing_times, time_windows)
     }
 
     /// Simple evaluator: cost = weight * start_time.

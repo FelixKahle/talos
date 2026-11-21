@@ -9,7 +9,7 @@
 
 use crate::sgraph::ScheduleGraph;
 use std::iter::FusedIterator;
-use talos_model::index::{BerthIndex, VesselIndex};
+use talos_model::{BerthIndex, VesselIndex};
 
 // ----------------------------------------------------------------
 // UndoInstruction

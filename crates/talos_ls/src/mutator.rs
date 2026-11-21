@@ -37,7 +37,7 @@ use crate::{
     sgraphundo::ScheduleGraphUndoTracker,
     tberth::TouchedBerthsTracker,
 };
-use talos_model::index::{BerthIndex, VesselIndex};
+use talos_model::{BerthIndex, VesselIndex};
 
 // ----------------------------------------------------------------
 // EdgeDeltaTracker

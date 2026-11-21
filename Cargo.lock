@@ -680,7 +680,10 @@ dependencies = [
 name = "talos_model"
 version = "0.1.0"
 dependencies = [
+ "derive-where",
+ "proptest",
  "talos_core",
+ "typed-index-collections",
 ]
 
 [[package]]

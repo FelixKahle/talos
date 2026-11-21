@@ -5,11 +5,7 @@ use pyo3::prelude::*;
 use std::collections::BTreeSet;
 use talos_core::ClosedOpenInterval;
 use talos_core::SolverNumeric;
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::Model,
-    solution::Solution,
-};
+use talos_model::{BerthIndex, Model, Solution, VesselIndex};
 
 use crate::{model::PyModel, solution::PySolution};
 

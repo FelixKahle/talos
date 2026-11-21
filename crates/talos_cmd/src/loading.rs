@@ -9,8 +9,7 @@ use std::path::Path;
 use std::str::FromStr;
 use talos_core::ClosedOpenInterval;
 use talos_core::SolverNumeric;
-use talos_model::index::{BerthIndex, VesselIndex};
-use talos_model::model::{Model, ProcessingTime};
+use talos_model::{BerthIndex, Model, VesselIndex};
 
 // ----------------------------------------------------------------
 // Errors
@@ -275,10 +274,10 @@ where
             for _ in 0..num_berths {
                 let raw: T = tr.next_parsed()?;
                 if raw >= self.forbidden_threshold {
-                    processing_times.push(ProcessingTime::none());
+                    processing_times.push(None);
                 } else {
                     has_valid_berth = true;
-                    processing_times.push(ProcessingTime::some(raw));
+                    processing_times.push(Some(raw));
                 }
             }
 
@@ -337,8 +336,6 @@ where
         }
 
         Ok(Model::new(
-            num_vessels,
-            num_berths,
             arrival_times,
             latest_departure_times,
             vessel_weights,

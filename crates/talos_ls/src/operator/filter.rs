@@ -10,7 +10,7 @@
 
 use crate::sgraph::ScheduleGraph;
 use talos_core::SolverNumeric;
-use talos_model::{index::VesselIndex, model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView, VesselIndex};
 
 /// Filter for `IntraBerthSwapOperator`.
 ///
@@ -63,7 +63,8 @@ where
 /// # Safety
 ///
 /// The caller must ensure that `v_a` and `v_b` are valid vessel indices
-/// in `0..graph.num_vessels()`.
+/// in `0..graph.num_vessels()`, and that `graph` has the vessels and the
+/// berths of `model`.
 #[inline]
 pub unsafe fn inter_berth_swap_filter_unchecked<T>(
     v_a: VesselIndex,
@@ -82,7 +83,22 @@ where
     let berth_b = unsafe { graph.vessel_berth_unchecked(v_b) };
 
     // v_a must be allowed on berth_b, and v_b must be allowed on berth_a.
-    model.vessel_allowed_on_berth(v_a, berth_b) && model.vessel_allowed_on_berth(v_b, berth_a)
+    debug_assert!(
+        v_a.index() < model.num_vessels()
+            && v_b.index() < model.num_vessels()
+            && berth_a.index() < model.num_berths()
+            && berth_b.index() < model.num_berths()
+    );
+    // SAFETY: the vessels are of `graph`, as the caller guarantees, and their berths are berths of `graph`;
+    // `graph` has the vessels and the berths of `model`, as the caller guarantees.
+    unsafe {
+        model
+            .vessel_processing_time_unchecked(v_a, berth_b)
+            .is_some()
+            && model
+                .vessel_processing_time_unchecked(v_b, berth_a)
+                .is_some()
+    }
 }
 
 /// Filter for `IntraBerthShiftOperator`.
@@ -133,8 +149,9 @@ where
 ///
 /// # Safety
 ///
-/// The caller must ensure that `anchor` is a valid vessel index
-/// in `0..graph.num_vessels()`.
+/// The caller must ensure that `v` and `anchor` are valid vessel indices
+/// in `0..graph.num_vessels()`, and that `graph` has the vessels and the
+/// berths of `model`.
 #[inline]
 pub unsafe fn inter_berth_shift_filter_unchecked<T>(
     v: VesselIndex,
@@ -148,5 +165,8 @@ where
 {
     debug_assert!(anchor.index() < graph.num_vessels());
     let berth_anchor = unsafe { graph.vessel_berth_unchecked(anchor) };
-    model.vessel_allowed_on_berth(v, berth_anchor)
+    debug_assert!(v.index() < model.num_vessels() && berth_anchor.index() < model.num_berths());
+    // SAFETY: `v` is a vessel of `graph` and `berth_anchor` a berth of it, as the caller guarantees for the
+    // vessels; `graph` has the vessels and the berths of `model`, as the caller guarantees.
+    unsafe { model.vessel_processing_time_unchecked(v, berth_anchor) }.is_some()
 }

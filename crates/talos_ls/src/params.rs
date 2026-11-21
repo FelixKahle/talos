@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use talos_core::SolverNumeric;
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::Model,
-};
+use talos_model::{BerthIndex, Model, VesselIndex};
 
 // ----------------------------------------------------------------
 // ModelSolutionMismatchError
@@ -254,7 +251,7 @@ where
             }
 
             let vessel = VesselIndex::new(v_idx);
-            if !model.vessel_allowed_on_berth(vessel, berth_idx) {
+            if model.vessel_processing_time(vessel, berth_idx).is_none() {
                 return Err(LocalSearchParamsError::SolutionIncompatibleBerth(
                     SolutionIncompatibleBerthError {
                         vessel_index: v_idx,

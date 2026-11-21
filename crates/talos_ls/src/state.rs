@@ -10,11 +10,7 @@
 
 use crate::{sgraph::ScheduleGraph, tberth::TouchedBerths};
 use talos_core::SolverNumeric;
-use talos_model::{
-    assignment::Assignment,
-    index::{BerthIndex, VesselIndex},
-    solution::SolutionView,
-};
+use talos_model::{Assignment, BerthIndex, SolutionView, VesselIndex};
 
 /// An encapsulated "Phenotype" of the scheduling problem.
 ///
@@ -411,7 +407,10 @@ impl<T: SolverNumeric> ScheduleState<T> {
     pub fn vessel_assignment(&self, vessel: VesselIndex) -> Assignment<T> {
         debug_assert!(vessel.index() < self.berths.len());
 
-        Assignment::new(self.vessel_start(vessel), self.vessel_berth(vessel))
+        Assignment {
+            start_time: self.vessel_start(vessel),
+            berth: self.vessel_berth(vessel),
+        }
     }
 
     /// Returns an `Assignment` for the given vessel without any bounds checks.
@@ -424,9 +423,10 @@ impl<T: SolverNumeric> ScheduleState<T> {
     pub unsafe fn vessel_assignment_unchecked(&self, vessel: VesselIndex) -> Assignment<T> {
         debug_assert!(vessel.index() < self.berths.len());
 
-        Assignment::new(unsafe { self.vessel_start_unchecked(vessel) }, unsafe {
-            self.vessel_berth_unchecked(vessel)
-        })
+        Assignment {
+            start_time: unsafe { self.vessel_start_unchecked(vessel) },
+            berth: unsafe { self.vessel_berth_unchecked(vessel) },
+        }
     }
 
     /// Creates a `SolutionView` that borrows from this state.
@@ -503,7 +503,7 @@ where
 #[cfg(test)]
 mod test_schedule_state {
     use super::*;
-    use talos_model::index::{BerthIndex, VesselIndex};
+    use talos_model::{BerthIndex, VesselIndex};
 
     // Helper function to create a basic state for testing
     fn create_default_state() -> ScheduleState<i32> {

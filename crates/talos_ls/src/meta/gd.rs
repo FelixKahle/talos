@@ -62,7 +62,7 @@ use crate::{
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use talos_core::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView};
 
 // ----------------------------------------------------------------
 // Greedy Descent

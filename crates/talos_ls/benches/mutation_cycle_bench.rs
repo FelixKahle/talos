@@ -12,10 +12,7 @@ use talos_ls::{
     state::ScheduleState,
     tberth::TouchedBerths,
 };
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::{Model, ProcessingTime},
-};
+use talos_model::{BerthIndex, Model, VesselIndex};
 
 fn build_mock_model(num_vessels: usize, num_berths: usize) -> Model<i64> {
     let mut arrivals = Vec::with_capacity(num_vessels);
@@ -30,7 +27,7 @@ fn build_mock_model(num_vessels: usize, num_berths: usize) -> Model<i64> {
         weights.push(1);
 
         for _ in 0..num_berths {
-            processing.push(ProcessingTime::some(50));
+            processing.push(Some(50));
         }
     }
 
@@ -39,15 +36,7 @@ fn build_mock_model(num_vessels: usize, num_berths: usize) -> Model<i64> {
         opening.push(vec![ClosedOpenInterval::new(0, i64::MAX)]);
     }
 
-    Model::new(
-        num_vessels,
-        num_berths,
-        arrivals,
-        departures,
-        weights,
-        processing,
-        opening,
-    )
+    Model::new(arrivals, departures, weights, processing, opening)
 }
 
 fn setup_scenario(

@@ -25,7 +25,7 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 use talos_core::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView};
 
 /// A lightweight wall-clock monitor that terminates a local search after a fixed duration.
 ///
@@ -187,7 +187,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use talos_model::index::BerthIndex;
+    use talos_model::BerthIndex;
 
     fn dummy_view() -> SolutionView<'static, i64> {
         const BERTHS: [BerthIndex; 1] = [BerthIndex::new(0)];
@@ -272,16 +272,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
 
         // Build a minimal model for on_start
-        use talos_model::model::Model;
-        let model = Model::new(
-            1,
-            1,
-            vec![0i64],
-            vec![100],
-            vec![1],
-            vec![talos_model::model::ProcessingTime::from_raw(10)],
-            vec![vec![]],
-        );
+        use talos_model::Model;
+        let model = Model::new(vec![0i64], vec![100], vec![1], vec![Some(10)], vec![vec![]]);
 
         m.on_start(&model, sv);
 

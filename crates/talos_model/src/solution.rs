@@ -1,364 +1,97 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Solution representation for the Dynamic Berth Allocation Problem (DBAP).
-//!
-//! This module provides two related types:
-//! - `Solution`: an owned solution (stores `Vec`s for berths and start times).
-//! - `SolutionView`: a lightweight borrowed view into solution slices.
-//!
-//! The representation is **SoA (Structure of Arrays)** for cache locality:
-//! - `berths[i]` and `start_times[i]` refer to the same vessel `VesselIndex(i)`.
-//!
-//! ## Invariants
-//! - For both `Solution` and `SolutionView`, `berths.len() == start_times.len()`.
-//! - Indices passed via `VesselIndex` must refer to `0..num_vessels()`.
-//!
-//! ## Complexity
-//! - All getters are `O(1)`.
-//! - Iteration yields assignments in vessel-index order with `O(n)` total time.
-//!
-//! ## Safety
-//! This module provides `_unchecked` accessors for hot loops. These are only
-//! sound if the caller guarantees that the provided indices are in bounds.
-//!
-//! ## Examples
-//!
-//! Creating and inspecting a solution:
-//! ```rust
-//! use talos_model::solution::Solution;
-//! use talos_model::assignment::Assignment;
-//! use talos_model::index::{BerthIndex, VesselIndex};
-//!
-//! let berths = vec![BerthIndex::new(0), BerthIndex::new(1)];
-//! let starts = vec![10_i64, 20_i64];
-//! let objective = 123_i64;
-//!
-//! let sol = Solution::new(berths, starts, objective);
-//! assert_eq!(sol.num_vessels(), 2);
-//!
-//! let a0 = sol.assignment_for_vessel(VesselIndex::new(0));
-//! assert_eq!(a0, Assignment::new(10, BerthIndex::new(0)));
-//! ```
-//!
-//! Using a view without allocating:
-//! ```rust
-//! use talos_model::solution::SolutionView;
-//! use talos_model::index::BerthIndex;
-//!
-//! let berths = [BerthIndex::new(0)];
-//! let starts = [0_i64];
-//! let view = SolutionView::new(&berths, &starts, 7);
-//! assert_eq!(view.num_vessels(), 1);
-//! assert_eq!(view.objective_value(), 7);
-//! ```
+//! A schedule of every vessel, owned as a [`Solution`] or borrowed as a [`SolutionView`].
 
-use crate::{
-    assignment::Assignment,
-    index::{BerthIndex, VesselIndex},
-    model::VesselIndexIter,
-};
-use std::{hash::Hash, iter::FusedIterator};
+use crate::assignment::Assignment;
+use crate::index::{BerthIndex, VesselIndex};
+use std::fmt;
+use std::iter::{FusedIterator, Zip};
+use std::slice;
+use typed_index_collections::{TiSlice, TiVec};
 
-// ----------------------------------------------------------------
-// SolutionIter
-// ----------------------------------------------------------------
-
-/// Iterator over all vessel assignments in a `Solution`.
+/// A schedule of every vessel: the berth each is served at, the time each service starts, and the objective value
+/// of the schedule.
 ///
-/// Yields `Assignment<T>` values in order of increasing vessel index.
-#[derive(Debug, Clone)]
-pub struct SolutionIter<'a, T> {
-    berths: std::slice::Iter<'a, BerthIndex>,
-    start_times: std::slice::Iter<'a, T>,
-}
-
-impl<'a, T> SolutionIter<'a, T> {
-    #[inline]
-    fn new(solution: &'a Solution<T>) -> Self {
-        debug_assert_eq!(solution.berths.len(), solution.start_times.len());
-
-        SolutionIter {
-            berths: solution.berths.iter(),
-            start_times: solution.start_times.iter(),
-        }
-    }
-}
-
-impl<'a, T> Iterator for SolutionIter<'a, T>
-where
-    T: Copy,
-{
-    type Item = Assignment<T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let berth = self.berths.next()?;
-        let start_time = self.start_times.next()?;
-
-        Some(Assignment::new(*start_time, *berth))
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        debug_assert_eq!(self.berths.len(), self.start_times.len());
-
-        self.berths.size_hint()
-    }
-}
-
-impl<'a, T> ExactSizeIterator for SolutionIter<'a, T> where T: Copy {}
-impl<'a, T> FusedIterator for SolutionIter<'a, T> where T: Copy {}
-
-// ----------------------------------------------------------------
-// Solution
-// ----------------------------------------------------------------
-
-/// Represents a solution of the Dynamic Berth Allocation Problem (DBAP),
-/// i.e., a complete schedule of all vessels to berths and start times.
+/// The berths and the start times are tables keyed by the vessel, one entry per vessel each. A solution does not
+/// know its model: whether its berths are those of a model and its times feasible is a question for the model.
+/// [`SolutionView`] is the same schedule borrowed from tables another owner keeps.
 ///
-/// The solution stores, for each vessel, its assigned berth and start time,
-/// as well as the associated objective value of the schedule.
+/// # Examples
 ///
-/// # Data Layout
+/// ```rust
+/// use talos_model::{Assignment, BerthIndex, Solution, VesselIndex};
 ///
-/// This type uses a SoA (Structure of Arrays) layout:
-/// - `berths[v]` is the berth assigned to vessel `v`
-/// - `start_times[v]` is the start time assigned to vessel `v`
+/// let solution = Solution::new(vec![BerthIndex::new(1), BerthIndex::new(0)], vec![10, 20], 30);
 ///
-/// This improves cache locality when processing large problems vessel-by-vessel.
-#[derive(Clone, PartialEq, Eq, Hash)]
+/// assert_eq!(solution.num_vessels(), 2);
+/// assert_eq!(solution.berths()[VesselIndex::new(0)], BerthIndex::new(1));
+/// assert_eq!(
+///     solution.iter().last(),
+///     Some(Assignment { start_time: 20, berth: BerthIndex::new(0) })
+/// );
+/// ```
+// Invariant: `berths` and `start_times` have the same length, the number of vessels.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Solution<T> {
-    // Invariant: berths.len() == start_times.len()
-    berths: Vec<BerthIndex>, // len = num_vessels
-    start_times: Vec<T>,     // len = num_vessels
+    berths: TiVec<VesselIndex, BerthIndex>,
+    start_times: TiVec<VesselIndex, T>,
     objective_value: T,
 }
 
-impl<T> std::fmt::Debug for Solution<T>
-where
-    T: std::fmt::Debug + Copy,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // Wrapper to debug-print assignments without allocating.
-        struct Assignments<'a, U>(&'a Solution<U>);
-
-        impl<'a, U: std::fmt::Debug + Copy> std::fmt::Debug for Assignments<'a, U> {
-            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.debug_list().entries(self.0.iter()).finish()
-            }
-        }
-
-        f.debug_struct("Solution")
-            .field("objective_value", &self.objective_value)
-            .field("num_vessels", &self.num_vessels())
-            .field("assignments", &Assignments(self))
-            .finish()
-    }
-}
-
-impl<T> std::fmt::Display for Solution<T>
-where
-    T: std::fmt::Display + Copy,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        writeln!(
-            f,
-            "Solution (Vessels: {}, Objective: {})",
-            self.num_vessels(),
-            self.objective_value
-        )?;
-
-        for (i, assignment) in self.iter().enumerate() {
-            writeln!(f, "  Vessel {}: {}", i, assignment)?;
-        }
-
-        Ok(())
-    }
-}
-
 impl<T> Solution<T> {
-    /// Creates a new `Solution`.
+    /// The schedule that serves vessel `v` at `berths[v]` from `start_times[v]`, of objective value
+    /// `objective_value`.
     ///
     /// # Panics
     ///
-    /// Panics if `berths` and `start_times` have different lengths.
-    #[inline]
+    /// Panics if `berths` and `start_times` differ in length.
+    #[track_caller]
     pub fn new(berths: Vec<BerthIndex>, start_times: Vec<T>, objective_value: T) -> Self {
-        assert_eq!(
-            berths.len(),
-            start_times.len(),
-            "called `Solution::new` with mismatched lengths: berths = {}, start_times = {}",
-            berths.len(),
-            start_times.len()
-        );
-
-        Self {
-            berths,
-            start_times,
-            objective_value,
+        match Self::try_new(berths, start_times, objective_value) {
+            Ok(solution) => solution,
+            Err(error) => panic!("called `Solution::new` with {error}"),
         }
     }
 
-    /// Overwrites this owned solution with data from a `SolutionView`.
+    /// The schedule that serves vessel `v` at `berths[v]` from `start_times[v]`, of objective value
+    /// `objective_value`, or `Err` if the two tables are not one entry per vessel each.
     ///
-    /// This method reuses existing allocations by clearing and extending the
-    /// internal vectors.
-    #[inline]
-    pub fn overwrite_from_solution_view(&mut self, view: SolutionView<'_, T>)
-    where
-        T: Copy,
-    {
-        self.objective_value = view.objective_value();
-        self.berths.clear();
-        self.berths.extend_from_slice(view.berths());
-        self.start_times.clear();
-        self.start_times.extend_from_slice(view.start_times());
-    }
-
-    /// Constructs a `Solution` by copying from slices.
+    /// # Errors
     ///
-    /// # Panics
-    ///
-    /// Panics if `berths` and `start_times` have different lengths.
-    #[inline]
-    pub fn from_slices(berths: &[BerthIndex], start_times: &[T], objective_value: T) -> Self
-    where
-        T: Copy,
-    {
-        assert_eq!(
-            berths.len(),
-            start_times.len(),
-            "called `Solution::from_slices` with mismatched lengths: berths = {}, start_times = {}",
-            berths.len(),
-            start_times.len()
-        );
-
-        Self {
-            berths: berths.to_vec(),
-            start_times: start_times.to_vec(),
+    /// [`SolutionLengthMismatch`] if `berths` and `start_times` differ in length.
+    pub fn try_new(
+        berths: Vec<BerthIndex>,
+        start_times: Vec<T>,
+        objective_value: T,
+    ) -> Result<Self, SolutionLengthMismatch> {
+        check_lengths(&berths, &start_times)?;
+        Ok(Self {
+            berths: TiVec::from(berths),
+            start_times: TiVec::from(start_times),
             objective_value,
-        }
+        })
     }
 
-    /// Returns the number of vessels in this solution.
+    /// The number of vessels.
     #[inline]
     pub fn num_vessels(&self) -> usize {
         self.berths.len()
     }
 
-    /// Returns the assignment for the given vessel.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Panics in debug builds if `vessel` is out of bounds.
+    /// The berth of each vessel.
     #[inline]
-    pub fn assignment_for_vessel(&self, vessel: VesselIndex) -> Assignment<T>
-    where
-        T: Copy,
-    {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        Assignment::new(
-            self.start_times[vessel.index()],
-            self.berths[vessel.index()],
-        )
-    }
-
-    /// Returns the assignment for a vessel without bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn assignment_for_vessel_unchecked(&self, vessel: VesselIndex) -> Assignment<T>
-    where
-        T: Copy,
-    {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        unsafe {
-            Assignment::new(
-                *self.start_times.get_unchecked(vessel.index()),
-                *self.berths.get_unchecked(vessel.index()),
-            )
-        }
-    }
-
-    /// Sets the assignment for a vessel.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Panics in debug builds if `vessel` is out of bounds.
-    #[inline]
-    pub fn set_assignment_for_vessel(&mut self, vessel: VesselIndex, assignment: Assignment<T>) {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        self.start_times[vessel.index()] = assignment.start_time;
-        self.berths[vessel.index()] = assignment.berth;
-    }
-
-    /// Returns the berth assigned to the given vessel.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Panics in debug builds if `vessel` is out of bounds.
-    #[inline]
-    pub fn berth_for_vessel(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        self.berths[vessel.index()]
-    }
-
-    /// Returns the berth assigned to a vessel without bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn berth_for_vessel_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        *unsafe { self.berths.get_unchecked(vessel.index()) }
-    }
-
-    /// Returns a reference to the start time for the given vessel.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Panics in debug builds if `vessel` is out of bounds.
-    #[inline]
-    pub fn start_time_for_vessel(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel.index() < self.start_times.len());
-
-        &self.start_times[vessel.index()]
-    }
-
-    /// Returns the start time for a vessel without bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn start_time_for_vessel_unchecked(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel.index() < self.start_times.len());
-
-        unsafe { self.start_times.get_unchecked(vessel.index()) }
-    }
-
-    /// Returns all start times (read-only).
-    #[inline]
-    pub fn start_times(&self) -> &[T] {
-        &self.start_times
-    }
-
-    /// Returns all berths (read-only).
-    #[inline]
-    pub fn berths(&self) -> &[BerthIndex] {
+    pub fn berths(&self) -> &TiSlice<VesselIndex, BerthIndex> {
         &self.berths
     }
 
-    /// Returns the objective value.
+    /// The time each vessel's service starts.
+    #[inline]
+    pub fn start_times(&self) -> &TiSlice<VesselIndex, T> {
+        &self.start_times
+    }
+
+    /// The objective value of the schedule.
     #[inline]
     pub fn objective_value(&self) -> T
     where
@@ -367,43 +100,26 @@ impl<T> Solution<T> {
         self.objective_value
     }
 
-    /// Sets the objective value.
-    #[inline]
-    pub fn set_objective_value(&mut self, value: T) {
-        self.objective_value = value;
-    }
-
-    /// Mutable access to the objective value.
-    #[inline]
-    pub fn objective_value_mut(&mut self) -> &mut T {
-        &mut self.objective_value
-    }
-
-    /// Returns an iterator over all assignments in this solution.
-    ///
-    /// The iterator yields `Assignment` values for vessels `0..num_vessels()`
-    /// in order of their vessel index.
+    /// The assignment of each vessel, in the order of the vessels.
     #[inline]
     pub fn iter(&self) -> SolutionIter<'_, T>
     where
         T: Copy,
     {
-        SolutionIter::new(self)
+        SolutionIter::new(&self.berths, &self.start_times)
     }
 
-    /// Returns an iterator over all vessel indices in this solution.
-    #[inline]
-    pub fn iter_vessels(&self) -> VesselIndexIter {
-        VesselIndexIter::new(VesselIndex::new(0), self.num_vessels().into())
-    }
-
-    /// Returns a borrowed view into this solution.
+    /// The schedule, borrowed.
     #[inline]
     pub fn as_view(&self) -> SolutionView<'_, T>
     where
         T: Copy,
     {
-        SolutionView::from_solution(self)
+        SolutionView {
+            berths: &self.berths,
+            start_times: &self.start_times,
+            objective_value: self.objective_value,
+        }
     }
 }
 
@@ -425,175 +141,106 @@ where
     T: Copy,
 {
     #[inline]
-    fn from(val: &'a Solution<T>) -> Self {
-        val.as_view()
+    fn from(solution: &'a Solution<T>) -> Self {
+        solution.as_view()
     }
 }
 
-// ----------------------------------------------------------------
-// SolutionViewIter
-// ----------------------------------------------------------------
-
-/// Iterator over assignments in a `SolutionView`.
-#[derive(Debug, Clone)]
-pub struct SolutionViewIter<'a, T> {
-    berths: std::slice::Iter<'a, BerthIndex>,
-    start_times: std::slice::Iter<'a, T>,
-}
-
-impl<'a, T> SolutionViewIter<'a, T> {
+impl<T> From<SolutionView<'_, T>> for Solution<T>
+where
+    T: Copy,
+{
+    /// The schedule of `view`, copied into tables of its own.
     #[inline]
-    fn new(view: &'a SolutionView<T>) -> Self {
-        debug_assert_eq!(view.berths.len(), view.start_times.len());
-
-        SolutionViewIter {
-            berths: view.berths.iter(),
-            start_times: view.start_times.iter(),
+    fn from(view: SolutionView<'_, T>) -> Self {
+        Self {
+            berths: view.berths.to_owned(),
+            start_times: view.start_times.to_owned(),
+            objective_value: view.objective_value,
         }
     }
 }
 
-impl<'a, T> Iterator for SolutionViewIter<'a, T>
-where
-    T: Copy,
-{
-    type Item = Assignment<T>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        let berth = self.berths.next()?;
-        let start_time = self.start_times.next()?;
-        Some(Assignment::new(*start_time, *berth))
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        debug_assert_eq!(self.berths.len(), self.start_times.len());
-
-        self.berths.size_hint()
-    }
-}
-
-impl<'a, T> ExactSizeIterator for SolutionViewIter<'a, T> where T: Copy {}
-impl<'a, T> FusedIterator for SolutionViewIter<'a, T> where T: Copy {}
-
-// ----------------------------------------------------------------
-// SolutionView
-// ----------------------------------------------------------------
-
-/// A borrowed view of a solution.
+/// A schedule of every vessel, borrowed from tables another owner keeps.
 ///
-/// This type does not allocate and is intended for hot-path access.
-#[derive(Debug, Clone, Copy)]
+/// It answers what a [`Solution`] answers and costs no allocation to make, which suits a solver handing out its
+/// current schedule. [`Solution::from`] copies it into a schedule of its own.
+///
+/// # Examples
+///
+/// ```rust
+/// use talos_model::{BerthIndex, Solution, SolutionView};
+///
+/// let berths = [BerthIndex::new(0)];
+/// let start_times = [4];
+/// let view = SolutionView::new(&berths, &start_times, 7);
+///
+/// assert_eq!(view.objective_value(), 7);
+/// assert_eq!(Solution::from(view), Solution::new(vec![BerthIndex::new(0)], vec![4], 7));
+/// ```
+// Invariant: `berths` and `start_times` have the same length, the number of vessels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SolutionView<'a, T> {
-    berths: &'a [BerthIndex],
-    start_times: &'a [T],
+    berths: &'a TiSlice<VesselIndex, BerthIndex>,
+    start_times: &'a TiSlice<VesselIndex, T>,
     objective_value: T,
 }
 
 impl<'a, T> SolutionView<'a, T> {
-    /// Constructs a new `SolutionView`.
+    /// The schedule that serves vessel `v` at `berths[v]` from `start_times[v]`, of objective value
+    /// `objective_value`.
     ///
     /// # Panics
     ///
-    /// Panics if `berths` and `start_times` have different lengths.
+    /// Panics if `berths` and `start_times` differ in length.
     #[inline]
+    #[track_caller]
     pub fn new(berths: &'a [BerthIndex], start_times: &'a [T], objective_value: T) -> Self {
-        assert_eq!(
-            berths.len(),
-            start_times.len(),
-            "violated invariant of `SolutionView`: berths and start_times must have the same length, but got berths.len() = {} and start_times.len() = {}",
-            berths.len(),
-            start_times.len()
-        );
-
-        Self {
-            berths,
-            start_times,
-            objective_value,
+        match Self::try_new(berths, start_times, objective_value) {
+            Ok(view) => view,
+            Err(error) => panic!("called `SolutionView::new` with {error}"),
         }
     }
 
-    /// Constructs a view from an owned `Solution`.
+    /// The schedule that serves vessel `v` at `berths[v]` from `start_times[v]`, of objective value
+    /// `objective_value`, or `Err` if the two tables are not one entry per vessel each.
+    ///
+    /// # Errors
+    ///
+    /// [`SolutionLengthMismatch`] if `berths` and `start_times` differ in length.
     #[inline]
-    pub fn from_solution(solution: &'a Solution<T>) -> Self
-    where
-        T: Copy,
-    {
-        Self {
-            berths: solution.berths(),
-            start_times: solution.start_times(),
-            objective_value: solution.objective_value(),
-        }
+    pub fn try_new(
+        berths: &'a [BerthIndex],
+        start_times: &'a [T],
+        objective_value: T,
+    ) -> Result<Self, SolutionLengthMismatch> {
+        check_lengths(berths, start_times)?;
+        Ok(Self {
+            berths: TiSlice::from_ref(berths),
+            start_times: TiSlice::from_ref(start_times),
+            objective_value,
+        })
     }
 
-    /// Number of vessels in this view.
+    /// The number of vessels.
     #[inline]
     pub fn num_vessels(&self) -> usize {
         self.berths.len()
     }
 
-    /// Returns berth assignments slice.
+    /// The berth of each vessel.
     #[inline]
-    pub fn berths(&self) -> &'a [BerthIndex] {
+    pub fn berths(&self) -> &'a TiSlice<VesselIndex, BerthIndex> {
         self.berths
     }
 
-    /// Returns the berth assigned to the given vessel.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Panics in debug builds if `vessel` is out of bounds.
+    /// The time each vessel's service starts.
     #[inline]
-    pub fn berth_for_vessel(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        self.berths[vessel.index()]
-    }
-
-    /// Returns the berth assigned to a vessel without bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn berth_for_vessel_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel.index() < self.berths.len());
-
-        *unsafe { self.berths.get_unchecked(vessel.index()) }
-    }
-
-    /// Returns start times slice.
-    #[inline]
-    pub fn start_times(&self) -> &'a [T] {
+    pub fn start_times(&self) -> &'a TiSlice<VesselIndex, T> {
         self.start_times
     }
 
-    /// Returns the start time for the given vessel.
-    ///
-    /// # Panics (debug only)
-    ///
-    /// Panics in debug builds if `vessel` is out of bounds.
-    #[inline]
-    pub fn start_time_for_vessel(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel.index() < self.start_times.len());
-
-        &self.start_times[vessel.index()]
-    }
-
-    /// Returns the start time for a vessel without bounds checks.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure `vessel < self.num_vessels()`.
-    #[inline]
-    pub unsafe fn start_time_for_vessel_unchecked(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel.index() < self.start_times.len());
-
-        unsafe { self.start_times.get_unchecked(vessel.index()) }
-    }
-
-    /// Returns the objective value.
+    /// The objective value of the schedule.
     #[inline]
     pub fn objective_value(&self) -> T
     where
@@ -602,35 +249,22 @@ impl<'a, T> SolutionView<'a, T> {
         self.objective_value
     }
 
-    /// Creates an owned `Solution` by copying the underlying slices.
+    /// The assignment of each vessel, in the order of the vessels.
     #[inline]
-    pub fn to_owned_solution(&self) -> Solution<T>
+    pub fn iter(&self) -> SolutionIter<'a, T>
     where
         T: Copy,
     {
-        Solution::new(
-            self.berths.to_vec(),
-            self.start_times.to_vec(),
-            self.objective_value,
-        )
-    }
-
-    /// Returns an iterator over all assignments in this view.
-    #[inline]
-    pub fn iter(&self) -> SolutionViewIter<'_, T>
-    where
-        T: Copy,
-    {
-        SolutionViewIter::new(self)
+        SolutionIter::new(self.berths, self.start_times)
     }
 }
 
-impl<'a, T> IntoIterator for &'a SolutionView<'a, T>
+impl<'a, T> IntoIterator for SolutionView<'a, T>
 where
     T: Copy,
 {
     type Item = Assignment<T>;
-    type IntoIter = SolutionViewIter<'a, T>;
+    type IntoIter = SolutionIter<'a, T>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -638,146 +272,246 @@ where
     }
 }
 
-impl<'a, T> From<SolutionView<'a, T>> for Solution<T>
+impl<'a, T> IntoIterator for &SolutionView<'a, T>
 where
     T: Copy,
 {
+    type Item = Assignment<T>;
+    type IntoIter = SolutionIter<'a, T>;
+
     #[inline]
-    fn from(val: SolutionView<'a, T>) -> Self {
-        val.to_owned_solution()
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
-impl<'a, T> From<&SolutionView<'a, T>> for Solution<T>
+/// The assignment of each vessel of a schedule, in the order of the vessels.
+#[derive(Clone, Debug)]
+pub struct SolutionIter<'a, T> {
+    entries: Zip<slice::Iter<'a, BerthIndex>, slice::Iter<'a, T>>,
+}
+
+impl<'a, T> SolutionIter<'a, T> {
+    /// The walk over the entries of `berths` and `start_times`, which have one per vessel each.
+    #[inline]
+    fn new(
+        berths: &'a TiSlice<VesselIndex, BerthIndex>,
+        start_times: &'a TiSlice<VesselIndex, T>,
+    ) -> Self {
+        debug_assert_eq!(
+            berths.len(),
+            start_times.len(),
+            "called `SolutionIter::new` with {} berths but {} start times",
+            berths.len(),
+            start_times.len()
+        );
+        Self {
+            entries: berths.iter().zip(start_times.iter()),
+        }
+    }
+}
+
+impl<T> Iterator for SolutionIter<'_, T>
+where
+    T: Copy,
+{
+    type Item = Assignment<T>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries
+            .next()
+            .map(|(&berth, &start_time)| Assignment { start_time, berth })
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.entries.size_hint()
+    }
+}
+
+impl<T> DoubleEndedIterator for SolutionIter<'_, T>
 where
     T: Copy,
 {
     #[inline]
-    fn from(val: &SolutionView<'a, T>) -> Self {
-        val.to_owned_solution()
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.entries
+            .next_back()
+            .map(|(&berth, &start_time)| Assignment { start_time, berth })
     }
 }
+
+impl<T> ExactSizeIterator for SolutionIter<'_, T> where T: Copy {}
+
+impl<T> FusedIterator for SolutionIter<'_, T> where T: Copy {}
+
+/// Refuses tables of berths and start times that are not one entry per vessel each.
+///
+/// # Errors
+///
+/// [`SolutionLengthMismatch`] if `berths` and `start_times` differ in length.
+fn check_lengths<T>(
+    berths: &[BerthIndex],
+    start_times: &[T],
+) -> Result<(), SolutionLengthMismatch> {
+    if berths.len() == start_times.len() {
+        Ok(())
+    } else {
+        Err(SolutionLengthMismatch {
+            berths: berths.len(),
+            start_times: start_times.len(),
+        })
+    }
+}
+
+/// Tables of berths and start times that make no schedule, because they differ in length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SolutionLengthMismatch {
+    /// The number of berths given.
+    pub berths: usize,
+    /// The number of start times given.
+    pub start_times: usize,
+}
+
+impl fmt::Display for SolutionLengthMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} berths but {} start times, where each vessel needs one of each",
+            self.berths, self.start_times
+        )
+    }
+}
+
+impl std::error::Error for SolutionLengthMismatch {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use proptest::prelude::*;
 
-    fn b(i: usize) -> BerthIndex {
-        BerthIndex::new(i)
+    fn berth(index: usize) -> BerthIndex {
+        BerthIndex::new(index)
     }
 
-    fn v(i: usize) -> VesselIndex {
-        VesselIndex::new(i)
-    }
-
-    #[test]
-    fn test_solution_new_panics_on_mismatched_lengths() {
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            let _ = Solution::new(vec![b(0)], vec![10_i64, 20_i64], 0_i64);
-        }));
-        assert!(res.is_err());
+    fn assignment(start_time: i64, berth_index: usize) -> Assignment<i64> {
+        Assignment {
+            start_time,
+            berth: berth(berth_index),
+        }
     }
 
     #[test]
-    fn test_solution_from_slices_panics_on_mismatched_lengths() {
-        let berths = [b(0)];
-        let starts = [10_i64, 20_i64];
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            let _ = Solution::from_slices(&berths, &starts, 0_i64);
-        }));
-        assert!(res.is_err());
+    fn test_solution_answers_its_tables_by_vessel() {
+        let solution = Solution::new(vec![berth(1), berth(0)], vec![10i64, 20], 123);
+        let second = VesselIndex::new(1);
+        assert_eq!(solution.num_vessels(), 2);
+        assert_eq!(solution.berths()[second], berth(0));
+        assert_eq!(solution.start_times()[second], 20);
+        assert_eq!(solution.objective_value(), 123);
     }
 
     #[test]
-    fn test_solution_getters_and_setters() {
-        let mut sol = Solution::new(vec![b(1), b(0)], vec![10_i64, 20_i64], 123_i64);
-
-        assert_eq!(sol.num_vessels(), 2);
-        assert_eq!(sol.berths(), &[b(1), b(0)]);
-        assert_eq!(sol.start_times(), &[10, 20]);
-        assert_eq!(sol.objective_value(), 123);
-
-        sol.set_objective_value(7);
-        assert_eq!(sol.objective_value(), 7);
-        *sol.objective_value_mut() = 9;
-        assert_eq!(sol.objective_value(), 9);
-
-        let a0 = sol.assignment_for_vessel(v(0));
-        assert_eq!(a0, Assignment::new(10, b(1)));
-
-        sol.set_assignment_for_vessel(v(0), Assignment::new(111, b(0)));
-        assert_eq!(sol.assignment_for_vessel(v(0)), Assignment::new(111, b(0)));
-        assert_eq!(sol.berth_for_vessel(v(0)), b(0));
-        assert_eq!(*sol.start_time_for_vessel(v(0)), 111);
-    }
-
-    #[test]
-    fn test_solution_iterates_in_vessel_order() {
-        let sol = Solution::new(vec![b(1), b(0)], vec![10_i64, 20_i64], 0_i64);
-        let items: Vec<_> = sol.iter().collect();
+    fn test_try_new_refuses_tables_of_different_lengths() {
         assert_eq!(
-            items,
-            vec![Assignment::new(10, b(1)), Assignment::new(20, b(0))]
+            Solution::try_new(vec![berth(0)], vec![10i64, 20], 0),
+            Err(SolutionLengthMismatch {
+                berths: 1,
+                start_times: 2
+            })
+        );
+        let berths = [berth(0), berth(1)];
+        assert_eq!(
+            SolutionView::try_new(&berths, &[10i64], 0),
+            Err(SolutionLengthMismatch {
+                berths: 2,
+                start_times: 1
+            })
         );
     }
 
     #[test]
-    fn test_into_iterator_for_solution_ref() {
-        let sol = Solution::new(vec![b(0)], vec![5_i64], 0_i64);
-        let items: Vec<_> = (&sol).into_iter().collect();
-        assert_eq!(items, vec![Assignment::new(5, b(0))]);
+    #[should_panic(expected = "called `Solution::new` with 1 berths but 2 start times")]
+    fn test_new_panics_on_tables_of_different_lengths() {
+        let _ = Solution::new(vec![berth(0)], vec![10i64, 20], 0);
     }
 
     #[test]
-    fn test_solution_view_new_panics_on_mismatched_lengths() {
-        let berths = [b(0)];
-        let starts = [10_i64, 20_i64];
-        let res = catch_unwind(AssertUnwindSafe(|| {
-            let _ = SolutionView::new(&berths, &starts, 0_i64);
-        }));
-        assert!(res.is_err());
+    #[should_panic(expected = "called `SolutionView::new` with 2 berths but 0 start times")]
+    fn test_view_new_panics_on_tables_of_different_lengths() {
+        let _ = SolutionView::<i64>::new(&[berth(0), berth(1)], &[], 0);
     }
 
     #[test]
-    fn test_solution_view_from_solution_and_to_owned_roundtrip() {
-        let sol = Solution::new(vec![b(1), b(0)], vec![10_i64, 20_i64], 77_i64);
-        let view = sol.as_view();
+    fn test_check_lengths_accepts_equal_lengths_only() {
+        assert_eq!(check_lengths::<i64>(&[], &[]), Ok(()));
+        assert_eq!(check_lengths(&[berth(0)], &[1i64]), Ok(()));
+        assert!(check_lengths(&[berth(0)], &[1i64, 2]).is_err());
+    }
 
+    #[test]
+    fn test_iter_yields_each_vessels_assignment_in_vessel_order() {
+        let solution = Solution::new(vec![berth(1), berth(0)], vec![10i64, 20], 0);
+        let assignments: Vec<_> = solution.iter().collect();
+        assert_eq!(assignments, [assignment(10, 1), assignment(20, 0)]);
+        assert_eq!(
+            (&solution).into_iter().rev().collect::<Vec<_>>(),
+            [assignment(20, 0), assignment(10, 1)]
+        );
+    }
+
+    #[test]
+    fn test_view_borrows_the_same_schedule_and_copies_back_to_it() {
+        let solution = Solution::new(vec![berth(1), berth(0)], vec![10i64, 20], 77);
+        let view = solution.as_view();
         assert_eq!(view.num_vessels(), 2);
-        assert_eq!(view.berths(), sol.berths());
-        assert_eq!(view.start_times(), sol.start_times());
+        assert_eq!(view.berths(), solution.berths());
+        assert_eq!(view.start_times(), solution.start_times());
         assert_eq!(view.objective_value(), 77);
-
-        let owned = view.to_owned_solution();
-        assert_eq!(owned, sol);
+        assert_eq!(
+            view.iter().collect::<Vec<_>>(),
+            solution.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(Solution::from(view), solution);
     }
 
     #[test]
-    fn test_solution_view_iter() {
-        let sol = Solution::new(vec![b(1), b(0)], vec![10_i64, 20_i64], 0_i64);
-        let view = sol.as_view();
-        let items: Vec<_> = view.iter().collect();
+    fn test_view_over_slices_reads_them_by_vessel() {
+        let (berths, start_times) = ([berth(2)], [5i64]);
+        let view = SolutionView::new(&berths, &start_times, 9);
+        assert_eq!(view.into_iter().collect::<Vec<_>>(), [assignment(5, 2)]);
+        assert_eq!((&view).into_iter().len(), 1);
+    }
 
+    #[test]
+    fn test_length_mismatch_states_both_lengths() {
+        let error = SolutionLengthMismatch {
+            berths: 3,
+            start_times: 4,
+        };
         assert_eq!(
-            items,
-            vec![Assignment::new(10, b(1)), Assignment::new(20, b(0))]
+            error.to_string(),
+            "3 berths but 4 start times, where each vessel needs one of each"
         );
     }
 
-    #[test]
-    fn test_into_iterator_for_solution_view_ref() {
-        let sol = Solution::new(vec![b(0)], vec![5_i64], 0_i64);
-        let view = sol.as_view();
-        let items: Vec<_> = (&view).into_iter().collect();
-        assert_eq!(items, vec![Assignment::new(5, b(0))]);
-    }
+    proptest! {
+        #[test]
+        fn test_iter_pairs_the_tables_entry_by_entry(
+            entries in prop::collection::vec((0usize..10, any::<i64>()), 0..20),
+        ) {
+            let berths: Vec<BerthIndex> = entries.iter().map(|&(index, _)| berth(index)).collect();
+            let start_times: Vec<i64> = entries.iter().map(|&(_, time)| time).collect();
+            let solution = Solution::new(berths, start_times, 0);
 
-    #[test]
-    fn test_debug_and_display_do_not_panic() {
-        let sol = Solution::new(vec![b(0), b(1)], vec![5_i64, 6_i64], 42_i64);
-
-        let _ = format!("{:?}", sol);
-        let _ = format!("{}", sol);
+            let expected: Vec<Assignment<i64>> =
+                entries.iter().map(|&(index, time)| assignment(time, index)).collect();
+            prop_assert_eq!(solution.iter().len(), expected.len());
+            prop_assert_eq!(solution.iter().collect::<Vec<_>>(), expected.clone());
+            let mut backwards: Vec<_> = solution.iter().rev().collect();
+            backwards.reverse();
+            prop_assert_eq!(backwards, expected);
+        }
     }
 }

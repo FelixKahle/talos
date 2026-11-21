@@ -30,10 +30,7 @@
 
 use crate::ring_arena::{Node, RingArena, RingLinkIter, RingSequenceIter};
 use std::iter::FusedIterator;
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::{BerthIndexIter, VesselIndexIter},
-};
+use talos_model::{BerthIndex, BerthIndexIter, VesselIndex, VesselIndexIter};
 
 // ----------------------------------------------------------------
 // VesselSequenceIter
@@ -867,13 +864,13 @@ impl ScheduleGraph {
     /// Returns an iterator over all berth indices.
     #[inline(always)]
     pub fn berth_iter(&self) -> BerthIndexIter {
-        BerthIndexIter::new(BerthIndex::new(0), self.num_berths.into())
+        BerthIndexIter::new(self.num_berths)
     }
 
     /// Returns an iterator over all vessel indices.
     #[inline(always)]
     pub fn vessel_iter(&self) -> impl Iterator<Item = VesselIndex> + '_ {
-        VesselIndexIter::new(VesselIndex::new(0), self.num_vessels.into())
+        VesselIndexIter::new(self.num_vessels)
     }
 
     // ----------------------------------------------------------------

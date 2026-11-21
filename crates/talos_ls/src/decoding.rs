@@ -34,10 +34,7 @@ use crate::{
     tberth::TouchedBerths,
 };
 use talos_core::SolverNumeric;
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::Model,
-};
+use talos_model::{BerthIndex, Model, VesselIndex};
 
 /// Finds the earliest feasible start time for a vessel on a given berth,
 /// searching forward through the berth's opening time intervals starting
@@ -121,7 +118,7 @@ where
 
     for (position, vessel) in sequence.enumerate() {
         let arrival = unsafe { model.vessel_arrival_time_unchecked(vessel) };
-        let pt = unsafe { model.vessel_processing_time_unchecked(vessel, berth) }.into_option()?;
+        let pt = unsafe { model.vessel_processing_time_unchecked(vessel, berth) }?;
 
         let (start, next_idx) = unsafe {
             find_earliest_start_unchecked(model, berth, arrival, pt, free_time, interval_idx)
@@ -250,24 +247,15 @@ where
 mod test_decoder {
     use super::*;
     use talos_core::ClosedOpenInterval;
-    use talos_model::model::ProcessingTime;
 
     // Helper to build a valid 2-vessel, 2-berth model for testing.
     fn build_test_model() -> Model<i64> {
-        let num_vessels = 2;
-        let num_berths = 2;
-
         let arrivals = vec![10, 20]; // V0 arrives at 10, V1 arrives at 20
         let departures = vec![100, 100];
         let weights = vec![1, 1];
 
         // Matrix: [v0b0, v0b1, v1b0, v1b1]
-        let processing = vec![
-            ProcessingTime::some(5),
-            ProcessingTime::some(5),
-            ProcessingTime::some(10),
-            ProcessingTime::some(10),
-        ];
+        let processing = vec![Some(5), Some(5), Some(10), Some(10)];
 
         let opening = vec![
             vec![
@@ -277,15 +265,7 @@ mod test_decoder {
             vec![ClosedOpenInterval::new(0, 100)], // B1 is always open
         ];
 
-        Model::new(
-            num_vessels,
-            num_berths,
-            arrivals,
-            departures,
-            weights,
-            processing,
-            opening,
-        )
+        Model::new(arrivals, departures, weights, processing, opening)
     }
 
     // Evaluator that simply uses the start time as the cost for easy math

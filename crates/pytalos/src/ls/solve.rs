@@ -36,10 +36,7 @@ use talos_ls::{
     },
     params::MutableLocalSearchParams,
 };
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::Model,
-};
+use talos_model::{BerthIndex, Model, VesselIndex};
 
 #[pyclass(name = "Operator", eq, eq_int, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -334,8 +331,8 @@ impl PySolver {
             }
         }
 
-        let berths = inner_solution.berths();
-        let start_times = inner_solution.start_times();
+        let berths = &inner_solution.berths().raw;
+        let start_times = &inner_solution.start_times().raw;
         let objective = inner_solution.objective_value();
 
         let mut operator = build_operator(&config.operators);

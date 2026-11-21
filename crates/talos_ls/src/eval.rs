@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use talos_core::SolverNumeric;
-use talos_model::{
-    index::{BerthIndex, VesselIndex},
-    model::Model,
-};
+use talos_model::{BerthIndex, Model, VesselIndex};
 
 /// Calculates the weighted completion time cost for a vessel assigned to a berth at a given start time.
 ///
@@ -48,13 +45,7 @@ where
     );
 
     let deadline = model.vessel_latest_departure_time(vessel_index);
-    let pt_opt = model.vessel_processing_time(vessel_index, berth_index);
-
-    if pt_opt.is_none() {
-        return None;
-    }
-
-    let pt = pt_opt.unwrap_unchecked();
+    let pt = model.vessel_processing_time(vessel_index, berth_index)?;
     let completion_time = start_time + pt;
 
     if completion_time > deadline {
@@ -111,13 +102,7 @@ where
     );
 
     let deadline = unsafe { model.vessel_latest_departure_time_unchecked(vessel_index) };
-    let pt_opt = unsafe { model.vessel_processing_time_unchecked(vessel_index, berth_index) };
-
-    if pt_opt.is_none() {
-        return None;
-    }
-
-    let pt = pt_opt.unwrap_unchecked();
+    let pt = unsafe { model.vessel_processing_time_unchecked(vessel_index, berth_index) }?;
     let completion_time = start_time + pt;
 
     if completion_time > deadline {
@@ -161,13 +146,7 @@ where
     );
 
     let deadline = model.vessel_latest_departure_time(vessel_index);
-    let pt_opt = model.vessel_processing_time(vessel_index, berth_index);
-
-    if pt_opt.is_none() {
-        return None;
-    }
-
-    let pt = pt_opt.unwrap_unchecked();
+    let pt = model.vessel_processing_time(vessel_index, berth_index)?;
     let completion_time = start_time + pt;
 
     if completion_time > deadline {
@@ -220,13 +199,7 @@ where
     );
 
     let deadline = unsafe { model.vessel_latest_departure_time_unchecked(vessel_index) };
-    let pt_opt = unsafe { model.vessel_processing_time_unchecked(vessel_index, berth_index) };
-
-    if pt_opt.is_none() {
-        return None;
-    }
-
-    let pt = pt_opt.unwrap_unchecked();
+    let pt = unsafe { model.vessel_processing_time_unchecked(vessel_index, berth_index) }?;
     let completion_time = start_time + pt;
 
     if completion_time > deadline {

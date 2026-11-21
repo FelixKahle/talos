@@ -26,7 +26,7 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 use talos_core::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView};
 
 /// A monitor that terminates the search after a configurable stretch without
 /// improvement to the global best solution.
@@ -283,7 +283,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use talos_model::index::BerthIndex;
+    use talos_model::BerthIndex;
 
     fn dummy_view() -> SolutionView<'static, i64> {
         const BERTHS: [BerthIndex; 1] = [BerthIndex::new(0)];
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_on_start_resets_all() {
-        use talos_model::model::{Model, ProcessingTime};
+        use talos_model::Model;
 
         let mut m = NoImprovementMonitor::with_iteration_patience(5).and_cycle_patience(3);
         let sv = dummy_view();
@@ -491,15 +491,7 @@ mod tests {
         assert_eq!(m.search_command(sv, sv, None, &stats), TERMINATE_ITERATIONS);
 
         // Reset via on_start
-        let model = Model::new(
-            1,
-            1,
-            vec![0i64],
-            vec![100],
-            vec![1],
-            vec![ProcessingTime::from_raw(10)],
-            vec![vec![]],
-        );
+        let model = Model::new(vec![0i64], vec![100], vec![1], vec![Some(10)], vec![vec![]]);
         LocalSearchMonitor::<i64>::on_start(&mut m, &model, sv);
 
         // Fresh stats → should continue

@@ -13,7 +13,7 @@
 
 use crate::{exec::SearchCommand, stats::LocalSearchStatistics};
 use talos_core::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView};
 
 /// A monitor for local search algorithms.
 pub trait LocalSearchMonitor<T>

@@ -33,7 +33,7 @@ use crate::{
 use rand::{Rng, RngExt, SeedableRng};
 use std::cmp::Ordering;
 use talos_core::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView};
 
 // ----------------------------------------------------------------
 // RandomCompoundOperator

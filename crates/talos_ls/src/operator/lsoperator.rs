@@ -22,7 +22,7 @@
 
 use crate::{mutator::Mutator, sgraph::ScheduleGraph, stats::LocalSearchStatistics};
 use talos_core::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView};
 
 /// A stateful operator that explores a specific neighborhood in a local search.
 ///

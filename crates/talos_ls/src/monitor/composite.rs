@@ -12,7 +12,7 @@ use crate::{
     exec::SearchCommand, monitor::lsmonitor::LocalSearchMonitor, stats::LocalSearchStatistics,
 };
 use talos_core::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView};
 
 /// A composite monitor that delegates every callback to a list of inner monitors.
 ///
@@ -279,7 +279,7 @@ mod tests {
     use crate::exec::TerminationReason;
     use crate::monitor::iteration::IterationLimitMonitor;
     use crate::monitor::solution::SolutionLimitMonitor;
-    use talos_model::index::BerthIndex;
+    use talos_model::BerthIndex;
 
     fn dummy_view() -> SolutionView<'static, i64> {
         const BERTHS: [BerthIndex; 1] = [BerthIndex::new(0)];
@@ -403,7 +403,7 @@ mod tests {
             fn name(&self) -> &str {
                 "CountingMonitor"
             }
-            fn on_start(&mut self, _: &talos_model::model::Model<i64>, _: SolutionView<'_, i64>) {}
+            fn on_start(&mut self, _: &talos_model::Model<i64>, _: SolutionView<'_, i64>) {}
             fn on_end(&mut self, _: SolutionView<'_, i64>, _: &LocalSearchStatistics) {}
             fn on_iteration(
                 &mut self,

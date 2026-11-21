@@ -4,7 +4,7 @@
 use crate::exec::TerminationReason;
 use crate::stats::LocalSearchStatistics;
 use talos_core::SolverNumeric;
-use talos_model::solution::Solution;
+use talos_model::Solution;
 
 /// The final outcome of a local search engine run.
 ///

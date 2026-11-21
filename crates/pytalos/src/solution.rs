@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use pyo3::{exceptions::PyValueError, prelude::*};
-use talos_model::{index::BerthIndex, solution::Solution};
+use talos_model::{BerthIndex, Solution};
 
 /// A DBAP solution: berth assignments and start times for every vessel.
 #[pyclass(name = "Solution", skip_from_py_object)]
@@ -45,7 +45,7 @@ impl PySolution {
     /// Returns the start times as a list of i64.
     #[getter]
     pub fn start_times(&self) -> Vec<i64> {
-        self.inner.start_times().to_vec()
+        self.inner.start_times().raw.to_vec()
     }
 
     /// Returns the number of vessels in the solution.

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use pyo3::prelude::*;
-use talos_model::solution::SolutionView;
+use talos_model::SolutionView;
 
 /// Wraps an optional Python callback into a Rust closure.
 ///
@@ -13,7 +13,7 @@ pub fn make_callback(py_cb: Option<Py<PyAny>>) -> Box<dyn FnMut(SolutionView<'_,
         Some(cb) => Box::new(move |sol: SolutionView<'_, i64>| {
             let obj = sol.objective_value();
             let berths: Vec<usize> = sol.berths().iter().map(|bi| bi.index()).collect();
-            let start_times: Vec<i64> = sol.start_times().to_vec();
+            let start_times: Vec<i64> = sol.start_times().raw.to_vec();
 
             Python::attach(|py| {
                 if let Err(e) = cb.call1(py, (obj, berths, start_times)) {

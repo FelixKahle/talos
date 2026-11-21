@@ -15,7 +15,7 @@ use crate::{
     stats::LocalSearchStatistics,
 };
 use talos_core::SolverNumeric;
-use talos_model::{model::Model, solution::SolutionView};
+use talos_model::{Model, SolutionView};
 
 /// A monitor that triggers termination once a specific number of candidate solutions
 /// have been generated and evaluated.
@@ -153,7 +153,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use talos_model::index::BerthIndex;
+    use talos_model::BerthIndex;
 
     fn dummy_view() -> SolutionView<'static, i64> {
         const BERTHS: [BerthIndex; 1] = [BerthIndex::new(0)];
