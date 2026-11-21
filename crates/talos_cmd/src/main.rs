@@ -5,12 +5,33 @@ use crate::loading::{InstanceLoader, ProblemLoaderError};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use talos_ls::{
-    DynamicLambda, Engine, GuidedLocalSearch, Lambda, LocalSearchParameters, Metaheuristic,
-    NoMonitor, PenalizationTrigger, SearchLimits, heuristic_lambda,
+    DynamicLambda, Engine, GuidedLocalSearch, Lambda, LocalSearchMonitor, LocalSearchParameters,
+    Metaheuristic, PenalizationTrigger, SearchLimits, SearchProgress, heuristic_lambda,
 };
 use talos_model::Model;
+
+/// The monitor that times a search, from its start to its end, without the loading of the schedule before it.
+#[derive(Debug, Default)]
+struct SearchClock {
+    /// When the search started, once it has.
+    started: Option<Instant>,
+    /// The time from the start of the search to its end, zero until it has ended.
+    elapsed: Duration,
+}
+
+impl LocalSearchMonitor<i64> for SearchClock {
+    fn on_start(&mut self, _model: &Model<i64>, _progress: SearchProgress<'_, i64>) {
+        self.started = Some(Instant::now());
+    }
+
+    fn on_end(&mut self, _progress: SearchProgress<'_, i64>) {
+        self.elapsed = self
+            .started
+            .map_or(Duration::ZERO, |started| started.elapsed());
+    }
+}
 
 mod edf;
 mod loading;
@@ -229,11 +250,11 @@ fn run_benchmark(
         },
         ..LocalSearchParameters::default()
     };
-    let started = Instant::now();
+    let mut clock = SearchClock::default();
     let outcome = engine
-        .run(&model, initial.as_view(), &parameters, &mut NoMonitor)
+        .run(&model, initial.as_view(), &parameters, &mut clock)
         .expect("the EDF schedule should be a feasible schedule of the model");
-    let first_time = started.elapsed();
+    let first_time = clock.elapsed;
     let first_obj = outcome.solution.objective_value();
     let first_improvement = (1.0 - first_obj as f64 / greedy_obj as f64) * 100.0;
 
@@ -246,11 +267,11 @@ fn run_benchmark(
         },
         ..LocalSearchParameters::default()
     };
-    let started = Instant::now();
+    let mut clock = SearchClock::default();
     let outcome = engine
-        .run(&model, initial.as_view(), &parameters, &mut NoMonitor)
+        .run(&model, initial.as_view(), &parameters, &mut clock)
         .expect("the EDF schedule should be a feasible schedule of the model");
-    let second_time = started.elapsed();
+    let second_time = clock.elapsed;
     let second_obj = outcome.solution.objective_value();
     let second_improvement = (1.0 - second_obj as f64 / greedy_obj as f64) * 100.0;
 

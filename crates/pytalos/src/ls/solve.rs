@@ -12,7 +12,7 @@ use crate::{
 };
 use itertools::Itertools;
 use pyo3::{exceptions::PyValueError, prelude::*};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use talos_ls::{
     AdditiveDynamicLambda, DynamicLambda, Engine, GeometricDecay, GuidedLocalSearch, Lambda,
     LocalSearchParameters, Metaheuristic, Neighborhood, PenalizationTrigger, PenaltyDecay,
@@ -319,7 +319,6 @@ impl PySolver {
         };
         let mut monitor = PyCallbackMonitor::new(callback);
 
-        let started = Instant::now();
         let outcome = self
             .engine
             .run(
@@ -329,6 +328,6 @@ impl PySolver {
                 &mut monitor,
             )
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        Ok(outcome_to_py(outcome, started.elapsed()))
+        Ok(outcome_to_py(outcome, monitor.elapsed()))
     }
 }
