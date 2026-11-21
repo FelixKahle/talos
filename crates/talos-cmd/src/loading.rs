@@ -7,8 +7,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::str::FromStr;
-use talos_core::math::interval::ClosedOpenInterval;
-use talos_core::math::num::SolverNumeric;
+use talos_core::ClosedOpenInterval;
+use talos_core::SolverNumeric;
 use talos_model::index::{BerthIndex, VesselIndex};
 use talos_model::model::{Model, ProcessingTime};
 

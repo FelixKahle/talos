@@ -30,7 +30,7 @@
 //! ## Usage
 //!
 //! ```rust
-//! use talos_core::math::interval::ClosedOpenInterval;
+//! use talos_core::ClosedOpenInterval;
 //!
 //! // Define intervals
 //! let a = ClosedOpenInterval::new(10i64, 20i64);
@@ -74,7 +74,7 @@ where
 /// # Examples
 ///
 /// ```rust
-/// # use talos_core::math::interval::ClosedOpenInterval;
+/// # use talos_core::ClosedOpenInterval;
 ///
 /// let iv = ClosedOpenInterval::new(1, 5);
 /// let points: Vec<_> = iv.iter().collect();
@@ -146,7 +146,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let iv = ClosedOpenInterval::new(0, 10);
     /// assert_eq!(iv.len(), 10);
@@ -170,7 +170,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// assert!(ClosedOpenInterval::try_new(0, 10).is_some());
     /// assert!(ClosedOpenInterval::try_new(10, 0).is_none());
@@ -197,7 +197,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let iv = ClosedOpenInterval::new_unchecked(0, 10);
     /// ```
@@ -218,7 +218,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let iv = ClosedOpenInterval::new(5, 10);
     /// assert_eq!(iv.start(), 5);
@@ -233,7 +233,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let iv = ClosedOpenInterval::new(5, 10);
     /// assert_eq!(iv.end(), 10);
@@ -248,7 +248,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
     /// let b = ClosedOpenInterval::new(5, 15);
@@ -267,7 +267,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
     /// let b = ClosedOpenInterval::new(10, 20);
@@ -283,7 +283,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
     /// assert!(a.disjoint(ClosedOpenInterval::new(15, 20))); // Disjoint
@@ -302,7 +302,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
     /// assert!(a.intersects_or_adjacent(ClosedOpenInterval::new(10, 20))); // Adjacent
@@ -319,7 +319,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let iv = ClosedOpenInterval::new(0, 10);
     /// assert!(iv.contains_point(0));
@@ -336,7 +336,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
     /// let b = ClosedOpenInterval::new(2, 8);
@@ -352,7 +352,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// assert_eq!(ClosedOpenInterval::new(10, 20).len(), 10);
     /// ```
@@ -366,7 +366,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// assert!(ClosedOpenInterval::new(10, 10).is_empty());
     /// assert!(!ClosedOpenInterval::new(10, 11).is_empty());
@@ -384,7 +384,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
     /// let b = ClosedOpenInterval::new(5, 15);
@@ -410,7 +410,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
     /// let b = ClosedOpenInterval::new(10, 20);
@@ -435,7 +435,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let iv = ClosedOpenInterval::new(0, 10);
     /// assert_eq!(iv.midpoint(), 5);
@@ -455,7 +455,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 5);
     /// let b = ClosedOpenInterval::new(10, 15);
@@ -486,7 +486,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let iv = ClosedOpenInterval::new(0, 10);
     /// let (left, right) = iv.split_at(5).unwrap();
@@ -510,7 +510,7 @@ where
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::math::interval::ClosedOpenInterval;
+    /// # use talos_core::ClosedOpenInterval;
     ///
     /// let iv = ClosedOpenInterval::new(1, 4);
     /// let points: Vec<_> = iv.iter().collect();

@@ -12,7 +12,7 @@
 //! condition is reached.
 
 use crate::{exec::SearchCommand, stats::LocalSearchStatistics};
-use talos_core::math::num::SolverNumeric;
+use talos_core::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
 /// A monitor for local search algorithms.

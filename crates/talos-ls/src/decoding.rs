@@ -33,7 +33,7 @@ use crate::{
     state::ScheduleState,
     tberth::TouchedBerths,
 };
-use talos_core::math::num::SolverNumeric;
+use talos_core::SolverNumeric;
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::Model,
@@ -249,7 +249,7 @@ where
 #[cfg(test)]
 mod test_decoder {
     use super::*;
-    use talos_core::math::interval::ClosedOpenInterval;
+    use talos_core::ClosedOpenInterval;
     use talos_model::model::ProcessingTime;
 
     // Helper to build a valid 2-vessel, 2-berth model for testing.

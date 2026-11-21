@@ -36,7 +36,7 @@ use crate::{
     sgraphundo::ScheduleGraphUndoTracker,
     tberth::TouchedBerthsTracker,
 };
-use talos_core::ring_arena::Node;
+use talos_core::Node;
 use talos_model::index::{BerthIndex, VesselIndex};
 
 // ----------------------------------------------------------------

@@ -3,8 +3,8 @@
 
 use pyo3::prelude::*;
 use std::collections::BTreeSet;
-use talos_core::math::interval::ClosedOpenInterval;
-use talos_core::math::num::SolverNumeric;
+use talos_core::ClosedOpenInterval;
+use talos_core::SolverNumeric;
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::Model,

@@ -21,7 +21,7 @@
 //! exploration sequence without re-analyzing the schedule.
 
 use crate::{mutator::Mutator, sgraph::ScheduleGraph, stats::LocalSearchStatistics};
-use talos_core::math::num::SolverNumeric;
+use talos_core::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
 /// A stateful operator that explores a specific neighborhood in a local search.

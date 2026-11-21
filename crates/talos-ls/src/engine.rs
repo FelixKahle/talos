@@ -17,7 +17,7 @@ use crate::{
     tberth::TouchedBerths,
 };
 use std::time::Instant;
-use talos_core::math::num::SolverNumeric;
+use talos_core::SolverNumeric;
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::Model,
@@ -782,7 +782,7 @@ mod tests {
     use crate::stats::LocalSearchStatistics;
     use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use talos_core::math::interval::ClosedOpenInterval;
+    use talos_core::ClosedOpenInterval;
     use talos_model::index::{BerthIndex, VesselIndex};
     use talos_model::model::{Model, ProcessingTime};
     use talos_model::solution::SolutionView;

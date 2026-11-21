@@ -1,7 +1,7 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use talos_core::math::num::SolverNumeric;
+use talos_core::SolverNumeric;
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::Model,

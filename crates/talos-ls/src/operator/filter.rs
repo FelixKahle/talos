@@ -9,7 +9,7 @@
 //! without ever discarding a move that could lead to the optimum.
 
 use crate::sgraph::ScheduleGraph;
-use talos_core::math::num::SolverNumeric;
+use talos_core::SolverNumeric;
 use talos_model::{index::VesselIndex, model::Model, solution::SolutionView};
 
 /// Filter for `IntraBerthSwapOperator`.

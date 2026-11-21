@@ -24,7 +24,7 @@ use crate::{
     stats::LocalSearchStatistics,
 };
 use std::time::{Duration, Instant};
-use talos_core::math::num::SolverNumeric;
+use talos_core::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
 /// A lightweight wall-clock monitor that terminates a local search after a fixed duration.

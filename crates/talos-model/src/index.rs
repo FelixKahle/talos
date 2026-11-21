@@ -1,7 +1,7 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use talos_core::index::{TypedIndex, TypedIndexTag};
+use talos_core::{TypedIndex, TypedIndexTag};
 
 /// Marker type for indices into a vessel collection.
 ///

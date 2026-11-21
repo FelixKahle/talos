@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use pyo3::{exceptions::PyValueError, prelude::*};
-use talos_core::math::interval::ClosedOpenInterval;
+use talos_core::ClosedOpenInterval;
 use talos_model::model::{Model, ProcessingTime};
 
 /// The DBAP problem model.

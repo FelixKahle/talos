@@ -3,7 +3,7 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use talos_core::math::interval::ClosedOpenInterval;
+use talos_core::ClosedOpenInterval;
 use talos_ls::{
     decoding::decode_unchecked,
     mutator::Mutator,
