@@ -1,25 +1,12 @@
 # talos-core
 
-Shared foundational types and algorithms used across the Talos solver.
+Foundations shared by the Talos crates. Everything is re-exported at the crate root.
 
-## Modules
-
-- **math**
-  - **interval** — Generic closed-open interval `[start, end)` with set operations
-    (intersection, union, difference, gap, split), predicates, iteration, and
-    operator sugar (`&` / `|`).
-
-- **algorithm**
-  - **interval** — Utilities for sorted, disjoint interval slices: validation
-    (`are_disjoint_and_sorted`) and lower-bound searches (linear, binary, and
-    threshold-based).
-
-- **container**
-  - **rarena** — Allocation-free ring arena for topological sequences. Stores
-    closed rings as prev/next arrays with O(1) splicing and traversal iterators.
-
-- **utils**
-  - **index** — Zero-cost phantom-typed `usize` wrapper (`TypedIndex<T>`) that
-    prevents accidental mixing of indices from different domains at compile time.
-  - **num** — `SolverNumeric` trait bounding the numeric types the solver
-    operates on (signed integers with saturating arithmetic, `Send + Sync`, etc.).
+- **`TypedIndex<Tag>`** — one id type per kind of id, tagged by a `TypedIndexTag`. An id stores a `u32` and is
+  made from and read as a `usize` (`new`, `try_new`, `index`).
+- **`SolverNumeric`** — the signed integer types (`i8` to `i64`, `isize`) a problem's numbers may have.
+- **`ClosedOpenInterval<T>`** — the interval `[start, end)` of integers, with intersection, union, gap, split,
+  midpoint and iteration over its points (`ClosedOpenIntervalIter`).
+- **`RingArena`** — a fixed set of `Node`s arranged in closed rings, with constant-time splicing (moving and
+  swapping nodes and segments), segment reversal and walks along a ring. Every step comes as a checked method and
+  an `unsafe` `_unchecked` twin for callers whose own invariant proves the nodes lie in the arena.
