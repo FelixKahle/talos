@@ -156,10 +156,11 @@ where
 /// Both rank schedules alike, since they differ by the weighted arrival times, a sum the model fixes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Objective {
-    /// The sum of the weighted turnaround times, as [`calculate_weighted_turnaround_time`] gives each.
+    /// The sum of the weighted turnaround times: each vessel's weight times the time from its arrival to the end
+    /// of its service.
     #[default]
     WeightedTurnaroundTime,
-    /// The sum of the weighted completion times, as [`calculate_weighted_completion_time`] gives each.
+    /// The sum of the weighted completion times: each vessel's weight times the time its service ends.
     WeightedCompletionTime,
 }
 

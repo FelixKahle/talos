@@ -49,7 +49,7 @@ impl std::fmt::Display for TerminationReason {
     }
 }
 
-/// What a monitor tells the engine at each step.
+/// What a monitor tells the engine when it is asked, before each scan and at each checkpoint of a run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SearchCommand {
     /// Go on with the run.
