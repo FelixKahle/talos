@@ -1,127 +1,143 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Defines the `LocalSearchOperator` trait for neighborhood exploration in local search.
-//!
-//! A `LocalSearchOperator` encapsulates the logic for exploring a specific neighborhood
-//! by applying reversible mutations to a `ScheduleGraph` through a `Mutator`. The operator
-//! maintains internal state, such as a cursor or move list, to produce a sequence of
-//! distinct neighbors without rebuilding its analysis on every step. It prepares once for
-//! a new incumbent solution, generates successive neighbors through lightweight mutations,
-//! and can be reset to revisit the same neighborhood without repeating expensive
-//! precomputation.
-//!
-//! This separation keeps mutation, decoding, and scoring concerns isolated from the search
-//! engine, and supports flexible composition of neighborhood operators under meta-heuristics
-//! and multi-restart strategies.
-//!
-//! Implementations should keep `prepare` focused on extracting actionable structure from
-//! the current solutions and graph, keep `next_neighbor` fast and deterministic with
-//! respect to internal state, and use `reset` to restore the starting position of the
-//! exploration sequence without re-analyzing the schedule.
+//! The neighbourhoods a search explores, and the operator the engine draws its candidate moves from.
 
-use crate::{schedule::Mutator, schedule::ScheduleGraph, statistics::LocalSearchStatistics};
+use super::{
+    shift::{InterBerthShiftOperator, IntraBerthShiftOperator},
+    swap::{InterBerthSwapOperator, IntraBerthSwapOperator},
+};
+use crate::schedule::{Mutator, ScheduleGraph};
 use talos_core::SolverNumeric;
-use talos_model::{Model, SolutionView};
+use talos_model::Model;
 
-/// A stateful operator that explores a specific neighborhood in a local search.
+/// A kind of move from one schedule to its neighbours.
 ///
-/// Behaves similarly to an `Iterator`, but is designed for the high-performance
-/// requirements of local search where mutations are applied to an external
-/// `ScheduleGraph` via a `Mutator` and must be reversible.
-///
-/// ## Lifecycle
-///
-/// 1. **`prepare`** — Called when the search reaches a new incumbent solution. The
-///    operator analyzes the best, accepted, and (optionally) buffered solutions together
-///    with the current `ScheduleGraph` and builds its internal list of candidate moves.
-/// 2. **`next_neighbor`** — Called repeatedly. Each call applies exactly one mutation to
-///    the `ScheduleGraph` through the `Mutator`. Returns `true` if a mutation was applied
-///    (the search engine should decode and evaluate the candidate), or `false` when the
-///    neighborhood is exhausted.
-/// 3. **`reset`** — Reverts the operator's internal cursor back to the start of the
-///    current neighborhood *without* re-analyzing the schedule.
-pub trait LocalSearchOperator<T>: Send + Sync
+/// Each neighbourhood proposes its moves in a fixed order and skips a move only where the instance rules it out or
+/// forces the order the move would reverse, so it never skips a move an optimum could need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Neighborhood {
+    /// Exchange two vessels on one berth whose windows from arrival to latest departure overlap.
+    IntraBerthSwap,
+    /// Exchange two vessels on different berths that may each use the other's berth.
+    InterBerthSwap,
+    /// Move a vessel to right after another vessel of its berth whose window overlaps its own.
+    IntraBerthShift,
+    /// Move a vessel to right after a vessel of another berth that it may use.
+    InterBerthShift,
+}
+
+impl Neighborhood {
+    /// Every neighbourhood, in the order of the variants.
+    pub const ALL: [Self; 4] = [
+        Self::IntraBerthSwap,
+        Self::InterBerthSwap,
+        Self::IntraBerthShift,
+        Self::InterBerthShift,
+    ];
+}
+
+/// The source of the candidate moves of a run: it makes one move on the graph at each call, and is restarted for
+/// each scan of the neighbourhood of the accepted schedule.
+pub trait LocalSearchOperator<T>
 where
     T: SolverNumeric,
 {
-    /// Returns the name of the operator for logging and identification purposes.
-    fn name(&self) -> &str;
+    /// Starts a scan of the neighbourhood of the accepted schedule, whose objective is `accepted_objective` and
+    /// whose order is `graph`.
+    fn prepare(&mut self, accepted_objective: T, graph: &ScheduleGraph);
 
-    /// Prepares the operator to explore the neighborhood of a new solution.
-    ///
-    /// This is the "heavy lifting" phase where the operator might:
-    /// - Identify bottleneck vessels in the current solutions to target for mutation.
-    /// - Pre-calculate a list of vessel pairs for swapping.
-    /// - Shuffle or re-order its internal move list if the operator is stochastic.
-    /// - Inspect the `ScheduleGraph` topology to determine feasible moves.
-    fn prepare(
-        &mut self,
-        best_solution: SolutionView<'_, T>,
-        accepted_solution: SolutionView<'_, T>,
-        buffered_solution: Option<SolutionView<'_, T>>,
-        graph: &ScheduleGraph,
-    );
-
-    /// Applies the next mutation in the neighborhood sequence.
-    ///
-    /// The operator uses the provided `Mutator` to apply a topological change to the
-    /// underlying `ScheduleGraph`. The search engine handles decoding, evaluation, and
-    /// potential rollback of these changes.
-    ///
-    /// # Returns
-    /// - `true` — A mutation was successfully applied. The search engine should now
-    ///   decode and evaluate the new candidate.
-    /// - `false` — No more neighbors remain in this neighborhood.
-    ///
-    /// # Note
-    /// The operator must manage an internal cursor so that successive calls produce
-    /// distinct neighbors.
+    /// Makes the next move of the scan on the graph of `mutator` and answers `true`, or answers `false` and
+    /// changes nothing once the scan is exhausted.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that:
-    /// 1. The `ScheduleGraph` inside the `Mutator` has the same dimensions (vessel and
-    ///    berth counts) as the graph passed to `prepare`.
-    /// 2. All `VesselIndex` values produced by the operator are valid indices within
-    ///    the graph.
-    /// 3. The graph has the vessels and the berths of `model`: as many vessels as the model,
-    ///    and every berth of the graph a berth of the model. The filters of the operators read
-    ///    the model unchecked through the graph's vessels and their berths. `Engine::run`
-    ///    establishes this at its door.
-    unsafe fn next_neighbor(
-        &mut self,
-        model: &Model<T>,
-        best_solution: SolutionView<'_, T>,
-        accepted_solution: SolutionView<'_, T>,
-        buffered_solution: Option<SolutionView<'_, T>>,
-        mutator: &mut Mutator,
-        stats: &LocalSearchStatistics,
-    ) -> bool;
+    /// The graph of `mutator` must count the vessels of the graph the operator was last prepared for, and have the
+    /// vessels and berths of `model`.
+    unsafe fn next_neighbor_unchecked(&mut self, model: &Model<T>, mutator: &mut Mutator) -> bool;
 
-    /// Resets the operator's internal state to the beginning of the neighborhood.
-    ///
-    /// Unlike `prepare`, `reset` should not perform expensive re-analysis of the schedule.
-    /// It simply moves the internal iteration cursor back to the first potential neighbor.
-    /// This is useful for multi-restart strategies or meta-heuristics that need to
-    /// re-examine the same neighborhood multiple times.
+    /// Starts the scan again from its first move, before the next `prepare`.
     fn reset(&mut self);
 }
 
-impl<T> std::fmt::Debug for dyn LocalSearchOperator<T>
-where
-    T: SolverNumeric,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LocalSearchOperator {{ name: {} }}", self.name())
-    }
+/// The scan of one neighbourhood, with its place in the scan.
+#[derive(Debug, Clone)]
+pub(super) enum NeighborhoodOperator {
+    IntraBerthSwap(IntraBerthSwapOperator),
+    InterBerthSwap(InterBerthSwapOperator),
+    IntraBerthShift(IntraBerthShiftOperator),
+    InterBerthShift(InterBerthShiftOperator),
 }
 
-impl<T> std::fmt::Display for dyn LocalSearchOperator<T>
-where
-    T: SolverNumeric,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name())
+impl NeighborhoodOperator {
+    /// The scan of `neighborhood`, which proposes no move until it is prepared for a graph.
+    pub(super) fn new(neighborhood: Neighborhood) -> Self {
+        match neighborhood {
+            Neighborhood::IntraBerthSwap => Self::IntraBerthSwap(IntraBerthSwapOperator::new()),
+            Neighborhood::InterBerthSwap => Self::InterBerthSwap(InterBerthSwapOperator::new()),
+            Neighborhood::IntraBerthShift => Self::IntraBerthShift(IntraBerthShiftOperator::new()),
+            Neighborhood::InterBerthShift => Self::InterBerthShift(InterBerthShiftOperator::new()),
+        }
+    }
+
+    /// Starts the scan of the neighbourhood of `graph` from its first move.
+    pub(super) fn prepare(&mut self, graph: &ScheduleGraph) {
+        match self {
+            Self::IntraBerthSwap(operator) => operator.prepare(graph),
+            Self::InterBerthSwap(operator) => operator.prepare(graph),
+            Self::IntraBerthShift(operator) => operator.prepare(graph),
+            Self::InterBerthShift(operator) => operator.prepare(graph),
+        }
+    }
+
+    /// Starts the scan again from its first move, for a graph of the same vessels.
+    pub(super) fn reset(&mut self) {
+        match self {
+            Self::IntraBerthSwap(operator) => operator.reset(),
+            Self::InterBerthSwap(operator) => operator.reset(),
+            Self::IntraBerthShift(operator) => operator.reset(),
+            Self::InterBerthShift(operator) => operator.reset(),
+        }
+    }
+
+    /// Makes the next move of the scan on the graph of `mutator` and answers `true`, or answers `false` and
+    /// changes nothing once the scan is exhausted.
+    ///
+    /// # Safety
+    ///
+    /// The graph of `mutator` must count the vessels of the graph the scan was last prepared for, and have the
+    /// vessels and berths of `model`.
+    #[inline]
+    pub(super) unsafe fn next_neighbor_unchecked<T>(
+        &mut self,
+        model: &Model<T>,
+        mutator: &mut Mutator,
+    ) -> bool
+    where
+        T: SolverNumeric,
+    {
+        debug_assert!(
+            mutator.graph().num_vessels() == model.num_vessels()
+                && mutator.graph().num_berths() == model.num_berths(),
+            "called `NeighborhoodOperator::next_neighbor_unchecked` with a graph and a model of different counts"
+        );
+        match self {
+            Self::IntraBerthSwap(operator) => {
+                // SAFETY: the precondition of this function is the scan's.
+                unsafe { operator.next_neighbor_unchecked(model, mutator) }
+            }
+            Self::InterBerthSwap(operator) => {
+                // SAFETY: the precondition of this function is the scan's.
+                unsafe { operator.next_neighbor_unchecked(model, mutator) }
+            }
+            Self::IntraBerthShift(operator) => {
+                // SAFETY: the precondition of this function is the scan's.
+                unsafe { operator.next_neighbor_unchecked(model, mutator) }
+            }
+            Self::InterBerthShift(operator) => {
+                // SAFETY: the precondition of this function is the scan's.
+                unsafe { operator.next_neighbor_unchecked(model, mutator) }
+            }
+        }
     }
 }

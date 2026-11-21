@@ -13,6 +13,8 @@ talos_core = { workspace = true }
 talos_model = { workspace = true }
 num-traits = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
+rand_xoshiro = { workspace = true }
 typed-index-collections = { workspace = true }
 
 [dev-dependencies]

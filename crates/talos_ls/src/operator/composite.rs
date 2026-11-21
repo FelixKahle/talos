@@ -1,617 +1,384 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Module providing composite local search operators that orchestrate multiple
-//! neighborhood-specific operators under different selection strategies.
+//! The operator of a run: several neighbourhoods, with a rule that chooses which one proposes the next move.
 //!
-//! A compound operator receives a set of `LocalSearchOperator` implementations and
-//! delegates exploration to one operator at a time. This enables higher-level control
-//! over how neighborhoods are visited, how effort is distributed, and how feedback from
-//! previous iterations influences future choices. The design keeps each neighborhood
-//! operator focused on generating reversible mutations while the compound operator
-//! manages sequencing and state transitions across operators.
+//! A scan of the neighbourhood of the accepted schedule asks one neighbourhood for moves until it is exhausted and
+//! then turns to the next one the rule names; the scan is exhausted once every neighbourhood is. The rules differ
+//! in where a scan starts and in the order of the neighbourhoods:
 //!
-//! The random strategy maintains stickiness within a single operator until it exhausts
-//! its current neighborhood, then switches stochastically among the remaining choices.
-//! The round-robin strategy cycles deterministically, advancing to the next operator
-//! once the current one stops yielding neighbors, and restarting the cycle on reset.
-//! The multi-armed bandit strategy ranks operators by a learned score derived from
-//! observed objective improvements, blending exploitation of high-performing operators
-//! with exploration to continually reassess opportunities. Its internal statistics track
-//! per-operator performance and global improvements, and the ranking is updated as
-//! new evidence arrives.
-//!
-//! These strategies allow you to balance breadth and depth of search across heterogeneous
-//! neighborhoods, align operator selection with problem structure, and adapt dynamically
-//! to changing effectiveness during a run, all while preserving a clear separation between
-//! mutation generation and evaluation.
+//! - round robin starts every scan at the first neighbourhood and keeps the order they were given in;
+//! - random selection starts every scan at a neighbourhood drawn at random and goes on in circular order;
+//! - the multi-armed bandit ranks the neighbourhoods before every scan by the UCB1 score of the improvement each
+//!   brought, and goes through them in the order of the ranking.
 
-use crate::{
-    operator::neighborhood::LocalSearchOperator, schedule::Mutator, schedule::ScheduleGraph,
-    statistics::LocalSearchStatistics,
-};
-use rand::{Rng, RngExt, SeedableRng};
+use super::neighborhood::{LocalSearchOperator, Neighborhood, NeighborhoodOperator};
+use crate::schedule::{Mutator, ScheduleGraph};
+use rand::RngExt;
+use rand_core::SeedableRng;
+use rand_xoshiro::Xoshiro256PlusPlus;
 use std::cmp::Ordering;
 use talos_core::SolverNumeric;
-use talos_model::{Model, SolutionView};
+use talos_model::Model;
 
-// ----------------------------------------------------------------
-// RandomCompoundOperator
-// ----------------------------------------------------------------
+/// The rule that chooses which neighbourhood proposes the next move of a scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum NeighborhoodSelection {
+    /// Every scan starts at the first neighbourhood and takes them in the order they were given in.
+    #[default]
+    RoundRobin,
+    /// Every scan starts at a neighbourhood drawn uniformly from the run's seeded generator and takes them in
+    /// circular order from there.
+    Random,
+    /// Every scan takes the neighbourhoods in the order of their UCB1 scores.
+    MultiArmedBandit(MultiArmedBandit),
+}
 
-/// A compound operator that selects one random sub-operator for each local search iteration.
+/// The settings of the multi-armed bandit, which ranks the neighbourhoods by the UCB1 score of the improvement of
+/// the objective each brought.
 ///
-/// Unlike a sequential compound operator, this operator introduces stochasticity by
-/// picking a single random neighborhood strategy when `prepare` is called and sticking
-/// with it until the next solution is found.
+/// The score of a neighbourhood is its average improvement, divided by the largest improvement seen, plus the
+/// bonus `exploration * sqrt(2 ln(1 + samples) / samples of the neighbourhood)`; a neighbourhood not yet sampled
+/// scores infinity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MultiArmedBandit {
+    /// The weight of the newest improvement in a neighbourhood's average, in `(0, 1]`: the average moves by this
+    /// fraction of the distance to the newest improvement.
+    pub memory: f64,
+    /// The weight of the exploration bonus; the standard UCB1 constant is the square root of two.
+    pub exploration: f64,
+}
+
+impl Default for MultiArmedBandit {
+    /// A memory of 0.2, which follows a change in a neighbourhood's effect within a few scans, and the standard
+    /// UCB1 exploration weight, the square root of two.
+    fn default() -> Self {
+        Self {
+            memory: 0.2,
+            exploration: std::f64::consts::SQRT_2,
+        }
+    }
+}
+
+/// The neighbourhoods of a run with the rule that chooses among them.
 ///
-/// This is effective for:
-/// - **Diversification**: Preventing the search from following deterministic paths.
-/// - **Escape**: breaking out of local optima that a specific deterministic operator might get stuck in.
-pub struct RandomCompoundOperator<'a, T, R>
-where
-    T: SolverNumeric,
-    R: Rng,
-{
-    operators: Vec<Box<dyn LocalSearchOperator<T> + 'a>>,
-    rng: R,
-    current_index: usize,
-    /// Tracks which operators have been prepared for the current solution.
-    op_started: Vec<bool>,
+/// Every index a rule holds into the scans (the current scan, the ranking of the bandit) is below the number of
+/// scans, which is at least one, and the tables of the bandit have one entry per scan.
+#[derive(Debug, Clone)]
+pub struct CompoundOperator {
+    scans: Vec<NeighborhoodOperator>,
+    rule: SelectionRule,
 }
 
-impl<'a, T, R> RandomCompoundOperator<'a, T, R>
-where
-    T: SolverNumeric,
-    R: Rng,
-{
-    pub fn new(operators: Vec<Box<dyn LocalSearchOperator<T> + 'a>>, rng: R) -> Self {
-        assert!(!operators.is_empty(), "Operators list cannot be empty");
-        let len = operators.len();
-        Self {
-            operators,
-            rng,
-            current_index: 0,
-            op_started: vec![false; len],
-        }
-    }
+/// The state of the rule of a compound operator.
+#[derive(Debug, Clone)]
+enum SelectionRule {
+    RoundRobin(RoundRobin),
+    Random(RandomSelection),
+    MultiArmedBandit(Bandit),
 }
 
-impl<'a, T> RandomCompoundOperator<'a, T, rand::rngs::StdRng>
-where
-    T: SolverNumeric,
-{
-    #[inline]
-    pub fn empty() -> Self {
-        Self {
-            operators: Vec::new(),
-            rng: rand::rngs::StdRng::seed_from_u64(0),
-            current_index: 0,
-            op_started: Vec::new(),
-        }
-    }
-}
-
-impl<'a, T, R> LocalSearchOperator<T> for RandomCompoundOperator<'a, T, R>
-where
-    T: SolverNumeric,
-    R: Rng + Send + Sync,
-{
-    fn name(&self) -> &str {
-        "RandomCompoundOperator"
-    }
-
-    fn prepare(
-        &mut self,
-        _best_solution: SolutionView<'_, T>,
-        _accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _graph: &ScheduleGraph,
-    ) {
-        let n = self.operators.len();
-        if n == 0 {
-            return;
-        }
-
-        // Choose a random entry point for this iteration.
-        self.current_index = self.rng.random_range(0..n);
-
-        // Reset the "started" flags for the new solution state.
-        self.op_started.fill(false);
-    }
-
-    unsafe fn next_neighbor(
-        &mut self,
-        model: &Model<T>,
-        best_solution: SolutionView<'_, T>,
-        accepted_solution: SolutionView<'_, T>,
-        buffered_solution: Option<SolutionView<'_, T>>,
-        mutator: &mut Mutator,
-        stats: &LocalSearchStatistics,
-    ) -> bool {
-        let n = self.operators.len();
-        if n == 0 {
-            return false;
-        }
-
-        let start = self.current_index;
-        let mut idx = start;
-
-        loop {
-            let op = unsafe { self.operators.get_unchecked_mut(idx) };
-
-            // LAZY PREPARATION: Ensure the operator is prepared before its first call.
-            if !unsafe { *self.op_started.get_unchecked(idx) } {
-                op.prepare(
-                    best_solution,
-                    accepted_solution,
-                    buffered_solution,
-                    mutator.graph(),
-                );
-                unsafe { *self.op_started.get_unchecked_mut(idx) = true };
-            }
-
-            if unsafe {
-                op.next_neighbor(
-                    model,
-                    best_solution,
-                    accepted_solution,
-                    buffered_solution,
-                    mutator,
-                    stats,
-                )
-            } {
-                // Stick with this operator for as long as it yields neighbors.
-                self.current_index = idx;
-                return true;
-            }
-
-            // Move to next operator in a circular fashion.
-            idx = (idx + 1) % n;
-            if idx == start {
-                return false;
-            }
-        }
-    }
-
-    fn reset(&mut self) {
-        for op in &mut self.operators {
-            op.reset();
-        }
-        self.current_index = 0;
-        self.op_started.fill(false);
-    }
-}
-
-// ----------------------------------------------------------------
-// RoundRobinCompoundOperator
-// ----------------------------------------------------------------
-
-/// A compound operator that iterates through sub-operators in a fixed sequential order.
-///
-/// This operator provides a deterministic "Round Robin" strategy. It starts with the first
-/// sub-operator and lets it run until it is exhausted (returns `false`). Then, it immediately
-/// switches to the next operator in the list.
-///
-/// It returns `false` (exhausted) only when **all** sub-operators have been exhausted for
-/// the current solution.
-pub struct RoundRobinCompoundOperator<'a, T>
-where
-    T: SolverNumeric,
-{
-    operators: Vec<Box<dyn LocalSearchOperator<T> + 'a>>, // List of sub-operators
-    current_index: usize,                                 // Index of the currently active operator
-    op_started: Vec<bool>,                                // operator i started
-}
-
-impl<'a, T> RoundRobinCompoundOperator<'a, T>
-where
-    T: SolverNumeric,
-{
-    /// Creates a new `RoundRobinCompoundOperator`.
-    pub fn new(operators: Vec<Box<dyn LocalSearchOperator<T> + 'a>>) -> Self {
-        let len = operators.len();
-        Self {
-            operators,
-            current_index: 0,
-            op_started: vec![false; len],
-        }
-    }
-
-    #[inline]
-    pub fn empty() -> Self {
-        Self {
-            operators: Vec::new(),
-            current_index: 0,
-            op_started: Vec::new(),
-        }
-    }
-}
-
-impl<'a, T> LocalSearchOperator<T> for RoundRobinCompoundOperator<'a, T>
-where
-    T: SolverNumeric,
-{
-    fn name(&self) -> &str {
-        "RoundRobinCompoundOperator"
-    }
-
-    fn prepare(
-        &mut self,
-        _best_solution: SolutionView<'_, T>,
-        _accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _graph: &ScheduleGraph,
-    ) {
-        self.current_index = 0;
-        self.op_started.fill(false);
-    }
-
-    unsafe fn next_neighbor(
-        &mut self,
-        model: &Model<T>,
-        best_solution: SolutionView<'_, T>,
-        accepted_solution: SolutionView<'_, T>,
-        buffered_solution: Option<SolutionView<'_, T>>,
-        mutator: &mut Mutator,
-        stats: &LocalSearchStatistics,
-    ) -> bool {
-        loop {
-            if self.current_index >= self.operators.len() {
-                return false;
-            }
-
-            debug_assert!(
-                self.current_index < self.operators.len(),
-                "current_index {} out of bounds for operators with len {}",
-                self.current_index,
-                self.operators.len()
-            );
-            debug_assert!(
-                self.current_index < self.op_started.len(),
-                "current_index {} out of bounds for op_started with len {}",
-                self.current_index,
-                self.op_started.len()
-            );
-            let op = unsafe { &mut self.operators.get_unchecked_mut(self.current_index) };
-            if !*unsafe { self.op_started.get_unchecked(self.current_index) } {
-                let graph = mutator.graph();
-                op.prepare(best_solution, accepted_solution, buffered_solution, graph);
-                unsafe { *self.op_started.get_unchecked_mut(self.current_index) = true };
-            }
-
-            if unsafe {
-                op.next_neighbor(
-                    model,
-                    best_solution,
-                    accepted_solution,
-                    buffered_solution,
-                    mutator,
-                    stats,
-                )
-            } {
-                return true;
-            }
-
-            self.current_index += 1;
-        }
-    }
-
-    fn reset(&mut self) {
-        for op in self.operators.iter_mut() {
-            op.reset();
-        }
-        self.current_index = 0;
-        self.op_started.fill(false);
-    }
-}
-
-// ----------------------------------------------------------------
-// BanditStats
-// ----------------------------------------------------------------
-
-/// Internal statistics for the Multi-Armed Bandit operator.
-///
-/// Tracks the number of samples and average improvements for each sub-operator.
-/// Used to compute UCB1 scores for operator selection.
-#[derive(Debug, Default)]
-struct BanditStats {
-    total_samples: usize,       // Total number of samples across all operators
-    samples_per_op: Vec<usize>, // len = number of operators
-    avg_improvements: Vec<f64>, // len = number of operators
-
-    /// The maximum improvement seen so far across all operators.
-    /// Used to normalize the exploitation term to the [0, 1] range.
-    global_max_improvement: f64,
-}
-
-impl BanditStats {
-    /// Creates a new `BanditStats` instance for the specified number of operators.
-    #[inline]
-    fn new(size: usize) -> Self {
-        Self {
-            total_samples: 0,
-            samples_per_op: vec![0; size],
-            avg_improvements: vec![0.0; size],
-            // Initialize to 1.0 to prevent division by zero on the first iteration.
-            // As soon as a real improvement > 1.0 is found, this will scale up.
-            global_max_improvement: 1.0,
-        }
-    }
-
-    /// Computes the UCB1 score for the specified operator index.
+impl CompoundOperator {
+    /// The operator over `neighborhoods`, in that order, chosen among by `selection`; a random choice draws from a
+    /// generator seeded with `seed`.
     ///
     /// # Panics
     ///
-    /// In debug builds, this method will panic if `index` is not within `0..self.samples_per_op.len()`.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that `index` is within `0..self.samples_per_op.len()`.
-    unsafe fn get_score_unchecked(&self, index: usize, exploration_coef: f64) -> f64 {
-        debug_assert!(
-            index < self.samples_per_op.len(),
-            "called `BanditStats::get_score_unchecked` with index out of bounds: the len is {} but the index is {}",
-            self.samples_per_op.len(),
-            index,
-        );
-
-        let n_i = unsafe { *self.samples_per_op.get_unchecked(index) as f64 };
-        if n_i == 0.0 {
-            return f64::INFINITY;
-        }
-
-        let total_n = self.total_samples as f64;
-
-        let raw_exploitation = unsafe { *self.avg_improvements.get_unchecked(index) };
-        let normalized_exploitation = raw_exploitation / self.global_max_improvement;
-        let bonus = exploration_coef * ((2.0 * (1.0 + total_n).ln()) / n_i).sqrt();
-
-        normalized_exploitation + bonus
-    }
-
-    /// Updates the average improvement for the specified operator index using
-    /// the provided delta and learning rate (alpha).
-    ///
-    /// # Panics
-    ///
-    /// In debug builds, this method will panic if `index` is not within `0..self.avg_improvements.len()`.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that `index` is within `0..self.avg_improvements.len()`.
-    unsafe fn update_improvement_unchecked(&mut self, index: usize, delta: f64, alpha: f64) {
-        debug_assert!(
-            index < self.avg_improvements.len(),
-            "called `BanditStats::update_improvement_unchecked` with index out of bounds: the len is {} but the index \
-             is {}",
-            self.avg_improvements.len(),
-            index,
-        );
-
-        // Track the global maximum improvement to maintain correct normalization scaling
-        if delta > self.global_max_improvement {
-            self.global_max_improvement = delta;
-        }
-
-        let current_avg = unsafe { *self.avg_improvements.get_unchecked(index) };
-        let new_avg = current_avg + alpha * (delta - current_avg);
-        unsafe {
-            *self.avg_improvements.get_unchecked_mut(index) = new_avg;
-        }
-    }
-}
-
-// ----------------------------------------------------------------
-// MultiArmedBanditCompoundOperator
-// ----------------------------------------------------------------
-
-/// A compound operator that selects sub-operators using a Multi-Armed Bandit (UCB1) strategy.
-pub struct MultiArmedBanditCompoundOperator<'a, T>
-where
-    T: SolverNumeric,
-{
-    operators: Vec<Box<dyn LocalSearchOperator<T> + 'a>>, // List of sub-operators
-    memory_coeff: f64,      // Learning rate for updating average improvements
-    exploration_coeff: f64, // Coefficient for exploration bonus in UCB1
-
-    // State
-    stats: BanditStats,         // Internal statistics for operator selection
-    ranked_indices: Vec<usize>, // Indices of operators sorted by UCB1 score
-    active_rank_index: usize,   // Cursor in ranked_indices for the current operator
-    op_started: Vec<bool>,      // operator i started
-    last_obj: Option<T>,        // Objective value of the last accepted solution
-}
-
-impl<'a, T> MultiArmedBanditCompoundOperator<'a, T>
-where
-    T: SolverNumeric,
-{
-    /// Creates a new `MultiArmedBanditCompoundOperator` with the specified sub-operators
-    /// and configuration parameters.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `operators` is empty.
-    #[inline]
+    /// Panics if `neighborhoods` is empty.
     pub fn new(
-        operators: Vec<Box<dyn LocalSearchOperator<T> + 'a>>,
-        memory_coeff: f64,
-        exploration_coeff: f64,
+        neighborhoods: &[Neighborhood],
+        selection: NeighborhoodSelection,
+        seed: u64,
     ) -> Self {
         assert!(
-            !operators.is_empty(),
-            "called `MultiArmedBanditCompoundOperator::new` with no operators"
+            !neighborhoods.is_empty(),
+            "called `CompoundOperator::new` with no neighborhood"
         );
-        let n = operators.len();
-        Self {
-            operators,
-            memory_coeff,
-            exploration_coeff,
-            stats: BanditStats::new(n),
-            ranked_indices: (0..n).collect(),
-            active_rank_index: 0,
-            op_started: vec![false; n],
-            last_obj: None,
+        let scans: Vec<NeighborhoodOperator> = neighborhoods
+            .iter()
+            .map(|&neighborhood| NeighborhoodOperator::new(neighborhood))
+            .collect();
+        let rule = match selection {
+            NeighborhoodSelection::RoundRobin => {
+                SelectionRule::RoundRobin(RoundRobin { current: 0 })
+            }
+            NeighborhoodSelection::Random => SelectionRule::Random(RandomSelection {
+                generator: Xoshiro256PlusPlus::seed_from_u64(seed),
+                current: 0,
+            }),
+            NeighborhoodSelection::MultiArmedBandit(settings) => {
+                SelectionRule::MultiArmedBandit(Bandit::new(scans.len(), settings))
+            }
+        };
+        Self { scans, rule }
+    }
+}
+
+impl<T> LocalSearchOperator<T> for CompoundOperator
+where
+    T: SolverNumeric,
+{
+    fn prepare(&mut self, accepted_objective: T, graph: &ScheduleGraph) {
+        for scan in &mut self.scans {
+            scan.prepare(graph);
+        }
+        match &mut self.rule {
+            SelectionRule::RoundRobin(rule) => rule.current = 0,
+            SelectionRule::Random(rule) => {
+                rule.current = rule.generator.random_range(0..self.scans.len())
+            }
+            SelectionRule::MultiArmedBandit(rule) => {
+                rule.prepare(accepted_objective.to_f64().unwrap_or(0.0))
+            }
         }
     }
 
-    #[inline]
-    pub fn with_defaults(operators: Vec<Box<dyn LocalSearchOperator<T>>>) -> Self {
-        // memory_coeff: 0.2 (React faster to changes in operator effectiveness)
-        // exploration_coeff: 1.414 (Standard UCB1 constant)
-        Self::new(operators, 0.2, std::f64::consts::SQRT_2)
+    unsafe fn next_neighbor_unchecked(&mut self, model: &Model<T>, mutator: &mut Mutator) -> bool {
+        let scans = self.scans.as_mut_slice();
+        match &mut self.rule {
+            SelectionRule::RoundRobin(rule) => {
+                debug_assert!(rule.current <= scans.len());
+                // SAFETY: the current scan is at most the number of scans, by the invariant of `CompoundOperator`,
+                // and the graph is as every scan needs it, the precondition of this function.
+                unsafe { rule.next_neighbor_unchecked(scans, model, mutator) }
+            }
+            SelectionRule::Random(rule) => {
+                debug_assert!(rule.current < scans.len());
+                // SAFETY: the current scan is below the number of scans, by the invariant of `CompoundOperator`,
+                // and the graph is as every scan needs it, the precondition of this function.
+                unsafe { rule.next_neighbor_unchecked(scans, model, mutator) }
+            }
+            SelectionRule::MultiArmedBandit(rule) => {
+                debug_assert!(
+                    rule.active_rank < scans.len() && rule.ranking.iter().all(|&n| n < scans.len())
+                );
+                // SAFETY: the ranking and the active rank are below the number of scans, by the invariant of
+                // `CompoundOperator`, and the graph is as every scan needs it, the precondition of this function.
+                unsafe { rule.next_neighbor_unchecked(scans, model, mutator) }
+            }
+        }
     }
 
-    fn sort_by_score(&mut self) {
-        let c = self.exploration_coeff;
-        let stats = &self.stats;
-        self.ranked_indices.sort_by(|&a, &b| unsafe {
-            stats
-                .get_score_unchecked(b, c)
-                .partial_cmp(&stats.get_score_unchecked(a, c))
+    fn reset(&mut self) {
+        for scan in &mut self.scans {
+            scan.reset();
+        }
+        match &mut self.rule {
+            SelectionRule::RoundRobin(rule) => rule.current = 0,
+            SelectionRule::Random(rule) => rule.current = 0,
+            SelectionRule::MultiArmedBandit(rule) => rule.active_rank = 0,
+        }
+    }
+}
+
+/// Round robin: the scan asks the neighbourhoods in order, each until it is exhausted.
+#[derive(Debug, Clone)]
+struct RoundRobin {
+    /// The neighbourhood that proposes the next move, or the number of neighbourhoods once all are exhausted.
+    current: usize,
+}
+
+impl RoundRobin {
+    /// The next move of the scan, from the current neighbourhood or the next one not yet exhausted.
+    ///
+    /// # Safety
+    ///
+    /// `current` must be at most the length of `scans`, and the graph of `mutator` as every scan needs it.
+    unsafe fn next_neighbor_unchecked<T>(
+        &mut self,
+        scans: &mut [NeighborhoodOperator],
+        model: &Model<T>,
+        mutator: &mut Mutator,
+    ) -> bool
+    where
+        T: SolverNumeric,
+    {
+        while self.current < scans.len() {
+            debug_assert!(self.current < scans.len());
+            // SAFETY: `current` is below the length of `scans`, as the loop condition found.
+            let scan = unsafe { scans.get_unchecked_mut(self.current) };
+            // SAFETY: the graph is as every scan needs it, the precondition of this function.
+            if unsafe { scan.next_neighbor_unchecked(model, mutator) } {
+                return true;
+            }
+            self.current += 1;
+        }
+        false
+    }
+}
+
+/// Random selection: the scan starts at a neighbourhood drawn at random and asks the neighbourhoods in circular
+/// order from there, each until it is exhausted.
+#[derive(Debug, Clone)]
+struct RandomSelection {
+    generator: Xoshiro256PlusPlus,
+    /// The neighbourhood that proposed the last move, where the next one is asked first.
+    current: usize,
+}
+
+impl RandomSelection {
+    /// The next move of the scan, from the current neighbourhood or the next one in circular order not yet
+    /// exhausted.
+    ///
+    /// # Safety
+    ///
+    /// `current` must be below the length of `scans`, and the graph of `mutator` as every scan needs it.
+    unsafe fn next_neighbor_unchecked<T>(
+        &mut self,
+        scans: &mut [NeighborhoodOperator],
+        model: &Model<T>,
+        mutator: &mut Mutator,
+    ) -> bool
+    where
+        T: SolverNumeric,
+    {
+        let start = self.current;
+        let mut index = start;
+        for _ in 0..scans.len() {
+            debug_assert!(index < scans.len());
+            // SAFETY: `index` starts at `current`, below the length of `scans` by the precondition of this
+            // function, and steps in circular order below it.
+            let scan = unsafe { scans.get_unchecked_mut(index) };
+            // SAFETY: the graph is as every scan needs it, the precondition of this function.
+            if unsafe { scan.next_neighbor_unchecked(model, mutator) } {
+                self.current = index;
+                return true;
+            }
+            index = (index + 1) % scans.len();
+        }
+        false
+    }
+}
+
+/// The multi-armed bandit: before every scan it credits the neighbourhood that proposed the last accepted move
+/// with the improvement of the objective since the scan before, ranks the neighbourhoods by their UCB1 scores, and
+/// the scan asks them in the order of the ranking.
+#[derive(Debug, Clone)]
+struct Bandit {
+    settings: MultiArmedBandit,
+    /// The moves each neighbourhood proposed, per neighbourhood.
+    samples: Vec<u64>,
+    /// The moves all neighbourhoods proposed.
+    total_samples: u64,
+    /// The average improvement each neighbourhood brought, per neighbourhood.
+    averages: Vec<f64>,
+    /// The largest improvement seen, at least one, by which the averages are scaled into `[0, 1]`.
+    largest_improvement: f64,
+    /// The neighbourhoods, best score first.
+    ranking: Vec<usize>,
+    /// The place in the ranking of the neighbourhood asked first for the next move.
+    active_rank: usize,
+    /// The objective of the accepted schedule at the last scan, or `None` before the first.
+    last_objective: Option<f64>,
+}
+
+impl Bandit {
+    /// The bandit over `count` neighbourhoods, none of them sampled.
+    fn new(count: usize, settings: MultiArmedBandit) -> Self {
+        Self {
+            settings,
+            samples: vec![0; count],
+            total_samples: 0,
+            averages: vec![0.0; count],
+            largest_improvement: 1.0,
+            ranking: (0..count).collect(),
+            active_rank: 0,
+            last_objective: None,
+        }
+    }
+
+    /// Credits the neighbourhood at the active rank with the improvement from the last scan to
+    /// `accepted_objective`, ranks the neighbourhoods anew and starts at the first rank.
+    fn prepare(&mut self, accepted_objective: f64) {
+        if let Some(last_objective) = self.last_objective {
+            let improvement = (last_objective - accepted_objective).max(0.0);
+            let credited = self.ranking[self.active_rank];
+            self.learn(credited, improvement);
+        }
+        self.last_objective = Some(accepted_objective);
+        self.rank();
+        self.active_rank = 0;
+    }
+
+    /// Moves the average of `neighborhood` by the memory's fraction toward `improvement`, and raises the largest
+    /// improvement to it.
+    fn learn(&mut self, neighborhood: usize, improvement: f64) {
+        if improvement > self.largest_improvement {
+            self.largest_improvement = improvement;
+        }
+        let average = &mut self.averages[neighborhood];
+        *average += self.settings.memory * (improvement - *average);
+    }
+
+    /// The UCB1 score of `neighborhood`: infinite while it has no sample.
+    #[expect(
+        clippy::as_conversions,
+        reason = "counts of moves stay far below 2^53, where every count is an exact `f64`"
+    )]
+    fn score(&self, neighborhood: usize) -> f64 {
+        let samples = self.samples[neighborhood] as f64;
+        if samples == 0.0 {
+            return f64::INFINITY;
+        }
+        let total = self.total_samples as f64;
+        let exploitation = self.averages[neighborhood] / self.largest_improvement;
+        let bonus = self.settings.exploration * ((2.0 * (1.0 + total).ln()) / samples).sqrt();
+        exploitation + bonus
+    }
+
+    /// Orders the ranking by score, the best first, and equal scores by neighbourhood.
+    fn rank(&mut self) {
+        let mut ranking = std::mem::take(&mut self.ranking);
+        ranking.sort_by(|&a, &b| {
+            self.score(b)
+                .partial_cmp(&self.score(a))
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| a.cmp(&b))
         });
-    }
-}
-
-impl<'a, T> LocalSearchOperator<T> for MultiArmedBanditCompoundOperator<'a, T>
-where
-    T: SolverNumeric,
-{
-    fn name(&self) -> &str {
-        "MultiArmedBanditCompoundOperator"
+        self.ranking = ranking;
     }
 
-    fn prepare(
+    /// The next move of the scan, from the neighbourhood at the active rank or the next rank in circular order
+    /// whose neighbourhood is not yet exhausted; counts the move as a sample of its neighbourhood.
+    ///
+    /// # Safety
+    ///
+    /// The ranking must hold indices below the length of `scans` and the active rank must be below it, and the
+    /// graph of `mutator` must be as every scan needs it.
+    unsafe fn next_neighbor_unchecked<T>(
         &mut self,
-        _best_solution: SolutionView<'_, T>,
-        accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _graph: &ScheduleGraph,
-    ) {
-        let current_obj = accepted_solution.objective_value();
-
-        // Learning Phase: Update stats based on the last accepted move
-        if let Some(prev_obj) = self.last_obj {
-            let improvement =
-                (prev_obj.to_f64().unwrap_or(0.0) - current_obj.to_f64().unwrap_or(0.0)).max(0.0);
-
-            // Note: We update even if improvement is 0.0 to decay the average
-            if improvement >= 0.0 {
-                debug_assert!(
-                    self.active_rank_index < self.ranked_indices.len(),
-                    "active_rank_index {} out of bounds for ranked_indices with len {}",
-                    self.active_rank_index,
-                    self.ranked_indices.len()
-                );
-
-                let last_op_idx =
-                    *unsafe { self.ranked_indices.get_unchecked(self.active_rank_index) };
-                unsafe {
-                    self.stats.update_improvement_unchecked(
-                        last_op_idx,
-                        improvement,
-                        self.memory_coeff,
-                    )
-                };
-            }
-        }
-        self.last_obj = Some(current_obj);
-
-        // Strategy Phase: Re-rank operators and reset cursors
-        self.sort_by_score();
-        self.active_rank_index = 0;
-        self.op_started.fill(false);
-    }
-
-    unsafe fn next_neighbor(
-        &mut self,
+        scans: &mut [NeighborhoodOperator],
         model: &Model<T>,
-        best_solution: SolutionView<'_, T>,
-        accepted_solution: SolutionView<'_, T>,
-        buffered_solution: Option<SolutionView<'_, T>>,
         mutator: &mut Mutator,
-        stats: &LocalSearchStatistics,
-    ) -> bool {
-        let num_ops = self.operators.len();
-        if num_ops == 0 {
-            return false;
-        }
-
-        let start_rank = self.active_rank_index;
-        loop {
+    ) -> bool
+    where
+        T: SolverNumeric,
+    {
+        let start = self.active_rank;
+        for _ in 0..scans.len() {
             debug_assert!(
-                self.active_rank_index < self.ranked_indices.len(),
-                "active_rank_index {} out of bounds for ranked_indices with len {}",
-                self.active_rank_index,
-                self.ranked_indices.len()
+                self.active_rank < self.ranking.len() && self.ranking.len() == scans.len()
             );
-            let op_idx = *unsafe { self.ranked_indices.get_unchecked(self.active_rank_index) };
-
-            debug_assert!(
-                op_idx < self.operators.len(),
-                "op_idx {} out of bounds for operators with len {}",
-                op_idx,
-                self.operators.len()
-            );
-            let op = unsafe { &mut self.operators.get_unchecked_mut(op_idx) };
-
-            debug_assert!(
-                op_idx < self.op_started.len(),
-                "op_idx {} out of bounds for op_started with len {}",
-                op_idx,
-                self.op_started.len()
-            );
-
-            // Lazy preparation
-            if !*unsafe { self.op_started.get_unchecked(op_idx) } {
-                op.prepare(
-                    best_solution,
-                    accepted_solution,
-                    buffered_solution,
-                    mutator.graph(),
-                );
-                // SAFETY: op_index is always in bounds due to struct invariants.
-                unsafe { *self.op_started.get_unchecked_mut(op_idx) = true };
-            }
-
-            if unsafe {
-                op.next_neighbor(
-                    model,
-                    best_solution,
-                    accepted_solution,
-                    buffered_solution,
-                    mutator,
-                    stats,
-                )
-            } {
-                self.stats.total_samples += 1;
-                debug_assert!(
-                    op_idx < self.stats.samples_per_op.len(),
-                    "op_idx {} out of bounds for samples_per_op with len {}",
-                    op_idx,
-                    self.stats.samples_per_op.len()
-                );
-
-                // SAFETY: op_index is always in bounds due to struct invariants.
-                unsafe { *self.stats.samples_per_op.get_unchecked_mut(op_idx) += 1 };
+            // SAFETY: the active rank is below the length of the ranking, which has one entry per scan, the
+            // precondition of this function.
+            let neighborhood = unsafe { *self.ranking.get_unchecked(self.active_rank) };
+            debug_assert!(neighborhood < scans.len() && neighborhood < self.samples.len());
+            // SAFETY: every index of the ranking is below the length of `scans`, the precondition of this
+            // function.
+            let scan = unsafe { scans.get_unchecked_mut(neighborhood) };
+            // SAFETY: the graph is as every scan needs it, the precondition of this function.
+            if unsafe { scan.next_neighbor_unchecked(model, mutator) } {
+                self.total_samples += 1;
+                // SAFETY: the samples have one entry per scan, by the invariant of `CompoundOperator`.
+                unsafe { *self.samples.get_unchecked_mut(neighborhood) += 1 };
                 return true;
             }
-
-            // Move to next operator in ranked order
-            self.active_rank_index = (self.active_rank_index + 1) % num_ops;
-            if self.active_rank_index == start_rank {
+            self.active_rank = (self.active_rank + 1) % scans.len();
+            if self.active_rank == start {
                 return false;
             }
         }
-    }
-
-    fn reset(&mut self) {
-        self.operators.iter_mut().for_each(|op| op.reset());
-        self.active_rank_index = 0;
-        self.op_started.fill(false);
+        false
     }
 }
 
@@ -619,11 +386,66 @@ where
 mod tests {
     use super::*;
 
-    // A bandit over no operators has no rank to credit after its first scan: its second `prepare` would read the
-    // first rank of an empty ranking. It must be refused where it is made.
     #[test]
-    #[should_panic(expected = "called `MultiArmedBanditCompoundOperator::new` with no operators")]
-    fn test_bandit_refuses_no_operators() {
-        let _ = MultiArmedBanditCompoundOperator::<i64>::new(Vec::new(), 0.2, 1.0);
+    #[should_panic(expected = "called `CompoundOperator::new` with no neighborhood")]
+    fn test_compound_operator_refuses_no_neighborhood() {
+        let _ = CompoundOperator::new(&[], NeighborhoodSelection::RoundRobin, 0);
+    }
+
+    #[test]
+    fn test_bandit_scores_an_unsampled_neighborhood_infinite_and_ranks_it_first() {
+        let mut bandit = Bandit::new(3, MultiArmedBandit::default());
+        bandit.samples = vec![4, 0, 2];
+        bandit.total_samples = 6;
+        bandit.averages = vec![0.5, 0.0, 0.25];
+        assert_eq!(bandit.score(1), f64::INFINITY);
+        bandit.rank();
+        assert_eq!(bandit.ranking[0], 1);
+    }
+
+    #[test]
+    fn test_bandit_score_is_the_scaled_average_plus_the_bonus() {
+        let mut bandit = Bandit::new(
+            2,
+            MultiArmedBandit {
+                memory: 0.5,
+                exploration: 1.0,
+            },
+        );
+        bandit.samples = vec![2, 2];
+        bandit.total_samples = 4;
+        bandit.averages = vec![3.0, 1.0];
+        bandit.largest_improvement = 4.0;
+        let bonus = ((2.0 * 5.0_f64.ln()) / 2.0).sqrt();
+        assert_eq!(bandit.score(0), 0.75 + bonus);
+        assert_eq!(bandit.score(1), 0.25 + bonus);
+        bandit.rank();
+        assert_eq!(bandit.ranking, [0, 1]);
+    }
+
+    #[test]
+    fn test_bandit_credits_the_improvement_to_the_active_rank() {
+        let mut bandit = Bandit::new(
+            2,
+            MultiArmedBandit {
+                memory: 0.5,
+                exploration: 1.0,
+            },
+        );
+        bandit.prepare(100.0);
+        assert_eq!(bandit.averages, [0.0, 0.0]);
+        bandit.active_rank = 1;
+        let credited = bandit.ranking[1];
+        bandit.prepare(90.0);
+        assert_eq!(bandit.averages[credited], 5.0);
+        assert_eq!(bandit.largest_improvement, 10.0);
+        // A worse objective is no improvement, and only decays the average.
+        bandit.active_rank = bandit
+            .ranking
+            .iter()
+            .position(|&n| n == credited)
+            .expect("ranked");
+        bandit.prepare(95.0);
+        assert_eq!(bandit.averages[credited], 2.5);
     }
 }

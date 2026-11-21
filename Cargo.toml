@@ -35,8 +35,12 @@ derive-where = { version = "1.7.0", default-features = false }
 num-traits = { version = "0.2.19", default-features = false, features = ["std"] }
 # Iterator adaptors std lacks; the bindings use them to reshape tables.
 itertools = { version = "0.14.0", default-features = false, features = ["use_std"] }
-# Randomness of the engine: seeded generators, and the thread generator for the unseeded tie-break.
-rand = { version = "0.10.0", default-features = false, features = ["std", "std_rng", "thread_rng"] }
+# Seeded randomness of the engine: `rand_core` for the generator traits and seeding from a number, `rand_xoshiro`
+# for the xoshiro256++ generator each random choice of a run draws from, and `rand` for unbiased draws from a
+# range. No global or thread generator is used.
+rand_core = { version = "0.10.0", default-features = false }
+rand_xoshiro = { version = "0.8.2", default-features = false }
+rand = { version = "0.10.0", default-features = false }
 # Python bindings: `macros` for the `#[pyfunction]` and `#[pyclass]` attributes, and `abi3-py38` builds one module
 # for every CPython from 3.8 on.
 pyo3 = { version = "0.28.2", default-features = false, features = ["macros", "abi3-py38"] }

@@ -508,7 +508,6 @@ version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc266eb313df6c5c09c1c7b1fbe2510961e5bcd3add930c1e31f7ed9da0feff8"
 dependencies = [
- "chacha20",
  "getrandom",
  "rand_core",
 ]
@@ -524,6 +523,15 @@ name = "rand_xorshift"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
+dependencies = [
+ "rand_core",
+]
+
+[[package]]
+name = "rand_xoshiro"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "905ba3ffb2d41441ed3382287a8c9d7cde1bdf49c33db808956e9f01ebb13436"
 dependencies = [
  "rand_core",
 ]
@@ -671,6 +679,8 @@ dependencies = [
  "num-traits",
  "proptest",
  "rand",
+ "rand_core",
+ "rand_xoshiro",
  "talos_core",
  "talos_model",
  "typed-index-collections",

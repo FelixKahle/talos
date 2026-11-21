@@ -13,14 +13,7 @@ use talos_ls::monitor::composite::CompositeLocalSearchMonitor;
 use talos_ls::monitor::nimpr::NoImprovementMonitor;
 use talos_ls::monitor::time::TimeLimitMonitor;
 use talos_ls::objective::Objective;
-use talos_ls::operator::composite::RoundRobinCompoundOperator;
-use talos_ls::operator::filter::{
-    inter_berth_shift_filter_unchecked, inter_berth_swap_filter_unchecked,
-    intra_berth_shift_filter_unchecked, intra_berth_swap_filter_unchecked,
-};
-use talos_ls::operator::neighborhood::LocalSearchOperator;
-use talos_ls::operator::shift::{InterBerthShiftOperator, IntraBerthShiftOperator};
-use talos_ls::operator::swap::{InterBerthSwapOperator, IntraBerthSwapOperator};
+use talos_ls::operator::{CompoundOperator, Neighborhood, NeighborhoodSelection};
 use talos_ls::parameters::MutableLocalSearchParams;
 use talos_model::Model;
 
@@ -191,38 +184,8 @@ fn load_instance(path: &std::path::Path) -> Result<Model<i64>, ProblemLoaderErro
     loader.load_dbap_file(path)
 }
 
-fn build_full_operator() -> RoundRobinCompoundOperator<'static, i64> {
-    let ops: Vec<Box<dyn LocalSearchOperator<i64>>> = vec![
-        Box::new(IntraBerthSwapOperator::new(
-            |v_a, v_b, sol, graph, model| {
-                // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
-                // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
-                unsafe { intra_berth_swap_filter_unchecked(v_a, v_b, sol, graph, model) }
-            },
-        )),
-        Box::new(InterBerthSwapOperator::new(
-            |v_a, v_b, sol, graph, model| {
-                // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
-                // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
-                unsafe { inter_berth_swap_filter_unchecked(v_a, v_b, sol, graph, model) }
-            },
-        )),
-        Box::new(IntraBerthShiftOperator::new(
-            |v, anchor, sol, graph, model| {
-                // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
-                // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
-                unsafe { intra_berth_shift_filter_unchecked(v, anchor, sol, graph, model) }
-            },
-        )),
-        Box::new(InterBerthShiftOperator::new(
-            |v, anchor, sol, graph, model| {
-                // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
-                // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
-                unsafe { inter_berth_shift_filter_unchecked(v, anchor, sol, graph, model) }
-            },
-        )),
-    ];
-    RoundRobinCompoundOperator::new(ops)
+fn build_full_operator() -> CompoundOperator {
+    CompoundOperator::new(&Neighborhood::ALL, NeighborhoodSelection::RoundRobin, 0)
 }
 
 fn run_benchmark(

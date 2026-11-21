@@ -374,7 +374,7 @@ mod tests {
     fn test_greedy_descent_with_tie_breaking_random() {
         let _gd = GreedyDescent::new()
             .with_selection(SelectionStrategy::BestImprovement)
-            .with_tie_breaking(RandomTieBreak::new(rand::rng()));
+            .with_tie_breaking(RandomTieBreak::new(0));
     }
 
     #[test]

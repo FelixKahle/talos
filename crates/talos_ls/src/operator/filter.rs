@@ -1,172 +1,262 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Neighborhood filter functions for local-search operators.
+//! The tests that let a neighbourhood skip a move no optimum needs.
 //!
-//! Each filter is designed to be passed to the corresponding operator's
-//! constructor (e.g. `IntraBerthSwapOperator::new(intra_berth_swap_filter_unchecked)`).
-//! They prune moves that are guaranteed to be infeasible or dominated,
-//! without ever discarding a move that could lead to the optimum.
+//! Each neighbourhood proposes only the moves its filter lets through. A filter refuses a move only where the
+//! instance alone rules it out (the vessel may not use the berth it would reach) or forces the order it would
+//! reverse (two vessels whose windows from arrival to latest departure do not overlap), so it never discards a
+//! move an optimum could need.
 
 use crate::schedule::ScheduleGraph;
 use talos_core::SolverNumeric;
-use talos_model::{Model, SolutionView, VesselIndex};
+use talos_model::{Model, VesselIndex};
 
-/// Filter for `IntraBerthSwapOperator`.
+/// Whether the windows of `first` and `second`, each from its arrival to its latest departure, overlap.
 ///
-/// Rejects a swap when the two vessels' feasible time windows
-/// `[arrival_time, latest_departure_time)` are disjoint. If vessel A's
-/// latest departure is at or before vessel B's arrival (or vice-versa),
-/// their relative order on the berth is forced by the time windows alone,
-/// so swapping them can only produce an infeasible or dominated schedule.
-///
-/// This is an optimum-preserving filter: any swap that could improve the
-/// objective involves two vessels whose time windows overlap.
+/// Where they do not, the earlier window's vessel is served first on any berth in every feasible schedule, so a
+/// move that puts the other before it is either infeasible or no better.
 ///
 /// # Safety
 ///
-/// The caller must ensure that `v_a` and `v_b` are valid vessel indices
-/// in `0..model.num_vessels()`.
+/// `first` and `second` must be `model`'s.
 #[inline]
-pub unsafe fn intra_berth_swap_filter_unchecked<T>(
-    v_a: VesselIndex,
-    v_b: VesselIndex,
-    _solution: SolutionView<'_, T>,
-    _graph: &ScheduleGraph,
+unsafe fn windows_overlap_unchecked<T>(
+    first: VesselIndex,
+    second: VesselIndex,
     model: &Model<T>,
 ) -> bool
 where
     T: SolverNumeric,
 {
-    debug_assert!(v_a.index() < model.num_vessels());
-    debug_assert!(v_b.index() < model.num_vessels());
-
-    // Time windows overlap iff neither is entirely before the other.
-    //   overlap ⟺ arrival_a < deadline_b  ∧  arrival_b < deadline_a
-    let arrival_a = unsafe { model.vessel_arrival_time_unchecked(v_a) };
-    let deadline_a = unsafe { model.vessel_latest_departure_time_unchecked(v_a) };
-    let arrival_b = unsafe { model.vessel_arrival_time_unchecked(v_b) };
-    let deadline_b = unsafe { model.vessel_latest_departure_time_unchecked(v_b) };
-
-    arrival_a < deadline_b && arrival_b < deadline_a
+    debug_assert!(
+        first.index() < model.num_vessels() && second.index() < model.num_vessels(),
+        "called `windows_overlap_unchecked` with {first} or {second}, outside a model of {} vessels",
+        model.num_vessels()
+    );
+    // SAFETY: both vessels are the model's, the precondition of this function.
+    let (first_arrival, first_deadline, second_arrival, second_deadline) = unsafe {
+        (
+            model.vessel_arrival_time_unchecked(first),
+            model.vessel_latest_departure_time_unchecked(first),
+            model.vessel_arrival_time_unchecked(second),
+            model.vessel_latest_departure_time_unchecked(second),
+        )
+    };
+    first_arrival < second_deadline && second_arrival < first_deadline
 }
 
-/// Filter for `InterBerthSwapOperator`.
-///
-/// Rejects a swap when at least one vessel cannot be processed at the
-/// other vessel's current berth (i.e. the processing time is `None`).
-/// Such a swap would always be infeasible.
-///
-/// This is an optimum-preserving filter: every feasible inter-berth swap
-/// requires both vessels to be compatible with each other's berths.
+/// Whether swapping `first` and `second`, which share a berth, may help: their windows overlap.
 ///
 /// # Safety
 ///
-/// The caller must ensure that `v_a` and `v_b` are valid vessel indices
-/// in `0..graph.num_vessels()`, and that `graph` has the vessels and the
-/// berths of `model`.
+/// `first` and `second` must be `model`'s.
 #[inline]
-pub unsafe fn inter_berth_swap_filter_unchecked<T>(
-    v_a: VesselIndex,
-    v_b: VesselIndex,
-    _solution: SolutionView<'_, T>,
+pub(super) unsafe fn intra_berth_swap_filter_unchecked<T>(
+    first: VesselIndex,
+    second: VesselIndex,
+    model: &Model<T>,
+) -> bool
+where
+    T: SolverNumeric,
+{
+    debug_assert!(
+        first.index() < model.num_vessels() && second.index() < model.num_vessels(),
+        "called `intra_berth_swap_filter_unchecked` with {first} or {second}, outside the model"
+    );
+    // SAFETY: both vessels are the model's, the precondition of this function.
+    unsafe { windows_overlap_unchecked(first, second, model) }
+}
+
+/// Whether swapping `first` and `second`, which lie on different berths, may help: each may use the other's
+/// berth.
+///
+/// # Safety
+///
+/// `first` and `second` must be vessels of `graph`, and `graph` must have the vessels and berths of `model`.
+#[inline]
+pub(super) unsafe fn inter_berth_swap_filter_unchecked<T>(
+    first: VesselIndex,
+    second: VesselIndex,
     graph: &ScheduleGraph,
     model: &Model<T>,
 ) -> bool
 where
     T: SolverNumeric,
 {
-    debug_assert!(v_a.index() < graph.num_vessels());
-    debug_assert!(v_b.index() < graph.num_vessels());
-
-    let berth_a = unsafe { graph.vessel_berth_unchecked(v_a) };
-    let berth_b = unsafe { graph.vessel_berth_unchecked(v_b) };
-
-    // v_a must be allowed on berth_b, and v_b must be allowed on berth_a.
     debug_assert!(
-        v_a.index() < model.num_vessels()
-            && v_b.index() < model.num_vessels()
-            && berth_a.index() < model.num_berths()
-            && berth_b.index() < model.num_berths()
+        first.index() < graph.num_vessels() && second.index() < graph.num_vessels(),
+        "called `inter_berth_swap_filter_unchecked` with {first} or {second}, outside the graph"
     );
-    // SAFETY: the vessels are of `graph`, as the caller guarantees, and their berths are berths of `graph`;
-    // `graph` has the vessels and the berths of `model`, as the caller guarantees.
+    // SAFETY: both vessels are the graph's, the precondition of this function.
+    let (first_berth, second_berth) = unsafe {
+        (
+            graph.vessel_berth_unchecked(first),
+            graph.vessel_berth_unchecked(second),
+        )
+    };
+    debug_assert!(
+        first.index() < model.num_vessels()
+            && second.index() < model.num_vessels()
+            && first_berth.index() < model.num_berths()
+            && second_berth.index() < model.num_berths(),
+        "called `inter_berth_swap_filter_unchecked` with a graph whose vessels or berths are not the model's"
+    );
+    // SAFETY: the vessels are the graph's and their berths are berths of the graph, whose vessels and berths are
+    // the model's, the precondition of this function.
     unsafe {
         model
-            .vessel_processing_time_unchecked(v_a, berth_b)
+            .vessel_processing_time_unchecked(first, second_berth)
             .is_some()
             && model
-                .vessel_processing_time_unchecked(v_b, berth_a)
+                .vessel_processing_time_unchecked(second, first_berth)
                 .is_some()
     }
 }
 
-/// Filter for `IntraBerthShiftOperator`.
-///
-/// Rejects a shift when the vessel being moved and the anchor vessel have
-/// disjoint feasible time windows `[arrival_time, latest_departure_time)`.
-/// If the two windows do not overlap, the relative ordering is forced and
-/// relocating the vessel after the anchor can only produce an infeasible
-/// or dominated schedule.
-///
-/// This is an optimum-preserving filter: any shift that could improve the
-/// objective involves two vessels whose time windows overlap.
+/// Whether moving `vessel` right after `anchor`, on the berth they share, may help: their windows overlap.
 ///
 /// # Safety
 ///
-/// The caller must ensure that `v` and `anchor` are valid vessel indices
-/// in `0..model.num_vessels()`.
+/// `vessel` and `anchor` must be `model`'s.
 #[inline]
-pub unsafe fn intra_berth_shift_filter_unchecked<T>(
-    v: VesselIndex,
+pub(super) unsafe fn intra_berth_shift_filter_unchecked<T>(
+    vessel: VesselIndex,
     anchor: VesselIndex,
-    _solution: SolutionView<'_, T>,
-    _graph: &ScheduleGraph,
     model: &Model<T>,
 ) -> bool
 where
     T: SolverNumeric,
 {
-    debug_assert!(anchor.index() < model.num_vessels());
-    debug_assert!(v.index() < model.num_vessels());
-
-    let arrival_v = unsafe { model.vessel_arrival_time_unchecked(v) };
-    let deadline_v = unsafe { model.vessel_latest_departure_time_unchecked(v) };
-    let arrival_anchor = unsafe { model.vessel_arrival_time_unchecked(anchor) };
-    let deadline_anchor = unsafe { model.vessel_latest_departure_time_unchecked(anchor) };
-
-    arrival_v < deadline_anchor && arrival_anchor < deadline_v
+    debug_assert!(
+        vessel.index() < model.num_vessels() && anchor.index() < model.num_vessels(),
+        "called `intra_berth_shift_filter_unchecked` with {vessel} or {anchor}, outside the model"
+    );
+    // SAFETY: both vessels are the model's, the precondition of this function.
+    unsafe { windows_overlap_unchecked(vessel, anchor, model) }
 }
 
-/// Filter for `InterBerthShiftOperator`.
-///
-/// Rejects a shift when the vessel being moved cannot be processed at the
-/// anchor vessel's berth (i.e. the processing time is `None`). Such a
-/// move would always be infeasible.
-///
-/// This is an optimum-preserving filter: every feasible inter-berth shift
-/// requires the vessel to be compatible with the target berth.
+/// Whether moving `vessel` right after `anchor`, onto the berth of `anchor`, may help: `vessel` may use that
+/// berth.
 ///
 /// # Safety
 ///
-/// The caller must ensure that `v` and `anchor` are valid vessel indices
-/// in `0..graph.num_vessels()`, and that `graph` has the vessels and the
-/// berths of `model`.
+/// `vessel` and `anchor` must be vessels of `graph`, and `graph` must have the vessels and berths of `model`.
 #[inline]
-pub unsafe fn inter_berth_shift_filter_unchecked<T>(
-    v: VesselIndex,
+pub(super) unsafe fn inter_berth_shift_filter_unchecked<T>(
+    vessel: VesselIndex,
     anchor: VesselIndex,
-    _solution: SolutionView<'_, T>,
     graph: &ScheduleGraph,
     model: &Model<T>,
 ) -> bool
 where
     T: SolverNumeric,
 {
-    debug_assert!(anchor.index() < graph.num_vessels());
-    let berth_anchor = unsafe { graph.vessel_berth_unchecked(anchor) };
-    debug_assert!(v.index() < model.num_vessels() && berth_anchor.index() < model.num_berths());
-    // SAFETY: `v` is a vessel of `graph` and `berth_anchor` a berth of it, as the caller guarantees for the
-    // vessels; `graph` has the vessels and the berths of `model`, as the caller guarantees.
-    unsafe { model.vessel_processing_time_unchecked(v, berth_anchor) }.is_some()
+    debug_assert!(
+        vessel.index() < graph.num_vessels() && anchor.index() < graph.num_vessels(),
+        "called `inter_berth_shift_filter_unchecked` with {vessel} or {anchor}, outside the graph"
+    );
+    // SAFETY: `anchor` is the graph's, the precondition of this function.
+    let anchor_berth = unsafe { graph.vessel_berth_unchecked(anchor) };
+    debug_assert!(
+        vessel.index() < model.num_vessels() && anchor_berth.index() < model.num_berths(),
+        "called `inter_berth_shift_filter_unchecked` with a graph whose vessels or berths are not the model's"
+    );
+    // SAFETY: `vessel` is the graph's and `anchor_berth` a berth of the graph, whose vessels and berths are the
+    // model's, the precondition of this function.
+    unsafe { model.vessel_processing_time_unchecked(vessel, anchor_berth) }.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use talos_core::ClosedOpenInterval;
+    use talos_model::BerthIndex;
+
+    /// V0 has the window [0, 10), V1 [5, 20) and V2 [20, 30). V0 may use only B0; V1 and V2 may use either.
+    fn three_vessels() -> Model<i64> {
+        Model::new(
+            vec![0, 5, 20],
+            vec![10, 20, 30],
+            vec![1, 1, 1],
+            vec![Some(1), None, Some(1), Some(1), Some(1), Some(1)],
+            vec![
+                vec![ClosedOpenInterval::new(0, 100)],
+                vec![ClosedOpenInterval::new(0, 100)],
+            ],
+        )
+    }
+
+    fn vessel(index: usize) -> VesselIndex {
+        VesselIndex::new(index)
+    }
+
+    #[test]
+    fn test_intra_berth_filters_pass_overlapping_windows_and_refuse_disjoint_ones() {
+        let model = three_vessels();
+        // SAFETY: every vessel named is the model's.
+        unsafe {
+            assert!(intra_berth_swap_filter_unchecked(
+                vessel(0),
+                vessel(1),
+                &model
+            ));
+            assert!(intra_berth_shift_filter_unchecked(
+                vessel(1),
+                vessel(0),
+                &model
+            ));
+            assert!(!intra_berth_swap_filter_unchecked(
+                vessel(0),
+                vessel(2),
+                &model
+            ));
+            assert!(!intra_berth_shift_filter_unchecked(
+                vessel(2),
+                vessel(0),
+                &model
+            ));
+            // [5, 20) and [20, 30) touch but do not overlap.
+            assert!(!intra_berth_swap_filter_unchecked(
+                vessel(1),
+                vessel(2),
+                &model
+            ));
+        }
+    }
+
+    #[test]
+    fn test_inter_berth_filters_refuse_a_berth_the_vessel_may_not_use() {
+        let model = three_vessels();
+        // V0 and V2 on B0, V1 on B1.
+        let berths = [BerthIndex::new(0), BerthIndex::new(1), BerthIndex::new(0)];
+        let graph = ScheduleGraph::from_slices(&berths, &[0_i64, 0, 1], 2);
+        // SAFETY: every vessel named is the graph's, and the graph has the vessels and berths of the model.
+        unsafe {
+            assert!(!inter_berth_swap_filter_unchecked(
+                vessel(0),
+                vessel(1),
+                &graph,
+                &model
+            ));
+            assert!(inter_berth_swap_filter_unchecked(
+                vessel(2),
+                vessel(1),
+                &graph,
+                &model
+            ));
+            assert!(!inter_berth_shift_filter_unchecked(
+                vessel(0),
+                vessel(1),
+                &graph,
+                &model
+            ));
+            assert!(inter_berth_shift_filter_unchecked(
+                vessel(1),
+                vessel(0),
+                &graph,
+                &model
+            ));
+        }
+    }
 }

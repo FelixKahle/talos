@@ -6,7 +6,7 @@ use crate::{
     metaheuristic::acceptance::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
     monitor::lsmonitor::LocalSearchMonitor,
     objective::{CompletionCost, Objective, TurnaroundCost, VesselCost},
-    operator::neighborhood::LocalSearchOperator,
+    operator::LocalSearchOperator,
     outcome::LocalSearchOutcome,
     parameters::{MutableLocalSearchParams, check_initial_solution},
     schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff},
@@ -237,16 +237,7 @@ impl<T> Engine<T> {
                 &stats,
             );
 
-            operator.prepare(
-                self.best_state.as_solution_view(),
-                self.accepted_state.as_solution_view(),
-                if has_buffered {
-                    Some(self.buffered_state.as_solution_view())
-                } else {
-                    None
-                },
-                self.mutator.graph(),
-            );
+            operator.prepare(self.accepted_state.objective(), self.mutator.graph());
             let iterations_at_scan_start = stats.iterations;
 
             'inner: loop {
@@ -256,20 +247,7 @@ impl<T> Engine<T> {
                     let mutator = &mut self.mutator;
                     // SAFETY: the graph in `mutator` is the one `prepare` saw, and it has the vessels and berths
                     // of `model`, as the check at the door of the run established.
-                    unsafe {
-                        operator.next_neighbor(
-                            model,
-                            self.best_state.as_solution_view(),
-                            self.accepted_state.as_solution_view(),
-                            if has_buffered {
-                                Some(self.buffered_state.as_solution_view())
-                            } else {
-                                None
-                            },
-                            mutator,
-                            &stats,
-                        )
-                    }
+                    unsafe { operator.next_neighbor_unchecked(model, mutator) }
                 };
 
                 if !mutated {
@@ -771,7 +749,7 @@ mod tests {
         AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome,
     };
     use crate::monitor::lsmonitor::LocalSearchMonitor;
-    use crate::operator::neighborhood::LocalSearchOperator;
+    use crate::operator::LocalSearchOperator;
     use crate::parameters::MutableLocalSearchParams;
     use crate::statistics::LocalSearchStatistics;
     use crate::termination::{SearchCommand, TerminationReason};
@@ -965,28 +943,14 @@ mod tests {
     }
 
     impl LocalSearchOperator<i64> for MockOperator {
-        fn name(&self) -> &str {
-            "MockOperator"
-        }
-
-        fn prepare(
-            &mut self,
-            _best: SolutionView<'_, i64>,
-            _accepted: SolutionView<'_, i64>,
-            _buffered: Option<SolutionView<'_, i64>>,
-            _graph: &ScheduleGraph,
-        ) {
+        fn prepare(&mut self, _accepted_objective: i64, _graph: &ScheduleGraph) {
             self.cursor = 0;
         }
 
-        unsafe fn next_neighbor(
+        unsafe fn next_neighbor_unchecked(
             &mut self,
             _model: &Model<i64>,
-            _best: SolutionView<'_, i64>,
-            _accepted: SolutionView<'_, i64>,
-            _buffered: Option<SolutionView<'_, i64>>,
             mutator: &mut Mutator,
-            _stats: &LocalSearchStatistics,
         ) -> bool {
             if self.cursor >= self.max_moves {
                 return false;
@@ -1976,29 +1940,15 @@ mod tests {
     }
 
     impl LocalSearchOperator<i64> for SizeAwareMockOperator {
-        fn name(&self) -> &str {
-            "SizeAwareMockOperator"
-        }
-
-        fn prepare(
-            &mut self,
-            _best: SolutionView<'_, i64>,
-            accepted: SolutionView<'_, i64>,
-            _buffered: Option<SolutionView<'_, i64>>,
-            _graph: &ScheduleGraph,
-        ) {
+        fn prepare(&mut self, _accepted_objective: i64, graph: &ScheduleGraph) {
             self.cursor = 0;
-            self.num_vessels = accepted.num_vessels();
+            self.num_vessels = graph.num_vessels();
         }
 
-        unsafe fn next_neighbor(
+        unsafe fn next_neighbor_unchecked(
             &mut self,
             _model: &Model<i64>,
-            _best: SolutionView<'_, i64>,
-            _accepted: SolutionView<'_, i64>,
-            _buffered: Option<SolutionView<'_, i64>>,
             mutator: &mut Mutator,
-            _stats: &LocalSearchStatistics,
         ) -> bool {
             if self.cursor >= self.max_moves || self.num_vessels < 2 {
                 return false;

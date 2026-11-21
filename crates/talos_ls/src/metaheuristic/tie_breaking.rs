@@ -1,7 +1,9 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use rand::{Rng, RngExt};
+use rand::RngExt;
+use rand_core::SeedableRng;
+use rand_xoshiro::Xoshiro256PlusPlus;
 
 // ----------------------------------------------------------------
 // Tie-Breaking Strategy
@@ -54,25 +56,27 @@ impl TieBreakingStrategy for KeepLast {
 // RandomTieBreak
 // ----------------------------------------------------------------
 
-/// Breaks ties randomly with a fair coin flip.
+/// Breaks ties randomly with a fair coin flip, drawn from a generator seeded with a given number.
 ///
-/// This helps avoid deterministic cycling on flat fitness landscapes.
-#[derive(Debug)]
-pub struct RandomTieBreak<R> {
-    rng: R,
+/// This helps avoid deterministic cycling on flat fitness landscapes; the same seed flips the same coins.
+#[derive(Debug, Clone)]
+pub struct RandomTieBreak {
+    generator: Xoshiro256PlusPlus,
 }
 
-impl<R: Rng> RandomTieBreak<R> {
-    /// Creates a new random tie-breaking strategy.
+impl RandomTieBreak {
+    /// The tie-break whose coin flips are drawn from a generator seeded with `seed`.
     #[inline]
-    pub fn new(rng: R) -> Self {
-        Self { rng }
+    pub fn new(seed: u64) -> Self {
+        Self {
+            generator: Xoshiro256PlusPlus::seed_from_u64(seed),
+        }
     }
 }
 
-impl<R: Rng + std::fmt::Debug> TieBreakingStrategy for RandomTieBreak<R> {
+impl TieBreakingStrategy for RandomTieBreak {
     #[inline]
     fn break_tie(&mut self) -> bool {
-        self.rng.random()
+        self.generator.random()
     }
 }

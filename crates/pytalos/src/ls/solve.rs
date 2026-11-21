@@ -25,16 +25,7 @@ use talos_ls::{
         solution::SolutionLimitMonitor, time::TimeLimitMonitor,
     },
     objective::Objective,
-    operator::{
-        composite::RoundRobinCompoundOperator,
-        filter::{
-            inter_berth_shift_filter_unchecked, inter_berth_swap_filter_unchecked,
-            intra_berth_shift_filter_unchecked, intra_berth_swap_filter_unchecked,
-        },
-        neighborhood::LocalSearchOperator,
-        shift::{InterBerthShiftOperator, IntraBerthShiftOperator},
-        swap::{InterBerthSwapOperator, IntraBerthSwapOperator},
-    },
+    operator::{CompoundOperator, Neighborhood, NeighborhoodSelection},
     parameters::MutableLocalSearchParams,
 };
 
@@ -120,44 +111,17 @@ impl PyLocalSearchConfig {
 // Operator construction
 // ----------------------------------------------------------------
 
-fn build_operator(operators: &[PyOperator]) -> RoundRobinCompoundOperator<'static, i64> {
-    let ops: Vec<Box<dyn LocalSearchOperator<i64>>> = operators
+fn build_operator(operators: &[PyOperator]) -> CompoundOperator {
+    let neighborhoods: Vec<Neighborhood> = operators
         .iter()
-        .map(|op| -> Box<dyn LocalSearchOperator<i64>> {
-            match op {
-                PyOperator::IntraSwap => Box::new(IntraBerthSwapOperator::new(
-                    |v_a, v_b, sol, graph, model| {
-                        // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
-                        // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
-                        unsafe { intra_berth_swap_filter_unchecked(v_a, v_b, sol, graph, model) }
-                    },
-                )),
-                PyOperator::InterSwap => Box::new(InterBerthSwapOperator::new(
-                    |v_a, v_b, sol, graph, model| {
-                        // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
-                        // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
-                        unsafe { inter_berth_swap_filter_unchecked(v_a, v_b, sol, graph, model) }
-                    },
-                )),
-                PyOperator::IntraShift => Box::new(IntraBerthShiftOperator::new(
-                    |v, anchor, sol, graph, model| {
-                        // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
-                        // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
-                        unsafe { intra_berth_shift_filter_unchecked(v, anchor, sol, graph, model) }
-                    },
-                )),
-                PyOperator::InterShift => Box::new(InterBerthShiftOperator::new(
-                    |v, anchor, sol, graph, model| {
-                        // SAFETY: the operator calls its filter only from `next_neighbor`, with vessels of the
-                        // mutator's graph, which has the vessels and berths of `model`, as its `# Safety` requires.
-                        unsafe { inter_berth_shift_filter_unchecked(v, anchor, sol, graph, model) }
-                    },
-                )),
-            }
+        .map(|operator| match operator {
+            PyOperator::IntraSwap => Neighborhood::IntraBerthSwap,
+            PyOperator::InterSwap => Neighborhood::InterBerthSwap,
+            PyOperator::IntraShift => Neighborhood::IntraBerthShift,
+            PyOperator::InterShift => Neighborhood::InterBerthShift,
         })
         .collect();
-
-    RoundRobinCompoundOperator::new(ops)
+    CompoundOperator::new(&neighborhoods, NeighborhoodSelection::RoundRobin, 0)
 }
 
 // ----------------------------------------------------------------
