@@ -14,3 +14,8 @@ __pycache__
 *.so
 *.dylib
 *.pyd
+
+# Local files, not part of the repository
+/paper/
+/CLAUDE.md
+**/proptest-regressions/
