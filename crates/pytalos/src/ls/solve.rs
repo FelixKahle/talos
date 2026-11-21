@@ -112,18 +112,32 @@ fn build_neighborhoods(operators: &[PyOperator]) -> Vec<Neighborhood> {
         .collect()
 }
 
-fn build_limits(config: &PyLocalSearchConfig) -> SearchLimits {
-    SearchLimits {
-        time: config.time_limit_secs.map(Duration::from_secs_f64),
+/// The duration of `seconds`, named `name` in the error raised where it is negative, NaN or too large.
+fn duration(name: &str, seconds: Option<f64>) -> PyResult<Option<Duration>> {
+    seconds
+        .map(|seconds| {
+            Duration::try_from_secs_f64(seconds).map_err(|error| {
+                PyValueError::new_err(format!(
+                    "{name} of {seconds} seconds is no duration: {error}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn build_limits(config: &PyLocalSearchConfig) -> PyResult<SearchLimits> {
+    Ok(SearchLimits {
+        time: duration("time_limit_secs", config.time_limit_secs)?,
         iterations: config.max_iterations,
         solutions: config.max_solutions,
         cycles: config.max_cycles,
         non_improving_iterations: config.max_non_improving_iterations,
         non_improving_cycles: config.max_non_improving_cycles,
-        non_improving_time: config
-            .max_non_improving_time_secs
-            .map(Duration::from_secs_f64),
-    }
+        non_improving_time: duration(
+            "max_non_improving_time_secs",
+            config.max_non_improving_time_secs,
+        )?,
+    })
 }
 
 fn build_trigger(config: &PyGlsConfig) -> PenalizationTrigger {
@@ -137,12 +151,12 @@ fn build_trigger(config: &PyGlsConfig) -> PenalizationTrigger {
 }
 
 /// The guided local search `config` asks for, its default weights derived from the initial objective over the
-/// `features` vessel-berth pairs.
+/// `features` vessel-berth pairs; a weight or decay out of its range raises a `ValueError`.
 fn build_guided_local_search(
     config: &PyGlsConfig,
     objective: f64,
     features: usize,
-) -> GuidedLocalSearch {
+) -> PyResult<GuidedLocalSearch> {
     let base = |alpha| {
         config
             .lambda_initial
@@ -154,41 +168,64 @@ fn build_guided_local_search(
     let max = config
         .lambda_max
         .unwrap_or_else(|| heuristic_lambda(objective, features, 0.3));
+    let (increase, decrease) = (config.lambda_inc_step, config.lambda_dec_step);
     let lambda = match config.lambda_strategy {
-        PyLambdaStrategy::Static => Lambda::Static(StaticLambda::new(base(0.3))),
-        PyLambdaStrategy::Dynamic => Lambda::Dynamic(
-            DynamicLambda::new(
-                base(0.2),
-                config.lambda_inc_step,
-                config.lambda_dec_step,
-                min,
-                max,
-            )
-            .with_reset_on_best(config.reset_on_best),
-        ),
-        PyLambdaStrategy::Additive => Lambda::AdditiveDynamic(
-            AdditiveDynamicLambda::new(
-                base(0.2),
-                config.lambda_inc_step,
-                config.lambda_dec_step,
-                min,
-                max,
-            )
-            .with_reset_on_best(config.reset_on_best),
-        ),
+        PyLambdaStrategy::Static => {
+            let initial = base(0.3);
+            StaticLambda::try_new(initial)
+                .map(Lambda::Static)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "a static lambda of {initial} is not finite and positive"
+                    ))
+                })?
+        }
+        PyLambdaStrategy::Dynamic => {
+            let initial = base(0.2);
+            DynamicLambda::try_new(initial, increase, decrease, min, max)
+                .map(|lambda| Lambda::Dynamic(lambda.with_reset_on_best(config.reset_on_best)))
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "a dynamic lambda of initial {initial}, increase {increase}, decrease {decrease}, min \
+                         {min} and max {max} needs finite and positive initial, increase and min, a decrease in \
+                         (0, 1) and a finite max of at least min"
+                    ))
+                })?
+        }
+        PyLambdaStrategy::Additive => {
+            let initial = base(0.2);
+            AdditiveDynamicLambda::try_new(initial, increase, decrease, min, max)
+                .map(|lambda| {
+                    Lambda::AdditiveDynamic(lambda.with_reset_on_best(config.reset_on_best))
+                })
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "an additive lambda of initial {initial}, increase {increase}, decrease {decrease}, min \
+                         {min} and max {max} needs finite and positive initial, increase, decrease and min and a \
+                         finite max of at least min"
+                    ))
+                })?
+        }
     };
     let decay = match config.decay {
         PyDecay::NoDecay => PenaltyDecay::None,
-        PyDecay::Geometric => PenaltyDecay::Geometric(GeometricDecay::new(
-            config.decay_factor,
-            config.decay_period,
-        )),
+        PyDecay::Geometric => {
+            let (factor, period) = (config.decay_factor, config.decay_period);
+            GeometricDecay::try_new(factor, period)
+                .map(PenaltyDecay::Geometric)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "a geometric decay of factor {factor} and period {period} needs a factor in (0, 1) and a \
+                         positive period"
+                    ))
+                })?
+        }
     };
-    GuidedLocalSearch {
+    Ok(GuidedLocalSearch {
         lambda,
         decay,
         trigger: build_trigger(config),
-    }
+    })
 }
 
 // ----------------------------------------------------------------
@@ -272,12 +309,12 @@ impl PySolver {
                 gls_config,
                 inner_solution.objective_value() as f64,
                 num_vessels * num_berths,
-            ),
+            )?,
         };
         let parameters = LocalSearchParameters {
             neighborhoods: build_neighborhoods(&config.operators),
             metaheuristic: Metaheuristic::GuidedLocalSearch(guided_local_search),
-            limits: build_limits(config),
+            limits: build_limits(config)?,
             ..LocalSearchParameters::default()
         };
         let mut monitor = PyCallbackMonitor::new(callback);

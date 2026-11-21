@@ -620,6 +620,36 @@ def test_solver_out_of_bounds_berth(simple_model):
         )
 
 
+@pytest.mark.parametrize(
+    "gls_config",
+    [
+        pytalos.GlsConfig(lambda_strategy=pytalos.LambdaStrategy.Static, lambda_initial=float("inf")),
+        pytalos.GlsConfig(lambda_strategy=pytalos.LambdaStrategy.Dynamic, lambda_max=float("inf")),
+        pytalos.GlsConfig(lambda_strategy=pytalos.LambdaStrategy.Additive, lambda_inc_step=float("inf")),
+        pytalos.GlsConfig(lambda_strategy=pytalos.LambdaStrategy.Static, lambda_initial=float("nan")),
+        pytalos.GlsConfig(decay=pytalos.Decay.Geometric, decay_factor=1.5),
+    ],
+)
+def test_solver_refuses_a_penalty_setting_out_of_range(simple_model, simple_solution, gls_config):
+    """An infinite, NaN or out-of-range weight or decay is a ValueError, not a panic."""
+    solver = pytalos.Solver()
+    config = pytalos.LocalSearchConfig(operators=[pytalos.Operator.IntraSwap], max_iterations=10)
+
+    with pytest.raises(ValueError):
+        solver.solve(model=simple_model, config=config, gls_config=gls_config, solution=simple_solution)
+
+
+@pytest.mark.parametrize("seconds", [-1.0, float("nan"), float("inf"), 1e300])
+@pytest.mark.parametrize("limit", ["time_limit_secs", "max_non_improving_time_secs"])
+def test_solver_refuses_a_time_limit_that_is_no_duration(simple_model, simple_solution, limit, seconds):
+    """A negative, NaN or overflowing time limit is a ValueError, not a panic."""
+    solver = pytalos.Solver()
+    config = pytalos.LocalSearchConfig(operators=[pytalos.Operator.IntraSwap], max_iterations=10, **{limit: seconds})
+
+    with pytest.raises(ValueError):
+        solver.solve(model=simple_model, config=config, gls_config=None, solution=simple_solution)
+
+
 # ----------------------------------------------------------------------------
 # Utility Function Tests
 # ----------------------------------------------------------------------------

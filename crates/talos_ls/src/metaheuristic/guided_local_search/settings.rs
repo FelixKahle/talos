@@ -34,7 +34,7 @@ impl Default for Lambda {
     }
 }
 
-/// A penalty weight that never changes: positive.
+/// A penalty weight that never changes: finite and positive.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StaticLambda {
     pub(super) value: f64,
@@ -45,13 +45,19 @@ impl StaticLambda {
     ///
     /// # Panics
     ///
-    /// Panics if `value` is not positive.
+    /// Panics if `value` is not finite and positive.
     pub fn new(value: f64) -> Self {
-        assert!(
-            value > 0.0,
-            "called `StaticLambda::new` with {value}, which is not positive"
-        );
-        Self { value }
+        match Self::try_new(value) {
+            Some(lambda) => lambda,
+            None => {
+                panic!("called `StaticLambda::new` with {value}, which is not finite and positive")
+            }
+        }
+    }
+
+    /// The weight `value`, or `None` if it is not finite and positive.
+    pub fn try_new(value: f64) -> Option<Self> {
+        is_finite_positive(value).then_some(Self { value })
     }
 
     /// The weight.
@@ -81,29 +87,37 @@ impl DynamicLambda {
     ///
     /// # Panics
     ///
-    /// Panics if `initial`, `increase` or `min` is not positive, if `decrease` is not in `(0, 1)`, or if `max` is
-    /// below `min`.
+    /// Panics if `initial`, `increase` or `min` is not finite and positive, if `decrease` is not in `(0, 1)`, or
+    /// if `max` is not finite or below `min`.
     pub fn new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Self {
-        assert!(
-            initial > 0.0 && increase > 0.0 && min > 0.0,
-            "called `DynamicLambda::new` with initial {initial}, increase {increase} or min {min} not positive"
-        );
-        assert!(
-            decrease > 0.0 && decrease < 1.0,
-            "called `DynamicLambda::new` with decrease {decrease}, outside (0, 1)"
-        );
-        assert!(
-            max >= min,
-            "called `DynamicLambda::new` with max {max} below min {min}"
-        );
-        Self {
+        match Self::try_new(initial, increase, decrease, min, max) {
+            Some(lambda) => lambda,
+            None => panic!(
+                "called `DynamicLambda::new` with initial {initial}, increase {increase}, decrease {decrease}, min \
+                 {min} and max {max}, not finite and positive initial, increase and min, a decrease in (0, 1) and \
+                 a finite max of at least min"
+            ),
+        }
+    }
+
+    /// The weight of [`new`](Self::new), or `None` if `initial`, `increase` or `min` is not finite and positive,
+    /// if `decrease` is not in `(0, 1)`, or if `max` is not finite or below `min`.
+    pub fn try_new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Option<Self> {
+        let valid = is_finite_positive(initial)
+            && is_finite_positive(increase)
+            && decrease > 0.0
+            && decrease < 1.0
+            && is_finite_positive(min)
+            && max.is_finite()
+            && max >= min;
+        valid.then_some(Self {
             initial,
             increase,
             decrease,
             min,
             max,
             reset_on_best: false,
-        }
+        })
     }
 
     /// The same weight, which at a new best is set back to its start if `reset` holds, or shrinks otherwise.
@@ -134,25 +148,36 @@ impl AdditiveDynamicLambda {
     ///
     /// # Panics
     ///
-    /// Panics if `initial`, `increase`, `decrease` or `min` is not positive, or if `max` is below `min`.
+    /// Panics if `initial`, `increase`, `decrease` or `min` is not finite and positive, or if `max` is not finite
+    /// or below `min`.
     pub fn new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Self {
-        assert!(
-            initial > 0.0 && increase > 0.0 && decrease > 0.0 && min > 0.0,
-            "called `AdditiveDynamicLambda::new` with initial {initial}, increase {increase}, decrease {decrease} \
-             or min {min} not positive"
-        );
-        assert!(
-            max >= min,
-            "called `AdditiveDynamicLambda::new` with max {max} below min {min}"
-        );
-        Self {
+        match Self::try_new(initial, increase, decrease, min, max) {
+            Some(lambda) => lambda,
+            None => panic!(
+                "called `AdditiveDynamicLambda::new` with initial {initial}, increase {increase}, decrease \
+                 {decrease}, min {min} and max {max}, not finite and positive initial, increase, decrease and min \
+                 and a finite max of at least min"
+            ),
+        }
+    }
+
+    /// The weight of [`new`](Self::new), or `None` if `initial`, `increase`, `decrease` or `min` is not finite and
+    /// positive, or if `max` is not finite or below `min`.
+    pub fn try_new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Option<Self> {
+        let valid = is_finite_positive(initial)
+            && is_finite_positive(increase)
+            && is_finite_positive(decrease)
+            && is_finite_positive(min)
+            && max.is_finite()
+            && max >= min;
+        valid.then_some(Self {
             initial,
             increase,
             decrease,
             min,
             max,
             reset_on_best: false,
-        }
+        })
     }
 
     /// The same weight, which at a new best is set back to its start if `reset` holds, or shrinks otherwise.
@@ -186,15 +211,18 @@ impl GeometricDecay {
     ///
     /// Panics if `factor` is not in `(0, 1)` or `period` is zero.
     pub fn new(factor: f64, period: u64) -> Self {
-        assert!(
-            factor > 0.0 && factor < 1.0,
-            "called `GeometricDecay::new` with factor {factor}, outside (0, 1)"
-        );
-        assert!(
-            period >= 1,
-            "called `GeometricDecay::new` with a period of zero"
-        );
-        Self { factor, period }
+        match Self::try_new(factor, period) {
+            Some(decay) => decay,
+            None => panic!(
+                "called `GeometricDecay::new` with factor {factor} and period {period}, not a factor in (0, 1) and \
+                 a positive period"
+            ),
+        }
+    }
+
+    /// The decay of [`new`](Self::new), or `None` if `factor` is not in `(0, 1)` or `period` is zero.
+    pub fn try_new(factor: f64, period: u64) -> Option<Self> {
+        (factor > 0.0 && factor < 1.0 && period >= 1).then_some(Self { factor, period })
     }
 }
 
@@ -218,6 +246,11 @@ impl std::fmt::Display for PenalizationTrigger {
             Self::AfterMoves(moves) => write!(f, "after {moves} accepted moves"),
         }
     }
+}
+
+/// Whether `value` is a finite number above zero; NaN is not.
+fn is_finite_positive(value: f64) -> bool {
+    value.is_finite() && value > 0.0
 }
 
 /// A penalty weight from the objective of the initial schedule: `alpha * |objective| / features`, at least the
@@ -252,27 +285,109 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "called `StaticLambda::new` with 0, which is not positive")]
+    #[should_panic(
+        expected = "called `StaticLambda::new` with 0, which is not finite and positive"
+    )]
     fn test_static_lambda_refuses_zero() {
         let _ = StaticLambda::new(0.0);
     }
 
     #[test]
-    #[should_panic(expected = "called `DynamicLambda::new` with decrease 1, outside (0, 1)")]
+    #[should_panic(
+        expected = "called `DynamicLambda::new` with initial 1, increase 0.1, decrease 1,"
+    )]
     fn test_dynamic_lambda_refuses_a_decrease_of_one() {
         let _ = DynamicLambda::new(1.0, 0.1, 1.0, 0.5, 2.0);
     }
 
     #[test]
-    #[should_panic(expected = "called `AdditiveDynamicLambda::new` with max 1 below min 2")]
+    #[should_panic(
+        expected = "called `AdditiveDynamicLambda::new` with initial 1, increase 0.1, decrease 0.1, min 2 and max 1,"
+    )]
     fn test_additive_dynamic_lambda_refuses_max_below_min() {
         let _ = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 2.0, 1.0);
     }
 
     #[test]
-    #[should_panic(expected = "called `GeometricDecay::new` with factor 1, outside (0, 1)")]
+    #[should_panic(expected = "called `GeometricDecay::new` with factor 1 and period 1,")]
     fn test_geometric_decay_refuses_a_factor_of_one() {
         let _ = GeometricDecay::new(1.0, 1);
+    }
+
+    // An infinite weight makes `lambda * 0` of an unpenalized move NaN, and a run that compares NaN rejects every
+    // candidate: every constructor must refuse a value that is not finite.
+    #[test]
+    #[should_panic(expected = "called `StaticLambda::new` with inf")]
+    fn test_static_lambda_refuses_infinity() {
+        let _ = StaticLambda::new(f64::INFINITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "called `DynamicLambda::new` with")]
+    fn test_dynamic_lambda_refuses_an_infinite_bound() {
+        let _ = DynamicLambda::new(1.0, 0.1, 0.5, 0.5, f64::INFINITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "called `DynamicLambda::new` with")]
+    fn test_dynamic_lambda_refuses_an_infinite_increase() {
+        let _ = DynamicLambda::new(1.0, f64::INFINITY, 0.5, 0.5, 2.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "called `AdditiveDynamicLambda::new` with")]
+    fn test_additive_dynamic_lambda_refuses_an_infinite_bound() {
+        let _ = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 0.5, f64::INFINITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "called `AdditiveDynamicLambda::new` with")]
+    fn test_additive_dynamic_lambda_refuses_an_infinite_increase() {
+        let _ = AdditiveDynamicLambda::new(1.0, f64::INFINITY, 0.1, 0.5, 2.0);
+    }
+
+    #[test]
+    fn test_try_new_refuses_what_new_panics_on_and_keeps_the_rest() {
+        let (infinity, nan) = (f64::INFINITY, f64::NAN);
+        assert_eq!(StaticLambda::try_new(2.0), Some(StaticLambda::new(2.0)));
+        assert!(
+            [0.0, -1.0, infinity, nan]
+                .iter()
+                .all(|&value| StaticLambda::try_new(value).is_none())
+        );
+        assert!(DynamicLambda::try_new(1.0, 0.1, 0.5, 0.5, 2.0).is_some());
+        for (initial, increase, decrease, min, max) in [
+            (infinity, 0.1, 0.5, 0.5, 2.0),
+            (nan, 0.1, 0.5, 0.5, 2.0),
+            (1.0, 0.0, 0.5, 0.5, 2.0),
+            (1.0, 0.1, 1.0, 0.5, 2.0),
+            (1.0, 0.1, nan, 0.5, 2.0),
+            (1.0, 0.1, 0.5, 0.0, 2.0),
+            (1.0, 0.1, 0.5, 0.5, nan),
+            (1.0, 0.1, 0.5, 3.0, 2.0),
+        ] {
+            assert_eq!(
+                DynamicLambda::try_new(initial, increase, decrease, min, max),
+                None
+            );
+        }
+        assert!(AdditiveDynamicLambda::try_new(1.0, 0.1, 2.0, 0.5, 2.0).is_some());
+        for (initial, increase, decrease, min, max) in [
+            (1.0, 0.1, infinity, 0.5, 2.0),
+            (1.0, nan, 0.1, 0.5, 2.0),
+            (1.0, 0.1, 0.0, 0.5, 2.0),
+            (1.0, 0.1, 0.1, 0.5, infinity),
+            (1.0, 0.1, 0.1, 3.0, 2.0),
+        ] {
+            assert_eq!(
+                AdditiveDynamicLambda::try_new(initial, increase, decrease, min, max),
+                None
+            );
+        }
+        assert!(GeometricDecay::try_new(0.5, 1).is_some());
+        assert_eq!(GeometricDecay::try_new(0.5, 0), None);
+        assert_eq!(GeometricDecay::try_new(nan, 1), None);
+        assert_eq!(GeometricDecay::try_new(infinity, 1), None);
     }
 
     #[test]
