@@ -46,7 +46,7 @@ mod tests {
 
     #[test]
     fn test_walks_yield_the_ids_of_their_kind() {
-        assert_eq!(VesselIndexIter::new(2).last(), Some(VesselIndex::new(1)));
+        assert_eq!(VesselIndexIter::new(2).next_back(), Some(VesselIndex::new(1)));
         assert_eq!(BerthIndexIter::new(1).next(), Some(BerthIndex::new(0)));
     }
 }
