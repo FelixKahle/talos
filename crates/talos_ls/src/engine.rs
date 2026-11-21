@@ -6,7 +6,7 @@
 
 use crate::{
     decoding::{ScheduleState, decode_full_unchecked, decode_unchecked},
-    limits::{LimitWatch, SearchLimits},
+    limits::{Clock, LimitWatch, SearchLimits, StepCheck},
     metaheuristic::{
         AcceptanceOutcome, AcceptanceRule, GreedyDescentRule, GuidedLocalSearchRule, Metaheuristic,
         NeighborhoodExhaustionOutcome,
@@ -81,7 +81,8 @@ where
         }
     }
 
-    /// Improves `initial`, a schedule of `model`, under `parameters`, and tells `monitor` of every step.
+    /// Improves `initial`, a schedule of `model`, under `parameters`, and tells `monitor` of the coarse events of
+    /// the search.
     ///
     /// The run keeps the order of the vessels on each berth of `initial`, by start time, and decodes it: each
     /// vessel is served as early as it fits; the objective of `initial` is not read. It then scans the
@@ -246,6 +247,7 @@ where
         M: LocalSearchMonitor<T>,
     {
         self.assert_loaded_for(model);
+        rule.on_start(self.mutator.graph(), self.accepted.objective());
         Run::<'_, T, V, R, O, M> {
             engine: self,
             model,
@@ -412,20 +414,10 @@ where
             self.model,
             self.engine.progress(self.buffer, &self.statistics),
         );
-        self.rule.on_start(
-            self.engine.mutator.graph(),
-            self.engine.accepted.objective(),
-        );
-
-        let reason = loop {
-            if let Some(reason) = self.termination() {
-                break reason;
-            }
-            if let Some(reason) = self.scan() {
-                break reason;
-            }
+        let reason = match self.watch.reached(&self.statistics, Clock::Read) {
+            Some(reason) => reason,
+            None => self.scan_until_end(),
         };
-
         self.monitor
             .on_end(self.engine.progress(self.buffer, &self.statistics));
         LocalSearchOutcome {
@@ -435,11 +427,20 @@ where
         }
     }
 
-    /// The first limit reached, or the end the monitor asks for.
-    fn termination(&mut self) -> Option<TerminationReason> {
-        if let Some(reason) = self.watch.reached(&self.statistics) {
-            return Some(reason);
+    /// Asks the monitor before each scan and scans, until the monitor or a scan ends the run, with its reason.
+    fn scan_until_end(&mut self) -> TerminationReason {
+        loop {
+            if let Some(reason) = self.monitor_command() {
+                return reason;
+            }
+            if let Some(reason) = self.scan() {
+                return reason;
+            }
         }
+    }
+
+    /// The end the monitor asks for, or `None`.
+    fn monitor_command(&mut self) -> Option<TerminationReason> {
         match self
             .monitor
             .search_command(self.engine.progress(self.buffer, &self.statistics))
@@ -452,8 +453,6 @@ where
     /// Scans the neighbourhood of the accepted schedule until a candidate is accepted, the scan is exhausted and
     /// the metaheuristic restarts it, or the run ends, with its reason.
     fn scan(&mut self) -> Option<TerminationReason> {
-        self.monitor
-            .on_scan_started(self.engine.progress(self.buffer, &self.statistics));
         self.operator.prepare(
             self.engine.accepted.objective(),
             self.engine.mutator.graph(),
@@ -482,7 +481,8 @@ where
     }
 
     /// Ends an exhausted scan that started with `solutions_at_start` feasible candidates counted: commits the
-    /// candidate kept aside where the metaheuristic asks, and restarts the scan or ends the run as it decides.
+    /// candidate kept aside where the metaheuristic asks, and restarts the scan, unless the metaheuristic or a
+    /// limit ends the run; the limits are checked with the deadlines.
     ///
     /// A scan that yielded no feasible candidate, none at all or only infeasible ones, and committed nothing ends
     /// the run: the accepted schedule is unchanged, so every later scan proposes the same moves, and whether a
@@ -506,7 +506,9 @@ where
             .rule
             .on_neighborhood_exhausted(self.engine.mutator.graph())
         {
-            NeighborhoodExhaustionOutcome::Restart => None,
+            NeighborhoodExhaustionOutcome::Restart => {
+                self.watch.reached(&self.statistics, Clock::Read)
+            }
             NeighborhoodExhaustionOutcome::Terminate => {
                 Some(TerminationReason::NeighborhoodExhausted)
             }
@@ -569,11 +571,8 @@ where
         }
 
         self.statistics.total_solutions += 1;
+        self.watch.note_solution(self.statistics.total_solutions);
         let candidate_objective = self.engine.candidate.objective();
-        self.monitor.on_candidate_generated(
-            self.engine.progress(self.buffer, &self.statistics),
-            candidate_objective,
-        );
         let buffered_objective = match self.buffer {
             Buffer::Holding => Some(self.engine.buffered.objective()),
             Buffer::Empty => None,
@@ -590,7 +589,7 @@ where
         match outcome {
             AcceptanceOutcome::Accept => self.accept(),
             AcceptanceOutcome::Buffer => self.keep_aside(),
-            AcceptanceOutcome::Reject => self.reject(candidate_objective),
+            AcceptanceOutcome::Reject => self.reject(),
         }
     }
 
@@ -598,8 +597,6 @@ where
     fn discard_infeasible(&mut self) -> StepEnd {
         self.engine.mutator.rollback();
         self.statistics.infeasible_moves += 1;
-        self.monitor
-            .on_candidate_infeasible(self.engine.progress(self.buffer, &self.statistics));
         self.end_step(StepEnd::NextCandidate)
     }
 
@@ -631,29 +628,28 @@ where
         self.engine.buffer_candidate();
         self.buffer = Buffer::Holding;
         self.operator.on_kept_aside();
-        self.monitor
-            .on_solution_buffered(self.engine.progress(self.buffer, &self.statistics));
         self.engine.mutator.rollback();
         self.end_step(StepEnd::NextCandidate)
     }
 
-    /// Undoes the rejected candidate of `candidate_objective`.
-    fn reject(&mut self, candidate_objective: T) -> StepEnd {
-        self.monitor.on_candidate_rejected(
-            self.engine.progress(self.buffer, &self.statistics),
-            candidate_objective,
-        );
+    /// Undoes the rejected candidate.
+    fn reject(&mut self) -> StepEnd {
         self.engine.mutator.rollback();
         self.end_step(StepEnd::NextCandidate)
     }
 
-    /// Ends a step: tells the metaheuristic, and answers `next` unless the run ends.
+    /// Ends a step: tells the metaheuristic, and answers `next` unless a limit or, at a checkpoint, the monitor
+    /// ends the run; only a step the limits name as due is checked.
     fn end_step(&mut self, next: StepEnd) -> StepEnd {
         self.rule
             .after_step(self.engine.best.objective(), self.engine.mutator.graph());
-        match self.termination() {
-            Some(reason) => StepEnd::Terminate(reason),
-            None => next,
+        if !self.watch.is_due(self.statistics.iterations) {
+            return next;
+        }
+        match self.watch.check_step(&self.statistics) {
+            StepCheck::Reached(reason) => StepEnd::Terminate(reason),
+            StepCheck::Checkpoint => self.monitor_command().map_or(next, StepEnd::Terminate),
+            StepCheck::Continue => next,
         }
     }
 }
@@ -806,12 +802,8 @@ mod tests {
     struct CountingMonitor {
         starts: u64,
         ends: u64,
-        scans: u64,
-        generated: u64,
-        infeasible: u64,
+        commands: u64,
         accepted: u64,
-        rejected: u64,
-        buffered: u64,
         buffered_accepted: u64,
         exhausted: u64,
         bests: Vec<i64>,
@@ -824,23 +816,8 @@ mod tests {
         fn on_end(&mut self, _: SearchProgress<'_, i64>) {
             self.ends += 1;
         }
-        fn on_scan_started(&mut self, _: SearchProgress<'_, i64>) {
-            self.scans += 1;
-        }
-        fn on_candidate_generated(&mut self, _: SearchProgress<'_, i64>, _: i64) {
-            self.generated += 1;
-        }
-        fn on_candidate_infeasible(&mut self, _: SearchProgress<'_, i64>) {
-            self.infeasible += 1;
-        }
         fn on_candidate_accepted(&mut self, _: SearchProgress<'_, i64>) {
             self.accepted += 1;
-        }
-        fn on_candidate_rejected(&mut self, _: SearchProgress<'_, i64>, _: i64) {
-            self.rejected += 1;
-        }
-        fn on_solution_buffered(&mut self, _: SearchProgress<'_, i64>) {
-            self.buffered += 1;
         }
         fn on_buffered_solution_accepted(&mut self, _: SearchProgress<'_, i64>) {
             self.buffered_accepted += 1;
@@ -850,6 +827,10 @@ mod tests {
         }
         fn on_best_solution_updated(&mut self, progress: SearchProgress<'_, i64>) {
             self.bests.push(progress.best.objective_value());
+        }
+        fn search_command(&mut self, _: SearchProgress<'_, i64>) -> SearchCommand {
+            self.commands += 1;
+            SearchCommand::Continue
         }
     }
 
@@ -992,8 +973,9 @@ mod tests {
         assert_eq!(outcome.statistics.accepted_solutions, 5);
         assert_eq!(outcome.statistics.total_solutions, 5);
         assert_eq!(rule.steps, 5);
-        assert_eq!((monitor.starts, monitor.ends, monitor.scans), (1, 1, 5));
-        assert_eq!((monitor.generated, monitor.accepted), (5, 5));
+        // The monitor is asked before each of the five scans, and the run ends within the fifth.
+        assert_eq!((monitor.starts, monitor.ends, monitor.commands), (1, 1, 5));
+        assert_eq!(monitor.accepted, 5);
         // V0 first costs 0 + 5, the best: the swaps alternate between 10 and 5, never below.
         assert!(monitor.bests.is_empty());
         assert_eq!(outcome.solution.objective_value(), 5);
@@ -1014,7 +996,7 @@ mod tests {
         assert_eq!(outcome.statistics.iterations, 7);
         assert_eq!(outcome.statistics.accepted_solutions, 0);
         assert_eq!(outcome.statistics.rejected_solutions(), 7);
-        assert_eq!(monitor.rejected, 7);
+        assert_eq!(monitor.accepted, 0);
         assert_eq!(rule.steps, 7);
         assert_eq!(outcome.solution.objective_value(), 5);
         assert_eq!(outcome.solution.start_times().raw, [0, 5]);
@@ -1042,11 +1024,11 @@ mod tests {
         assert_eq!(outcome.statistics.accepted_solutions, 1);
         assert_eq!(
             (
-                monitor.buffered,
+                monitor.accepted,
                 monitor.buffered_accepted,
                 monitor.exhausted
             ),
-            (2, 1, 1)
+            (0, 1, 1)
         );
     }
 
@@ -1079,7 +1061,7 @@ mod tests {
         );
         assert_eq!(outcome.statistics.infeasible_moves, 3);
         assert_eq!(outcome.statistics.total_solutions, 0);
-        assert_eq!(monitor.infeasible, 3);
+        assert_eq!(monitor.accepted, 0);
         assert_eq!(outcome.solution.start_times().raw, [0, 5]);
     }
 
@@ -1221,18 +1203,22 @@ mod tests {
         (model, berths, (0..12).collect())
     }
 
-    /// The objectives of every candidate of a run of `parameters` on the staggered instance.
-    fn trajectory(parameters: &LocalSearchParameters) -> Vec<i64> {
+    /// The objectives of every accepted schedule of a run of `parameters` on the staggered instance, and the
+    /// statistics of the run.
+    fn trajectory(parameters: &LocalSearchParameters) -> (Vec<i64>, LocalSearchStatistics) {
         #[derive(Debug, Default)]
         struct Trajectory(Vec<i64>);
         impl LocalSearchMonitor<i64> for Trajectory {
-            fn on_candidate_generated(&mut self, _: SearchProgress<'_, i64>, objective: i64) {
-                self.0.push(objective);
+            fn on_candidate_accepted(&mut self, progress: SearchProgress<'_, i64>) {
+                self.0.push(progress.accepted.objective_value());
+            }
+            fn on_buffered_solution_accepted(&mut self, progress: SearchProgress<'_, i64>) {
+                self.0.push(progress.accepted.objective_value());
             }
         }
         let (model, berths, starts) = staggered_instance();
         let mut monitor = Trajectory::default();
-        let _ = Engine::new()
+        let outcome = Engine::new()
             .run(
                 &model,
                 SolutionView::new(&berths, &starts, 0),
@@ -1240,7 +1226,7 @@ mod tests {
                 &mut monitor,
             )
             .expect("the schedule should be one of the model");
-        monitor.0
+        (monitor.0, outcome.statistics)
     }
 
     #[test]
@@ -1252,7 +1238,7 @@ mod tests {
             ..LocalSearchParameters::default()
         };
         let first = trajectory(&parameters(1));
-        assert!(first.len() > 100);
+        assert!(first.0.len() > 10);
         assert_eq!(first, trajectory(&parameters(1)));
         assert_ne!(first, trajectory(&parameters(2)));
     }
@@ -1266,7 +1252,7 @@ mod tests {
             ..LocalSearchParameters::default()
         };
         let first = trajectory(&parameters(1));
-        assert!(first.len() > 100);
+        assert!(first.0.len() > 10);
         assert_eq!(first, trajectory(&parameters(2)));
     }
 
@@ -1289,7 +1275,7 @@ mod tests {
                 ..LocalSearchParameters::default()
             };
             let first = trajectory(&parameters);
-            assert!(!first.is_empty());
+            assert!(!first.0.is_empty());
             assert_eq!(first, trajectory(&parameters));
             let outcome = Engine::new()
                 .run(
