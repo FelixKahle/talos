@@ -187,7 +187,7 @@ def test_model_invalid_weights_length():
 
 def test_model_invalid_processing_times_length():
     """Test that model creation fails when processing_times length is wrong."""
-    with pytest.raises(ValueError, match="processing_times length"):
+    with pytest.raises(ValueError, match="processing times for 2 vessels and 2 berths"):
         pytalos.Model(
             num_vessels=2,
             num_berths=2,
