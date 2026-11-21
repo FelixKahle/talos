@@ -619,8 +619,7 @@ impl RingArena {
             Ok(slots) => slots,
             Err(outside) => panic!("called `RingArena::relocate_segment_before` with {outside}"),
         };
-        let anchor_prev = self.prev_slot(anchor);
-        self.move_range_after(first, last, anchor_prev);
+        self.move_range_before(first, last, anchor);
     }
 
     /// Moves the segment `first ..= last` to directly before `anchor`, for nodes the caller knows to lie in the
@@ -649,8 +648,7 @@ impl RingArena {
         // SAFETY: the caller promises that all three nodes lie in the arena.
         let [first, last, anchor] =
             [first, last, anchor].map(|node| unsafe { self.slot_unchecked(node) });
-        let anchor_prev = self.prev_slot(anchor);
-        self.move_range_after(first, last, anchor_prev);
+        self.move_range_before(first, last, anchor);
     }
 
     /// Reverses the order of the segment `first ..= last` within its ring.
@@ -910,6 +908,17 @@ impl RingArena {
         let anchor_next = self.next_slot(anchor);
         self.link(anchor, first);
         self.link(last, anchor_next);
+    }
+
+    /// Moves the segment `first ..= last` to directly before `anchor`.
+    fn move_range_before(&mut self, first: Slot, last: Slot, anchor: Slot) {
+        // A segment that already precedes the anchor stays; otherwise the anchor's predecessor lies outside the
+        // segment, since only `last` has a successor outside it, and the move after that predecessor is the move.
+        if self.next_slot(last) == anchor {
+            return;
+        }
+        let anchor_prev = self.prev_slot(anchor);
+        self.move_range_after(first, last, anchor_prev);
     }
 
     /// Reverses the order of the segment `first ..= last`.
@@ -1802,6 +1811,18 @@ mod tests {
     }
 
     #[test]
+    fn test_relocate_segment_before_the_node_it_already_precedes_changes_nothing() {
+        // One ring 0 -> 1 -> 2 -> 3 -> 4; the segment [1, 2] already stands directly before 3.
+        let mut arena = RingArena::new(
+            [4, 0, 1, 2, 3].map(Node::new).to_vec(),
+            [1, 2, 3, 4, 0].map(Node::new).to_vec(),
+        );
+        arena.relocate_segment_before(Node::new(1), Node::new(2), Node::new(3));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3, 4].map(Node::new));
+    }
+
+    #[test]
     fn test_relocate_segment_after_unchecked_different_ring() {
         let mut arena = complex_fixture();
         // SAFETY: every node handed over lies in the arena under test.
@@ -2471,6 +2492,7 @@ mod tests {
         RelocateBefore(usize, usize),
         Reverse(usize, usize),
         RelocateSegmentAfter(usize, usize, usize),
+        RelocateSegmentBefore(usize, usize, usize),
         SwapSegments(usize, usize, usize, usize),
     }
 
@@ -2482,6 +2504,7 @@ mod tests {
             (any(), any()).prop_map(|(a, b)| Step::RelocateBefore(a, b)),
             (any(), any()).prop_map(|(a, b)| Step::Reverse(a, b)),
             (any(), any(), any()).prop_map(|(a, b, c)| Step::RelocateSegmentAfter(a, b, c)),
+            (any(), any(), any()).prop_map(|(a, b, c)| Step::RelocateSegmentBefore(a, b, c)),
             (any(), any(), any(), any()).prop_map(|(a, b, c, d)| Step::SwapSegments(a, b, c, d)),
         ]
     }
@@ -2555,26 +2578,28 @@ mod tests {
                 // SAFETY: every node handed over lies in the arena under test.
                 unsafe { unchecked.reverse_segment_unchecked(node(a), Node::new(last)) };
             }
-            Step::RelocateSegmentAfter(a, extra, c) => {
+            Step::RelocateSegmentAfter(a, extra, c) | Step::RelocateSegmentBefore(a, extra, c) => {
                 let (ring, nodes, rest) = segment(rings, a % len, extra);
                 let anchor = c % len;
                 if nodes.contains(&anchor) {
                     return;
                 }
-                let (first, last) = (nodes[0], *nodes.last().unwrap());
+                let (first, last) = (Node::new(nodes[0]), Node::new(*nodes.last().unwrap()));
                 rings[ring] = rest;
                 let (anchor_ring, place) = locate(rings, anchor);
-                rings[anchor_ring].splice(place + 1..place + 1, nodes);
+                let after = matches!(step, Step::RelocateSegmentAfter(..));
+                let at = if after { place + 1 } else { place };
+                rings[anchor_ring].splice(at..at, nodes);
                 rings.retain(|ring| !ring.is_empty());
-                checked.relocate_segment_after(Node::new(first), Node::new(last), node(c));
-                // SAFETY: every node handed over lies in the arena under test.
-                unsafe {
-                    unchecked.relocate_segment_after_unchecked(
-                        Node::new(first),
-                        Node::new(last),
-                        node(c),
-                    )
-                };
+                if after {
+                    checked.relocate_segment_after(first, last, node(c));
+                    // SAFETY: every node handed over lies in the arena under test.
+                    unsafe { unchecked.relocate_segment_after_unchecked(first, last, node(c)) };
+                } else {
+                    checked.relocate_segment_before(first, last, node(c));
+                    // SAFETY: every node handed over lies in the arena under test.
+                    unsafe { unchecked.relocate_segment_before_unchecked(first, last, node(c)) };
+                }
             }
             Step::SwapSegments(a, a_extra, b, b_extra) => {
                 let (ring_a, nodes_a, rest_a) = segment(rings, a % len, a_extra);
