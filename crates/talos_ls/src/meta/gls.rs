@@ -269,6 +269,16 @@ impl PenaltyMemory {
         }
     }
 
+    /// Sizes the memory for `num_vessels` vessels and `num_berths` berths, with every penalty counter zero.
+    pub fn reset(&mut self, num_vessels: usize, num_berths: usize) {
+        self.edge.clear();
+        self.edge.resize((num_vessels + 1) * (num_vessels + 1), 0);
+        self.berth.clear();
+        self.berth.resize(num_vessels * num_berths, 0);
+        self.num_vessels = num_vessels;
+        self.num_berths = num_berths;
+    }
+
     /// Resets all penalty counters to zero.
     #[inline]
     pub fn clear(&mut self) {
@@ -1124,7 +1134,7 @@ where
         _initial_solution: SolutionView<T>,
         graph: &ScheduleGraph,
     ) {
-        self.memory.clear();
+        self.memory.reset(graph.num_vessels(), graph.num_berths());
         self.current_penalty_sum = self.compute_penalty_sum(graph);
         self.trigger_counter = 0;
         let obj = _initial_solution.objective_value().to_f64().unwrap_or(0.0);
@@ -1329,6 +1339,33 @@ mod tests {
         } else {
             LinkEnd::Berth(BerthIndex::new(index - num_vessels))
         }
+    }
+
+    // A search of two vessels on two berths, guided by a search made for one vessel on one berth: the penalties of
+    // the run must be counted per vessel and berth of the graph it searches, or a move of the second vessel reads
+    // past the tables.
+    #[test]
+    fn test_gls_counts_the_penalties_of_the_graph_it_searches() {
+        use crate::schedule::Mutator;
+        use talos_core::ClosedOpenInterval;
+        let model = Model::new(
+            vec![0_i64, 0],
+            vec![100, 100],
+            vec![1, 1],
+            vec![Some(5), Some(5), Some(5), Some(5)],
+            vec![vec![ClosedOpenInterval::new(0, 200)], vec![ClosedOpenInterval::new(0, 200)]],
+        );
+        let berths = [BerthIndex::new(0), BerthIndex::new(1)];
+        let starts = [0_i64, 0];
+        let view = SolutionView::new(&berths, &starts, 0);
+        let mut mutator = Mutator::new(ScheduleGraph::from_slices(&berths, &starts, 2));
+        let mut gls = GuidedLocalSearch::new(1, 1);
+        Metaheuristic::<i64>::on_start(&mut gls, &model, view, mutator.graph());
+        mutator.swap_vessels(VesselIndex::new(0), VesselIndex::new(1));
+        let outcome = gls.decide_fate(&model, view, view, None, 0, mutator.graph(), mutator.diff());
+        assert_eq!(outcome, AcceptanceOutcome::Reject);
+        assert_eq!(gls.memory().num_vessels(), 2);
+        assert_eq!(gls.memory().num_berths(), 2);
     }
 
     #[test]
