@@ -32,7 +32,7 @@ use crate::{
 };
 use rand::{Rng, RngExt, SeedableRng};
 use std::cmp::Ordering;
-use talos_core::utils::num::SolverNumeric;
+use talos_core::math::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
 // ----------------------------------------------------------------

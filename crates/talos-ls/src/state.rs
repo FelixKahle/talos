@@ -9,7 +9,7 @@
 //! position, per-berth cost, and global objective for every vessel.
 
 use crate::{sgraph::ScheduleGraph, tberth::TouchedBerths};
-use talos_core::utils::num::SolverNumeric;
+use talos_core::math::num::SolverNumeric;
 use talos_model::{
     assignment::Assignment,
     index::{BerthIndex, VesselIndex},

@@ -9,7 +9,7 @@
 //! mathematical inverses: `prev[next[v]] == v` for all `v`. Nodes can never enter or leave
 //! the graph once initialized.
 
-use crate::utils::index::{TypedIndex, TypedIndexTag};
+use crate::index::{TypedIndex, TypedIndexTag};
 use std::iter::FusedIterator;
 
 // ----------------------------------------------------------------

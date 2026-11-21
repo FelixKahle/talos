@@ -25,7 +25,7 @@ use crate::{
     stats::LocalSearchStatistics,
 };
 use std::time::{Duration, Instant};
-use talos_core::utils::num::SolverNumeric;
+use talos_core::math::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
 /// A monitor that terminates the search after a configurable stretch without

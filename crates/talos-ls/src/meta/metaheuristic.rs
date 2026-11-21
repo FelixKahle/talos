@@ -11,7 +11,7 @@ use crate::{
     exec::SearchCommand,
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
-use talos_core::utils::num::SolverNumeric;
+use talos_core::math::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
 // ----------------------------------------------------------------

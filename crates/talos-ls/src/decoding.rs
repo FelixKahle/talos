@@ -33,7 +33,7 @@ use crate::{
     state::ScheduleState,
     tberth::TouchedBerths,
 };
-use talos_core::utils::num::SolverNumeric;
+use talos_core::math::num::SolverNumeric;
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::Model,

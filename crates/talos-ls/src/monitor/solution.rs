@@ -14,7 +14,7 @@ use crate::{
     monitor::lsmonitor::LocalSearchMonitor,
     stats::LocalSearchStatistics,
 };
-use talos_core::utils::num::SolverNumeric;
+use talos_core::math::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
 /// A monitor that triggers termination once a specific number of candidate solutions

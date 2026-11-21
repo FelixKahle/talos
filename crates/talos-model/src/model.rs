@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::index::{BerthIndex, VesselIndex};
-use talos_core::{math::interval::ClosedOpenInterval, utils::num::SolverNumeric};
+use talos_core::{math::interval::ClosedOpenInterval, math::num::SolverNumeric};
 
 // ----------------------------------------------------------------
 // BerthIndexIter

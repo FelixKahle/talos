@@ -11,7 +11,7 @@
 use crate::{
     exec::SearchCommand, monitor::lsmonitor::LocalSearchMonitor, stats::LocalSearchStatistics,
 };
-use talos_core::utils::num::SolverNumeric;
+use talos_core::math::num::SolverNumeric;
 use talos_model::{model::Model, solution::SolutionView};
 
 /// A composite monitor that delegates every callback to a list of inner monitors.
