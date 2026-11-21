@@ -1451,6 +1451,8 @@ mod tests {
         three_rings().reverse_segment(Node::new(8), Node::new(1));
     }
 
+    // The precondition is checked by a `debug_assert!`, which a release build leaves out.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(
         expected = "called `RingArena::reverse_segment` with Node 5, which does not follow Node 1"
@@ -1459,6 +1461,8 @@ mod tests {
         three_rings().reverse_segment(Node::new(1), Node::new(5));
     }
 
+    // The precondition is checked by a `debug_assert!`, which a release build leaves out.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(
         expected = "called `RingArena::relocate_segment_after` with anchor Node 2 inside the segment Node 1 to Node 3"
@@ -1467,6 +1471,8 @@ mod tests {
         three_rings().relocate_segment_after(Node::new(1), Node::new(3), Node::new(2));
     }
 
+    // The precondition is checked by a `debug_assert!`, which a release build leaves out.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(
         expected = "called `RingArena::relocate_segment_before_unchecked` with anchor Node 2 inside the segment"
@@ -1482,12 +1488,16 @@ mod tests {
         };
     }
 
+    // The precondition is checked by a `debug_assert!`, which a release build leaves out.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "called `RingArena::swap_segments` with overlapping segments")]
     fn test_swap_overlapping_segments_fails_its_precondition() {
         three_rings().swap_segments(Node::new(0), Node::new(2), Node::new(1), Node::new(3));
     }
 
+    // The precondition is checked by a `debug_assert!`, which a release build leaves out.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "called `RingArena::swap_segments` with overlapping segments")]
     fn test_swap_segments_of_one_first_node_but_different_last_nodes_fails_its_precondition() {
