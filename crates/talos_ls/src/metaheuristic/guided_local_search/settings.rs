@@ -234,7 +234,8 @@ pub enum PenalizationTrigger {
     OnExhaustion,
     /// After this many steps in a row without a new best, each candidate and each exhausted scan a step.
     AfterNonImprovements(u64),
-    /// After every this many accepted moves.
+    /// After every this many accepted moves, and when a scan finds no move that lowers the augmented objective,
+    /// where no move is accepted and the count would never fire.
     AfterMoves(u64),
 }
 

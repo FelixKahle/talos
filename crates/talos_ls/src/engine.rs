@@ -660,7 +660,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        metaheuristic::{GreedyDescent, GuidedLocalSearch, MoveSelection},
+        metaheuristic::{GreedyDescent, GuidedLocalSearch, MoveSelection, PenalizationTrigger},
         monitor::NoMonitor,
         operator::{Neighborhood, NeighborhoodSelection},
     };
@@ -1270,6 +1270,49 @@ mod tests {
         let first = trajectory(&parameters(1));
         assert!(first.len() > 100);
         assert_eq!(first, trajectory(&parameters(2)));
+    }
+
+    /// The outcome of a guided local search of `trigger` on the staggered instance, ended after `cycles` exhausted
+    /// scans.
+    fn guided_search_on_staggered_instance(
+        trigger: PenalizationTrigger,
+        cycles: u64,
+    ) -> LocalSearchOutcome<i64> {
+        let (model, berths, starts) = staggered_instance();
+        let parameters = LocalSearchParameters {
+            metaheuristic: Metaheuristic::GuidedLocalSearch(GuidedLocalSearch {
+                trigger,
+                ..GuidedLocalSearch::default()
+            }),
+            limits: SearchLimits {
+                cycles: Some(cycles),
+                ..SearchLimits::default()
+            },
+            ..LocalSearchParameters::default()
+        };
+        Engine::new()
+            .run(
+                &model,
+                SolutionView::new(&berths, &starts, 0),
+                &parameters,
+                &mut NoMonitor,
+            )
+            .expect("the schedule should be one of the model")
+    }
+
+    // An exhausted scan accepted no move, so a trigger that counts accepted moves cannot fire from it: unless the
+    // exhaustion penalizes, every later scan repeats it and the search stands still until a limit ends it.
+    #[test]
+    fn test_a_guided_search_triggered_by_moves_leaves_its_first_local_optimum() {
+        let trigger = PenalizationTrigger::AfterMoves(1_000_000);
+        let first = guided_search_on_staggered_instance(trigger, 1);
+        let later = guided_search_on_staggered_instance(trigger, 10);
+        assert_eq!(
+            later.termination_reason,
+            TerminationReason::CycleLimitReached
+        );
+        assert!(first.statistics.accepted_solutions > 0);
+        assert!(later.statistics.accepted_solutions > first.statistics.accepted_solutions);
     }
 
     #[test]

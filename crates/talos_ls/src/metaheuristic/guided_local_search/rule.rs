@@ -158,8 +158,14 @@ where
         &mut self,
         graph: &ScheduleGraph,
     ) -> NeighborhoodExhaustionOutcome {
-        if self.trigger == PenalizationTrigger::OnExhaustion {
-            self.penalize(graph);
+        match self.trigger {
+            // An exhausted scan accepted no move, so a count of accepted moves cannot reach its threshold from
+            // here: without a penalty every later scan would repeat this one.
+            PenalizationTrigger::OnExhaustion | PenalizationTrigger::AfterMoves(_) => {
+                self.penalize(graph)
+            }
+            // Every candidate of the next scan is a step without a new best, so the count fires within a few scans.
+            PenalizationTrigger::AfterNonImprovements(_) => {}
         }
         NeighborhoodExhaustionOutcome::Restart
     }
