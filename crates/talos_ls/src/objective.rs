@@ -3,8 +3,9 @@
 
 //! The cost of serving one vessel at one berth from one start, which the decoder sums over a schedule.
 //!
-//! Each cost comes as a checked function and its unchecked twin; a cost is `None` where the vessel may not use the
-//! berth or would leave after its latest departure.
+//! Each cost is an unchecked function, called through a cost type by the decoder, with a checked twin the tests
+//! hold it against; a cost is `None` where the vessel may not use the berth or would leave after its latest
+//! departure.
 
 use talos_core::SolverNumeric;
 use talos_model::{BerthIndex, Model, VesselIndex};
@@ -18,7 +19,7 @@ use talos_model::{BerthIndex, Model, VesselIndex};
 /// # Panics
 ///
 /// Panics if `vessel` or `berth` is not one of `model`'s.
-#[inline(always)]
+#[cfg(test)]
 #[track_caller]
 pub fn calculate_weighted_completion_time<T>(
     model: &Model<T>,
@@ -46,6 +47,8 @@ where
 /// # Safety
 ///
 /// `vessel` and `berth` must be `model`'s, the condition [`calculate_weighted_completion_time`] checks.
+// Called by its cost type once per vessel of every berth the decoder walks; inlined, its reads of the model fuse
+// with the decoder's own.
 #[inline(always)]
 pub unsafe fn calculate_weighted_completion_time_unchecked<T>(
     model: &Model<T>,
@@ -83,7 +86,7 @@ where
 /// # Panics
 ///
 /// Panics if `vessel` or `berth` is not one of `model`'s.
-#[inline(always)]
+#[cfg(test)]
 #[track_caller]
 pub fn calculate_weighted_turnaround_time<T>(
     model: &Model<T>,
@@ -111,6 +114,8 @@ where
 /// # Safety
 ///
 /// `vessel` and `berth` must be `model`'s, the condition [`calculate_weighted_turnaround_time`] checks.
+// Called by its cost type once per vessel of every berth the decoder walks; inlined, its reads of the model fuse
+// with the decoder's own.
 #[inline(always)]
 pub unsafe fn calculate_weighted_turnaround_time_unchecked<T>(
     model: &Model<T>,

@@ -80,7 +80,6 @@ impl PySearchResult {
     }
 }
 
-#[inline(always)]
 pub fn outcome_to_py(outcome: LocalSearchOutcome<i64>, elapsed: Duration) -> PySearchResult {
     let statistics = outcome.statistics;
     PySearchResult {

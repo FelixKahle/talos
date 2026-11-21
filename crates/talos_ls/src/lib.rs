@@ -51,10 +51,7 @@ pub use metaheuristic::{
     StaticLambda, TieBreaking, heuristic_lambda,
 };
 pub use monitor::{LocalSearchMonitor, NoMonitor, SearchProgress};
-pub use objective::{
-    Objective, calculate_weighted_completion_time, calculate_weighted_completion_time_unchecked,
-    calculate_weighted_turnaround_time, calculate_weighted_turnaround_time_unchecked,
-};
+pub use objective::Objective;
 pub use operator::{MultiArmedBandit, Neighborhood, NeighborhoodSelection};
 pub use outcome::LocalSearchOutcome;
 pub use parameters::{LocalSearchError, LocalSearchParameters};

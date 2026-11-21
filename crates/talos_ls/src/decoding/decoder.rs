@@ -27,6 +27,8 @@ use talos_model::{BerthIndex, Model};
 /// # Safety
 ///
 /// `berth` must be one of `model`'s, and `first_opening` at most its count of openings.
+// Called once per vessel of every berth the decoder walks; inlined, the search of the openings stays in the
+// decoder's loop.
 #[inline(always)]
 unsafe fn earliest_start_unchecked<T>(
     model: &Model<T>,
@@ -65,6 +67,8 @@ where
 /// # Safety
 ///
 /// `berth` must be one of `model`'s, and every vessel `sequence` yields one of `model`'s and of `candidate`'s.
+// Called once per touched berth of every candidate; inlined, its walk over the berth joins the loop over the
+// touched berths.
 #[inline(always)]
 unsafe fn decode_berth_unchecked<T, C>(
     berth: BerthIndex,
