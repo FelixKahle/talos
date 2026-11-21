@@ -8,7 +8,7 @@
 //! result* (phenotype): the concrete berth assignment, start time, sequence
 //! position, per-berth cost, and global objective for every vessel.
 
-use crate::{sgraph::ScheduleGraph, tberth::TouchedBerths};
+use crate::schedule::{ScheduleGraph, TouchedBerths};
 use talos_core::SolverNumeric;
 use talos_model::{Assignment, BerthIndex, SolutionView, VesselIndex};
 

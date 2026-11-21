@@ -8,7 +8,7 @@
 //! They prune moves that are guaranteed to be infeasible or dominated,
 //! without ever discarding a move that could lead to the optimum.
 
-use crate::sgraph::ScheduleGraph;
+use crate::schedule::ScheduleGraph;
 use talos_core::SolverNumeric;
 use talos_model::{Model, SolutionView, VesselIndex};
 

@@ -31,12 +31,10 @@
 //! micro-tracker that snapshots up to four nodes' next pointers before a
 //! mutation and emits the net edge changes into the diff afterward.
 
+use super::graph::{ScheduleGraph, ScheduleGraphDiffTracker};
+use super::touched_berths::TouchedBerthsTracker;
+use super::undo_log::ScheduleGraphUndoTracker;
 use crate::ring_arena::Node;
-use crate::{
-    sgraph::{ScheduleGraph, ScheduleGraphDiffTracker},
-    sgraphundo::ScheduleGraphUndoTracker,
-    tberth::TouchedBerthsTracker,
-};
 use talos_model::{BerthIndex, VesselIndex};
 
 // ----------------------------------------------------------------
@@ -1393,9 +1391,7 @@ impl<'a> Mutator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        sgraph::ScheduleGraphDiff, sgraphundo::ScheduleGraphUndoLog, tberth::TouchedBerths,
-    };
+    use crate::schedule::{ScheduleGraphDiff, ScheduleGraphUndoLog, TouchedBerths};
 
     use super::*;
 

@@ -5,12 +5,8 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use talos_core::ClosedOpenInterval;
 use talos_ls::{
-    decoding::decode_unchecked,
-    mutator::Mutator,
-    sgraph::{ScheduleGraph, ScheduleGraphDiff},
-    sgraphundo::ScheduleGraphUndoLog,
-    state::ScheduleState,
-    tberth::TouchedBerths,
+    decoding::{ScheduleState, decode_unchecked},
+    schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff, ScheduleGraphUndoLog, TouchedBerths},
 };
 use talos_model::{BerthIndex, Model, VesselIndex};
 

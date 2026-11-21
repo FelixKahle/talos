@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
-    mutator::Mutator, operator::lsoperator::LocalSearchOperator, sgraph::ScheduleGraph,
+    operator::lsoperator::LocalSearchOperator, schedule::Mutator, schedule::ScheduleGraph,
     stats::LocalSearchStatistics,
 };
 use std::marker::PhantomData;

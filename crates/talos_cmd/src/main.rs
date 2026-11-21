@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use talos_ls::engine::Engine;
-use talos_ls::eval::calculate_weighted_turnaround_time_unchecked;
 use talos_ls::meta::gls::{
     DynamicLambda, GuidedLocalSearch, PenalizationTrigger, heuristic_lambda,
 };
 use talos_ls::monitor::composite::CompositeLocalSearchMonitor;
 use talos_ls::monitor::nimpr::NoImprovementMonitor;
 use talos_ls::monitor::time::TimeLimitMonitor;
+use talos_ls::objective::calculate_weighted_turnaround_time_unchecked;
 use talos_ls::operator::composite::RoundRobinCompoundOperator;
 use talos_ls::operator::filter::{
     inter_berth_shift_filter_unchecked, inter_berth_swap_filter_unchecked,

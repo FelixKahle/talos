@@ -2,19 +2,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
-    decoding::{decode_full_unchecked, decode_unchecked},
+    decoding::{ScheduleState, decode_full_unchecked, decode_unchecked},
     exec::{SearchCommand, TerminationReason},
     meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
     monitor::lsmonitor::LocalSearchMonitor,
-    mutator::Mutator,
     operator::lsoperator::LocalSearchOperator,
     outcome::LocalSearchOutcome,
     params::{MutableLocalSearchParams, check_initial_solution},
-    sgraph::{ScheduleGraph, ScheduleGraphDiff},
-    sgraphundo::ScheduleGraphUndoLog,
-    state::ScheduleState,
+    schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff, ScheduleGraphUndoLog, TouchedBerths},
     stats::LocalSearchStatistics,
-    tberth::TouchedBerths,
 };
 use std::time::Instant;
 use talos_core::SolverNumeric;

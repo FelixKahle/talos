@@ -59,7 +59,7 @@ use crate::{
         selec::SelectionStrategy,
         tie::{KeepFirst, TieBreakingStrategy},
     },
-    sgraph::{ScheduleGraph, ScheduleGraphDiff},
+    schedule::{ScheduleGraph, ScheduleGraphDiff},
 };
 use talos_core::SolverNumeric;
 use talos_model::{Model, SolutionView};

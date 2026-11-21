@@ -28,11 +28,8 @@
 //! bounds checks on berth and vessel indices for performance. Callers must
 //! uphold the invariants documented on each function.
 
-use crate::{
-    sgraph::{ScheduleGraph, VesselSequenceIter},
-    state::ScheduleState,
-    tberth::TouchedBerths,
-};
+use super::schedule_state::ScheduleState;
+use crate::schedule::{ScheduleGraph, TouchedBerths, VesselSequenceIter};
 use talos_core::SolverNumeric;
 use talos_model::{BerthIndex, Model, VesselIndex};
 

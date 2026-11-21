@@ -7,7 +7,7 @@
 //! and revert them when they do not improve the objective. This module
 //! provides a lightweight, allocation-free mechanism for that revert step.
 
-use crate::sgraph::ScheduleGraph;
+use super::graph::ScheduleGraph;
 use std::iter::FusedIterator;
 use talos_model::{BerthIndex, VesselIndex};
 

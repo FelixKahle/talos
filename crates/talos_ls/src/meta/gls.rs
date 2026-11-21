@@ -14,7 +14,7 @@ use crate::ring_arena::Node;
 use crate::{
     exec::SearchCommand,
     meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
-    sgraph::{ScheduleGraph, ScheduleGraphDiff},
+    schedule::{ScheduleGraph, ScheduleGraphDiff},
 };
 use num_traits::ToPrimitive;
 use talos_core::SolverNumeric;

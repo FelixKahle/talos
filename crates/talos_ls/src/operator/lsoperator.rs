@@ -20,7 +20,7 @@
 //! respect to internal state, and use `reset` to restore the starting position of the
 //! exploration sequence without re-analyzing the schedule.
 
-use crate::{mutator::Mutator, sgraph::ScheduleGraph, stats::LocalSearchStatistics};
+use crate::{schedule::Mutator, schedule::ScheduleGraph, stats::LocalSearchStatistics};
 use talos_core::SolverNumeric;
 use talos_model::{Model, SolutionView};
 

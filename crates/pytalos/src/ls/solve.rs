@@ -127,7 +127,9 @@ fn wtt_evaluator(
     // SAFETY: the engine calls its evaluator only while decoding, with a vessel of its graph and that vessel's
     // berth, which are of `model`, as the check at the door of `Engine::run` established.
     unsafe {
-        talos_ls::eval::calculate_weighted_turnaround_time_unchecked(model, vessel, berth, start)
+        talos_ls::objective::calculate_weighted_turnaround_time_unchecked(
+            model, vessel, berth, start,
+        )
     }
 }
 

@@ -27,7 +27,7 @@
 //! mutation generation and evaluation.
 
 use crate::{
-    mutator::Mutator, operator::lsoperator::LocalSearchOperator, sgraph::ScheduleGraph,
+    operator::lsoperator::LocalSearchOperator, schedule::Mutator, schedule::ScheduleGraph,
     stats::LocalSearchStatistics,
 };
 use rand::{Rng, RngExt, SeedableRng};
