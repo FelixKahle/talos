@@ -259,7 +259,9 @@ where
     /// ```
     #[inline]
     pub fn intersects(&self, other: Self) -> bool {
-        self.start_inclusive < other.end_exclusive && other.start_inclusive < self.end_exclusive
+        // Both bounds must be compared together: an empty interval inside another starts before the other ends
+        // and ends after it starts, yet shares no integer with it.
+        max(self.start_inclusive, other.start_inclusive) < min(self.end_exclusive, other.end_exclusive)
     }
 
     /// Returns `true` if the intervals share a boundary but do not overlap.
@@ -958,5 +960,14 @@ mod tests {
         assert_eq!(points.size_hint(), (3, Some(3)));
         points.next_back();
         assert_eq!(points.size_hint(), (2, Some(2)));
+    }
+
+    #[test]
+    fn test_an_empty_interval_intersects_nothing() {
+        let empty = ClosedOpenInterval::new(0, 0);
+        let around = ClosedOpenInterval::new(-1, 1);
+        assert!(!empty.intersects(around));
+        assert!(!around.intersects(empty));
+        assert_eq!(empty.intersection(around), None);
     }
 }
