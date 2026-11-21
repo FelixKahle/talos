@@ -1245,8 +1245,10 @@ impl Mutator {
 
 #[cfg(test)]
 mod tests {
+    use super::super::diff::Link;
     use super::*;
     use proptest::prelude::*;
+    use std::collections::HashMap;
 
     fn b(i: usize) -> BerthIndex {
         BerthIndex::new(i)
@@ -1737,6 +1739,43 @@ mod tests {
             .collect()
     }
 
+    /// The links of `graph`, each counted as often as it stands, the boundaries of empty berths included.
+    fn links_of(graph: &ScheduleGraph) -> HashMap<Link, usize> {
+        let mut links = HashMap::new();
+        for berth in graph.berths() {
+            let ends: Vec<_> = graph.berth_topology_iter(berth).collect();
+            for pair in ends.windows(2) {
+                *links
+                    .entry(Link {
+                        from: pair[0],
+                        to: pair[1],
+                    })
+                    .or_default() += 1;
+            }
+        }
+        links
+    }
+
+    /// `links` with every link `diff` records as broken taken out once and every created one added.
+    fn links_after_diff(
+        mut links: HashMap<Link, usize>,
+        diff: &ScheduleGraphDiff,
+    ) -> HashMap<Link, usize> {
+        for link in diff.broken_links() {
+            let count = links
+                .get_mut(&link)
+                .expect("a broken link should have stood before the move");
+            *count -= 1;
+            if *count == 0 {
+                links.remove(&link);
+            }
+        }
+        for link in diff.created_links() {
+            *links.entry(link).or_default() += 1;
+        }
+        links
+    }
+
     fn some_schedule() -> impl Strategy<Value = (Vec<usize>, usize)> {
         (1_usize..4).prop_flat_map(|num_berths| {
             (
@@ -1757,6 +1796,7 @@ mod tests {
             let start_order = order_of(&start);
             for &change in &changes {
                 let before = order_of(harness.checked.graph());
+                let links_before = links_of(harness.checked.graph());
                 for mutator in [&mut harness.checked, &mut harness.unchecked] {
                     mutator.clear_diff();
                     mutator.touched.reset();
@@ -1773,15 +1813,137 @@ mod tests {
                 let moved: Vec<_> = harness.checked.diff().reallocations().collect();
                 for vessel in 0..berths.len() {
                     let (from, to) = (locate(&before, vessel).0, locate(&after, vessel).0);
-                    let recorded = moved.iter().filter(|recorded| recorded.vessel == v(vessel)).count();
-                    prop_assert_eq!(recorded, usize::from(from != to), "{:?} and vessel {}", change, vessel);
+                    let recorded: Vec<_> = moved.iter().filter(|recorded| recorded.vessel == v(vessel)).collect();
+                    let expected: Vec<_> = if from == to { vec![] } else { vec![(b(from), b(to))] };
+                    let recorded: Vec<_> = recorded.iter().map(|moved| (moved.from, moved.to)).collect();
+                    prop_assert_eq!(recorded, expected, "{:?} and vessel {}", change, vessel);
                 }
+                prop_assert_eq!(
+                    links_after_diff(links_before, harness.checked.diff()),
+                    links_of(harness.checked.graph()),
+                    "the links before {:?}, less the broken and with the created, should be those after", change
+                );
+                prop_assert_eq!(harness.unchecked.diff(), harness.checked.diff(), "after {:?}", change);
+                prop_assert_eq!(&harness.unchecked.undo, &harness.checked.undo, "after {:?}", change);
+                prop_assert_eq!(harness.unchecked.touched(), harness.checked.touched(), "after {:?}", change);
             }
             harness.checked.rollback();
             harness.unchecked.rollback();
             prop_assert_eq!(harness.checked.graph(), &start);
             prop_assert_eq!(&order_of(harness.checked.graph()), &start_order);
             prop_assert_eq!(&order_of(harness.unchecked.graph()), &start_order);
+        }
+    }
+
+    /// A safe move of the mutator, as the refusal test calls it.
+    #[derive(Clone, Copy, Debug)]
+    enum Call {
+        SwapVessels,
+        SwapSegments,
+        ReverseSegment,
+        RelocateAfter,
+        RelocateBefore,
+        RelocateToHead,
+        RelocateToTail,
+        RelocateSegmentAfter,
+        RelocateSegmentBefore,
+        RelocateSegmentToHead,
+        RelocateSegmentToTail,
+    }
+
+    impl Call {
+        const ALL: [Self; 11] = [
+            Self::SwapVessels,
+            Self::SwapSegments,
+            Self::ReverseSegment,
+            Self::RelocateAfter,
+            Self::RelocateBefore,
+            Self::RelocateToHead,
+            Self::RelocateToTail,
+            Self::RelocateSegmentAfter,
+            Self::RelocateSegmentBefore,
+            Self::RelocateSegmentToHead,
+            Self::RelocateSegmentToTail,
+        ];
+
+        /// The number of vessels and of berths the move takes.
+        fn arity(self) -> (usize, usize) {
+            match self {
+                Self::SwapVessels
+                | Self::ReverseSegment
+                | Self::RelocateAfter
+                | Self::RelocateBefore => (2, 0),
+                Self::SwapSegments => (4, 0),
+                Self::RelocateToHead | Self::RelocateToTail => (1, 1),
+                Self::RelocateSegmentAfter | Self::RelocateSegmentBefore => (3, 0),
+                Self::RelocateSegmentToHead | Self::RelocateSegmentToTail => (2, 1),
+            }
+        }
+
+        /// Makes the move with the first vessels of `vessels` and the berth `berth`.
+        fn make(self, mutator: &mut Mutator, vessels: [VesselIndex; 4], berth: BerthIndex) {
+            let [a, b, c, d] = vessels;
+            match self {
+                Self::SwapVessels => mutator.swap_vessels(a, b),
+                Self::SwapSegments => mutator.swap_segments(a, b, c, d),
+                Self::ReverseSegment => mutator.reverse_segment(a, b),
+                Self::RelocateAfter => mutator.relocate_after(a, b),
+                Self::RelocateBefore => mutator.relocate_before(a, b),
+                Self::RelocateToHead => mutator.relocate_to_head(a, berth),
+                Self::RelocateToTail => mutator.relocate_to_tail(a, berth),
+                Self::RelocateSegmentAfter => mutator.relocate_segment_after(a, b, c),
+                Self::RelocateSegmentBefore => mutator.relocate_segment_before(a, b, c),
+                Self::RelocateSegmentToHead => mutator.relocate_segment_to_head(a, b, berth),
+                Self::RelocateSegmentToTail => mutator.relocate_segment_to_tail(a, b, berth),
+            }
+        }
+    }
+
+    /// The message of the panic `payload` carries.
+    fn message_of(payload: &(dyn std::any::Any + Send)) -> String {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_owned())
+            })
+            .unwrap_or_default()
+    }
+
+    proptest! {
+        // Every id but one is the graph's; the one outside stands at any place the move takes an id.
+        #[test]
+        fn test_safe_moves_refuse_every_id_outside_and_record_nothing(
+            call in proptest::sample::select(Call::ALL.to_vec()),
+            inside in proptest::array::uniform4(0_usize..5),
+            berth_inside in 0_usize..3,
+            place in 0_usize..5,
+            beyond in 0_usize..32,
+        ) {
+            let (num_vessels, num_berths) = call.arity();
+            let place = place % (num_vessels + num_berths);
+            let mut vessels = inside.map(v);
+            let mut berth = b(berth_inside);
+            let outside = if place < num_vessels {
+                vessels[place] = v(5 + beyond);
+                vessels[place].to_string()
+            } else {
+                berth = b(3 + beyond);
+                berth.to_string()
+            };
+            let mut mutator = setup();
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                call.make(&mut mutator, vessels, berth);
+            }));
+            let message = message_of(refused.expect_err("the move should refuse an id outside").as_ref());
+            prop_assert!(message.starts_with("called `Mutator::"), "{}", message);
+            prop_assert!(message.contains(&format!("with {outside}, outside a graph")), "{}", message);
+            prop_assert_eq!(mutator.graph(), &setup_graph());
+            prop_assert!(mutator.undo.is_empty());
+            prop_assert_eq!(mutator.diff(), &ScheduleGraphDiff::new());
+            prop_assert_eq!(mutator.touched().iter_touched_berths().len(), 0);
         }
     }
 }

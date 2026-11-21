@@ -1614,6 +1614,7 @@ impl ScheduleGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn vessel(i: usize) -> VesselIndex {
         VesselIndex::new(i)
@@ -1797,8 +1798,8 @@ mod tests {
     #[test]
     fn test_relocate_segment_before() {
         let mut graph = standard_fixture();
-        graph.relocate_segment_after(vessel(0), vessel(2), vessel(1));
-        check_berth(&graph, 0, &[1, 0, 2]);
+        graph.relocate_segment_before(vessel(2), vessel(1), vessel(0));
+        check_berth(&graph, 0, &[2, 1, 0]);
     }
 
     // The reference heads berth 1, so the node before it is the berth's sentinel, not a vessel.
@@ -2017,5 +2018,146 @@ mod tests {
         assert_eq!(graph.vessel_successor(vessel(0)), Some(vessel(2)));
         assert_eq!(graph.vessel_successor(vessel(1)), None);
         assert_eq!(graph.vessel_successor(vessel(5)), None);
+    }
+
+    /// A safe step of the graph, as the refusal test calls it.
+    #[derive(Clone, Copy, Debug)]
+    enum Call {
+        VesselBerth,
+        VesselCount,
+        VesselPredecessor,
+        VesselSuccessor,
+        VesselSequenceIter,
+        VesselSequenceRevIter,
+        BerthTopologyIter,
+        SwapVessels,
+        SwapSegments,
+        ReverseSegment,
+        RelocateAfter,
+        RelocateBefore,
+        RelocateToHead,
+        RelocateToTail,
+        RelocateSegmentAfter,
+        RelocateSegmentBefore,
+        RelocateSegmentToHead,
+        RelocateSegmentToTail,
+    }
+
+    impl Call {
+        const ALL: [Self; 18] = [
+            Self::VesselBerth,
+            Self::VesselCount,
+            Self::VesselPredecessor,
+            Self::VesselSuccessor,
+            Self::VesselSequenceIter,
+            Self::VesselSequenceRevIter,
+            Self::BerthTopologyIter,
+            Self::SwapVessels,
+            Self::SwapSegments,
+            Self::ReverseSegment,
+            Self::RelocateAfter,
+            Self::RelocateBefore,
+            Self::RelocateToHead,
+            Self::RelocateToTail,
+            Self::RelocateSegmentAfter,
+            Self::RelocateSegmentBefore,
+            Self::RelocateSegmentToHead,
+            Self::RelocateSegmentToTail,
+        ];
+
+        /// The number of vessels and of berths the step takes.
+        fn arity(self) -> (usize, usize) {
+            match self {
+                Self::VesselBerth | Self::VesselPredecessor | Self::VesselSuccessor => (1, 0),
+                Self::VesselCount
+                | Self::VesselSequenceIter
+                | Self::VesselSequenceRevIter
+                | Self::BerthTopologyIter => (0, 1),
+                Self::SwapVessels
+                | Self::ReverseSegment
+                | Self::RelocateAfter
+                | Self::RelocateBefore => (2, 0),
+                Self::SwapSegments => (4, 0),
+                Self::RelocateToHead | Self::RelocateToTail => (1, 1),
+                Self::RelocateSegmentAfter | Self::RelocateSegmentBefore => (3, 0),
+                Self::RelocateSegmentToHead | Self::RelocateSegmentToTail => (2, 1),
+            }
+        }
+
+        /// Makes the step on `graph` with the first vessels of `vessels` and the first berth of `berths`.
+        fn make(
+            self,
+            graph: &mut ScheduleGraph,
+            vessels: [VesselIndex; 4],
+            berths: [BerthIndex; 1],
+        ) {
+            let [a, b, c, d] = vessels;
+            let [berth] = berths;
+            match self {
+                Self::VesselBerth => drop(graph.vessel_berth(a)),
+                Self::VesselCount => drop(graph.vessel_count(berth)),
+                Self::VesselPredecessor => drop(graph.vessel_predecessor(a)),
+                Self::VesselSuccessor => drop(graph.vessel_successor(a)),
+                Self::VesselSequenceIter => drop(graph.vessel_sequence_iter(berth)),
+                Self::VesselSequenceRevIter => drop(graph.vessel_sequence_rev_iter(berth)),
+                Self::BerthTopologyIter => drop(graph.berth_topology_iter(berth)),
+                Self::SwapVessels => graph.swap_vessels(a, b),
+                Self::SwapSegments => graph.swap_segments(a, b, c, d),
+                Self::ReverseSegment => graph.reverse_segment(a, b),
+                Self::RelocateAfter => graph.relocate_after(a, b),
+                Self::RelocateBefore => graph.relocate_before(a, b),
+                Self::RelocateToHead => graph.relocate_to_head(a, berth),
+                Self::RelocateToTail => graph.relocate_to_tail(a, berth),
+                Self::RelocateSegmentAfter => graph.relocate_segment_after(a, b, c),
+                Self::RelocateSegmentBefore => graph.relocate_segment_before(a, b, c),
+                Self::RelocateSegmentToHead => graph.relocate_segment_to_head(a, b, berth),
+                Self::RelocateSegmentToTail => graph.relocate_segment_to_tail(a, b, berth),
+            }
+        }
+    }
+
+    /// The message of the panic `payload` carries.
+    fn message_of(payload: &(dyn std::any::Any + Send)) -> String {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                payload
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_owned())
+            })
+            .unwrap_or_default()
+    }
+
+    proptest! {
+        // Every id but one is the graph's; the one outside stands at any place the step takes an id.
+        #[test]
+        fn test_safe_steps_refuse_every_id_outside_and_change_nothing(
+            call in proptest::sample::select(Call::ALL.to_vec()),
+            inside in proptest::array::uniform4(0_usize..6),
+            berth_inside in 0_usize..4,
+            place in 0_usize..5,
+            beyond in 0_usize..32,
+        ) {
+            let (num_vessels, num_berths) = call.arity();
+            let place = place % (num_vessels + num_berths);
+            let mut vessels = inside.map(vessel);
+            let mut berths = [berth(berth_inside)];
+            let outside = if place < num_vessels {
+                vessels[place] = vessel(6 + beyond);
+                vessels[place].to_string()
+            } else {
+                berths[0] = berth(4 + beyond);
+                berths[0].to_string()
+            };
+            let mut graph = standard_fixture();
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                call.make(&mut graph, vessels, berths);
+            }));
+            let message = message_of(refused.expect_err("the step should refuse an id outside").as_ref());
+            prop_assert!(message.starts_with("called `ScheduleGraph::"), "{}", message);
+            prop_assert!(message.contains(&format!("with {outside}, outside a graph")), "{}", message);
+            prop_assert_eq!(graph, standard_fixture());
+        }
     }
 }
