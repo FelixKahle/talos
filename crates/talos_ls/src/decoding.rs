@@ -38,7 +38,8 @@ use talos_model::{BerthIndex, Model, VesselIndex};
 
 /// Finds the earliest feasible start time for a vessel on a given berth,
 /// searching forward through the berth's opening time intervals starting
-/// from `cached_index`.
+/// from `cached_index`. A start is feasible in an opening by the model's rule,
+/// `Model::earliest_start_in_opening`.
 ///
 /// Returns `Some((start_time, interval_index))` if the vessel can be scheduled,
 /// or `None` if no feasible interval exists. The returned `interval_index` can
@@ -63,26 +64,13 @@ where
 {
     debug_assert!(berth_index.index() < model.num_berths());
 
-    let min_start = if berth_free_time > vessel_arrival {
-        berth_free_time
-    } else {
-        vessel_arrival
-    };
+    let earliest = berth_free_time.max(vessel_arrival);
 
     let intervals = unsafe { model.berth_opening_times_unchecked(berth_index) };
 
-    for (offset, interval) in intervals[cached_index..].iter().enumerate() {
-        if interval.end() <= min_start {
-            continue;
-        }
-        let actual_start = if interval.start() > min_start {
-            interval.start()
-        } else {
-            min_start
-        };
-
-        if actual_start + duration <= interval.end() {
-            return Some((actual_start, cached_index + offset));
+    for (offset, &interval) in intervals[cached_index..].iter().enumerate() {
+        if let Some(start) = Model::earliest_start_in_opening(interval, earliest, duration) {
+            return Some((start, cached_index + offset));
         }
     }
     None
@@ -307,6 +295,85 @@ mod test_decoder {
             let res4 = find_earliest_start_unchecked(&model, b0, 0, 200, 0, 0);
             assert_eq!(res4, None);
         }
+    }
+
+    /// The schedule `decode_full_unchecked` makes of `graph`, with the start time as each vessel's cost.
+    fn decoded(model: &Model<i64>, graph: &ScheduleGraph) -> ScheduleState<i64> {
+        let num_vessels = model.num_vessels();
+        let mut candidate = ScheduleState::new(
+            vec![BerthIndex::new(0); num_vessels],
+            vec![0; num_vessels],
+            vec![0; num_vessels],
+            vec![0; model.num_berths()],
+            0,
+        );
+        // SAFETY: the graph and the state are of the model's vessels and berths, as each test builds them.
+        let decoded =
+            unsafe { decode_full_unchecked(graph, &mut candidate, model, mock_evaluator) };
+        assert_eq!(decoded, Some(()));
+        candidate
+    }
+
+    // Openings given as [20, 30) and [0, 10): the first vessel (length 5) fits at 0, and the second (length 8),
+    // free from 5, no longer fits [0, 10) and starts at 20.
+    #[test]
+    fn test_decode_places_vessels_in_openings_given_out_of_order() {
+        let model = Model::new(
+            vec![0, 0],
+            vec![100, 100],
+            vec![1, 1],
+            vec![Some(5), Some(8)],
+            vec![vec![
+                ClosedOpenInterval::new(20, 30),
+                ClosedOpenInterval::new(0, 10),
+            ]],
+        );
+        let graph = ScheduleGraph::from_slices(&[BerthIndex::new(0); 2], &[0, 1], 1);
+        let state = decoded(&model, &graph);
+        assert_eq!(state.vessel_start(VesselIndex::new(0)), 0);
+        assert_eq!(state.vessel_start(VesselIndex::new(1)), 20);
+        assert_eq!(model.check_feasibility(state.as_solution_view()), Ok(()));
+    }
+
+    // Openings [0, 10) and [10, 20) touch, so the berth is open on [0, 20): the first vessel (length 15) fits at
+    // 0, and the second (length 0), free from 15, starts at 15.
+    #[test]
+    fn test_decode_places_a_vessel_across_touching_openings() {
+        let model = Model::new(
+            vec![0, 0],
+            vec![100, 100],
+            vec![1, 1],
+            vec![Some(15), Some(0)],
+            vec![vec![
+                ClosedOpenInterval::new(0, 10),
+                ClosedOpenInterval::new(10, 20),
+            ]],
+        );
+        let graph = ScheduleGraph::from_slices(&[BerthIndex::new(0); 2], &[0, 1], 1);
+        let state = decoded(&model, &graph);
+        assert_eq!(state.vessel_start(VesselIndex::new(0)), 0);
+        assert_eq!(state.vessel_start(VesselIndex::new(1)), 15);
+        assert_eq!(model.check_feasibility(state.as_solution_view()), Ok(()));
+    }
+
+    // A vessel of length 0 arriving at 10, with openings [0, 10) and [20, 30): the berth is closed at 10, so the
+    // service starts at 20.
+    #[test]
+    fn test_decode_starts_a_zero_length_service_where_the_berth_is_open() {
+        let model = Model::new(
+            vec![10],
+            vec![100],
+            vec![1],
+            vec![Some(0)],
+            vec![vec![
+                ClosedOpenInterval::new(0, 10),
+                ClosedOpenInterval::new(20, 30),
+            ]],
+        );
+        let graph = ScheduleGraph::from_slices(&[BerthIndex::new(0)], &[0], 1);
+        let state = decoded(&model, &graph);
+        assert_eq!(state.vessel_start(VesselIndex::new(0)), 20);
+        assert_eq!(model.check_feasibility(state.as_solution_view()), Ok(()));
     }
 
     #[test]
