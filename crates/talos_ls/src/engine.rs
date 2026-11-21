@@ -229,6 +229,7 @@ impl<T> Engine<T> {
                 },
                 self.mutator.graph(),
             );
+            let iterations_at_scan_start = stats.iterations;
 
             'inner: loop {
                 self.mutator.clear_diff();
@@ -268,7 +269,7 @@ impl<T> Engine<T> {
                     );
 
                     // Check whether the buffered solution should be committed.
-                    if has_buffered
+                    let committed = has_buffered
                         && metaheuristic.should_commit_buffered(
                             model,
                             self.best_state.as_solution_view(),
@@ -276,8 +277,8 @@ impl<T> Engine<T> {
                             Some(self.buffered_state.as_solution_view()),
                             self.mutator.graph(),
                             &self.buffered_topology_graph,
-                        )
-                    {
+                        );
+                    if committed {
                         let was_best_obj = self.best_state.objective();
                         self.accept_buffered();
                         has_buffered = false;
@@ -319,6 +320,13 @@ impl<T> Engine<T> {
                                 &self.buffered_schedule_graph_diff,
                             );
                         }
+                    }
+
+                    // A scan that yielded no candidate and committed nothing leaves the schedule as it was, and
+                    // every later scan would see the same empty neighbourhood.
+                    if !committed && stats.iterations == iterations_at_scan_start {
+                        termination_reason = TerminationReason::NeighborhoodExhausted;
+                        break 'outer;
                     }
 
                     metaheuristic.on_iteration(
@@ -1862,6 +1870,31 @@ mod tests {
         assert_eq!(outcome.termination_reason(), TerminationReason::NeighborhoodExhausted);
         assert_eq!(outcome.stats().iterations, 1);
         assert_eq!(outcome.solution().objective_value(), 5);
+    }
+
+    // A schedule with no neighbour at all cannot change: every scan of its neighbourhood is empty, whatever the
+    // metaheuristic makes of the exhaustion. The search must end at the first empty scan instead of restarting
+    // until a budget runs out, and a budget counted in candidates would never run out.
+    #[test]
+    fn test_engine_ends_at_a_scan_without_candidates() {
+        use crate::meta::gls::GuidedLocalSearch;
+        use crate::monitor::cycle::CycleLimitMonitor;
+        let model = build_test_model();
+        let berths = [BerthIndex::new(0), BerthIndex::new(0)];
+        let start_times = [0_i64, 5];
+        let mut gls = GuidedLocalSearch::new(2, 2);
+        let params = MutableLocalSearchParams {
+            model: &model,
+            operator: &mut MockOperator::new(0),
+            metaheuristic: &mut gls,
+            monitor: CycleLimitMonitor::new(1000),
+            berths: TiSlice::from_ref(&berths),
+            start_times: TiSlice::from_ref(&start_times),
+            objective_value: 5,
+        };
+        let outcome = Engine::<i64>::new(2, 2).run(params, mock_evaluator, |_| {});
+        assert_eq!(outcome.termination_reason(), TerminationReason::NeighborhoodExhausted);
+        assert_eq!(outcome.stats().cycles, 1);
     }
 
     #[test]
