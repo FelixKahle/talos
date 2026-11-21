@@ -23,21 +23,22 @@ where
         .any(|occ| start < occ.end() && occ.start() < finish)
 }
 
-/// Returns `true` if `stay` is entirely contained within at least one of the
-/// opening-time windows for the given berth.
+/// Returns `true` if a service of `processing_time` from `start` fits one of the
+/// opening-time windows for the given berth, by the model's rule.
 #[inline]
 fn fits_in_opening_window<T>(
     model: &Model<T>,
     berth: BerthIndex,
-    stay: ClosedOpenInterval<T>,
+    start: T,
+    processing_time: T,
 ) -> bool
 where
-    T: SolverNumeric + PartialOrd + Copy,
+    T: SolverNumeric,
 {
     model
         .berth_opening_times(berth)
         .iter()
-        .any(|window| window.start() <= stay.start() && window.end() >= stay.end())
+        .any(|&window| Model::service_fits_opening(window, start, processing_time))
 }
 
 /// Collects and returns the sorted, deduplicated set of candidate start times
@@ -145,8 +146,7 @@ where
                 }
 
                 // Constraint 2: Must fit inside a berth opening window
-                let stay = ClosedOpenInterval::new(t, finish);
-                if !fits_in_opening_window(model, berth, stay) {
+                if !fits_in_opening_window(model, berth, t, pt) {
                     continue;
                 }
 
@@ -200,4 +200,28 @@ where
     }
 
     Some(Solution::new(final_berths, final_starts, total_objective))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A berth open on [0, 10) and [20, 30), and a vessel of processing time 0 that arrives at 10: the berth is
+    // closed at 10, so the earliest start at which the service fits an opening is 20.
+    #[test]
+    fn test_a_zero_length_service_does_not_start_at_the_end_of_an_opening() {
+        let model = Model::new(
+            vec![10],
+            vec![100],
+            vec![1],
+            vec![Some(0)],
+            vec![vec![
+                ClosedOpenInterval::new(0, 10),
+                ClosedOpenInterval::new(20, 30),
+            ]],
+        );
+        let schedule = generate_greedy_edf_schedule(&model).expect("the vessel should fit at 20");
+        assert_eq!(schedule.start_times().as_ref(), [20]);
+        assert_eq!(model.check_feasibility(schedule.as_view()), Ok(()));
+    }
 }
