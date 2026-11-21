@@ -444,8 +444,10 @@ where
     /// ```
     #[inline]
     pub fn midpoint(&self) -> T {
-        let len = self.end_exclusive - self.start_inclusive;
-        self.start_inclusive + (len >> 1)
+        // The shared bits plus half of the differing ones is the floor of the mean, and neither sum can
+        // leave `T`: `>>` on a signed integer is arithmetic.
+        let (start, end) = (self.start_inclusive, self.end_exclusive);
+        (start & end) + ((start ^ end) >> 1)
     }
 
     /// Returns the gap between two strictly disjoint intervals.
@@ -944,5 +946,11 @@ mod tests {
             Bound::Excluded(&x) => assert_eq!(x, 10),
             _ => panic!("Wrong end bound"),
         }
+    }
+
+    #[test]
+    fn test_midpoint_of_the_widest_interval_does_not_overflow() {
+        let widest = ClosedOpenInterval::new(i64::MIN, i64::MAX);
+        assert_eq!(widest.midpoint(), -1);
     }
 }
