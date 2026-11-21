@@ -167,20 +167,20 @@ where
     match error {
         ModelError::TooManyVessels { count } => ModelError::TooManyVessels { count },
         ModelError::TooManyBerths { count } => ModelError::TooManyBerths { count },
-        ModelError::LatestDepartureTimesLength { len, vessel_count } => {
-            ModelError::LatestDepartureTimesLength { len, vessel_count }
+        ModelError::LatestDepartureTimesLength { len, num_vessels } => {
+            ModelError::LatestDepartureTimesLength { len, num_vessels }
         }
-        ModelError::WeightsLength { len, vessel_count } => {
-            ModelError::WeightsLength { len, vessel_count }
+        ModelError::WeightsLength { len, num_vessels } => {
+            ModelError::WeightsLength { len, num_vessels }
         }
         ModelError::ProcessingTimesLength {
             len,
-            vessel_count,
-            berth_count,
+            num_vessels,
+            num_berths,
         } => ModelError::ProcessingTimesLength {
             len,
-            vessel_count,
-            berth_count,
+            num_vessels,
+            num_berths,
         },
         ModelError::NegativeProcessingTime {
             vessel,

@@ -107,13 +107,12 @@ where
         processing_times: Vec<Option<T>>,
         openings: Vec<Vec<ClosedOpenInterval<T>>>,
     ) -> Result<Self, ModelError<T>> {
-        let vessel_count = arrival_times.len();
-        let berth_count = openings.len();
+        let num_vessels = arrival_times.len();
+        let num_berths = openings.len();
 
-        check_counts(vessel_count, berth_count)?;
-        check_vessel_columns(vessel_count, &latest_departure_times, &weights)?;
-        let processing_times =
-            processing_time_column(&processing_times, vessel_count, berth_count)?;
+        check_counts(num_vessels, num_berths)?;
+        check_vessel_columns(num_vessels, &latest_departure_times, &weights)?;
+        let processing_times = processing_time_column(&processing_times, num_vessels, num_berths)?;
 
         Ok(Self {
             arrival_times: TiVec::from(arrival_times),
@@ -133,7 +132,7 @@ where
     /// The number of berths.
     #[inline]
     pub fn num_berths(&self) -> usize {
-        self.openings.berth_count()
+        self.openings.num_berths()
     }
 
     /// The ids of every vessel, in increasing order.
@@ -345,14 +344,12 @@ where
 /// # Errors
 ///
 /// [`ModelError::TooManyVessels`] or [`ModelError::TooManyBerths`].
-fn check_counts<T>(vessel_count: usize, berth_count: usize) -> Result<(), ModelError<T>> {
-    if !ids_can_name(vessel_count) {
-        return Err(ModelError::TooManyVessels {
-            count: vessel_count,
-        });
+fn check_counts<T>(num_vessels: usize, num_berths: usize) -> Result<(), ModelError<T>> {
+    if !ids_can_name(num_vessels) {
+        return Err(ModelError::TooManyVessels { count: num_vessels });
     }
-    if !ids_can_name(berth_count) {
-        return Err(ModelError::TooManyBerths { count: berth_count });
+    if !ids_can_name(num_berths) {
+        return Err(ModelError::TooManyBerths { count: num_berths });
     }
     Ok(())
 }
@@ -368,20 +365,20 @@ fn ids_can_name(count: usize) -> bool {
 ///
 /// [`ModelError::LatestDepartureTimesLength`] or [`ModelError::WeightsLength`].
 fn check_vessel_columns<T>(
-    vessel_count: usize,
+    num_vessels: usize,
     latest_departure_times: &[T],
     weights: &[T],
 ) -> Result<(), ModelError<T>> {
-    if latest_departure_times.len() != vessel_count {
+    if latest_departure_times.len() != num_vessels {
         return Err(ModelError::LatestDepartureTimesLength {
             len: latest_departure_times.len(),
-            vessel_count,
+            num_vessels,
         });
     }
-    if weights.len() != vessel_count {
+    if weights.len() != num_vessels {
         return Err(ModelError::WeightsLength {
             len: weights.len(),
-            vessel_count,
+            num_vessels,
         });
     }
     Ok(())
@@ -395,22 +392,22 @@ fn check_vessel_columns<T>(
 /// [`ModelError::NegativeProcessingTime`] for the first time below zero.
 fn processing_time_column<T>(
     processing_times: &[Option<T>],
-    vessel_count: usize,
-    berth_count: usize,
+    num_vessels: usize,
+    num_berths: usize,
 ) -> Result<Vec<ProcessingTime<T>>, ModelError<T>>
 where
     T: SolverNumeric,
 {
     // No vector holds more entries than a `usize` counts, so a product beyond it matches no length.
-    if vessel_count.checked_mul(berth_count) != Some(processing_times.len()) {
+    if num_vessels.checked_mul(num_berths) != Some(processing_times.len()) {
         return Err(ModelError::ProcessingTimesLength {
             len: processing_times.len(),
-            vessel_count,
-            berth_count,
+            num_vessels,
+            num_berths,
         });
     }
 
-    // An entry exists only where the product, and so `berth_count`, is positive, so the division is defined; the
+    // An entry exists only where the product, and so `num_berths`, is positive, so the division is defined; the
     // quotient and the remainder are below the counts, which ids can name.
     processing_times
         .iter()
@@ -418,8 +415,8 @@ where
         .map(|(entry, &time)| match time {
             Some(processing_time) if processing_time < T::ZERO => {
                 Err(ModelError::NegativeProcessingTime {
-                    vessel: VesselIndex::new(entry / berth_count),
-                    berth: BerthIndex::new(entry % berth_count),
+                    vessel: VesselIndex::new(entry / num_berths),
+                    berth: BerthIndex::new(entry % num_berths),
                     processing_time,
                 })
             }
@@ -502,7 +499,7 @@ where
 
     /// The number of berths.
     #[inline]
-    fn berth_count(&self) -> usize {
+    fn num_berths(&self) -> usize {
         self.offsets.len() - 1
     }
 
@@ -522,13 +519,13 @@ where
     ///
     /// # Safety
     ///
-    /// `berth` must be one of the berths, below [`berth_count`](Openings::berth_count).
+    /// `berth` must be one of the berths, below [`num_berths`](Openings::num_berths).
     #[inline]
     unsafe fn of_berth_unchecked(&self, berth: BerthIndex) -> &[ClosedOpenInterval<T>] {
         debug_assert!(
-            berth.index() < self.berth_count(),
+            berth.index() < self.num_berths(),
             "called `Openings::of_berth_unchecked` with {berth}, beyond the {} berths",
-            self.berth_count()
+            self.num_berths()
         );
         // SAFETY: `berth` is below the berth count, as the caller guarantees, so `offsets` holds the entries at it
         // and after it, and they bound a range of `intervals`, as the invariant of `Openings` states.
@@ -587,23 +584,23 @@ pub enum ModelError<T> {
         /// The number of latest departure times given.
         len: usize,
         /// The number of vessels, that of the arrival times.
-        vessel_count: usize,
+        num_vessels: usize,
     },
     /// The weights are not one per vessel.
     WeightsLength {
         /// The number of weights given.
         len: usize,
         /// The number of vessels, that of the arrival times.
-        vessel_count: usize,
+        num_vessels: usize,
     },
     /// The processing times are not one per pair of a vessel and a berth.
     ProcessingTimesLength {
         /// The number of processing times given.
         len: usize,
         /// The number of vessels, that of the arrival times.
-        vessel_count: usize,
+        num_vessels: usize,
         /// The number of berths, that of the openings.
-        berth_count: usize,
+        num_berths: usize,
     },
     /// A processing time is below zero.
     NegativeProcessingTime {
@@ -636,19 +633,19 @@ where
                     u32::MAX
                 )
             }
-            Self::LatestDepartureTimesLength { len, vessel_count } => {
-                write!(f, "{len} latest departure times for {vessel_count} vessels")
+            Self::LatestDepartureTimesLength { len, num_vessels } => {
+                write!(f, "{len} latest departure times for {num_vessels} vessels")
             }
-            Self::WeightsLength { len, vessel_count } => {
-                write!(f, "{len} weights for {vessel_count} vessels")
+            Self::WeightsLength { len, num_vessels } => {
+                write!(f, "{len} weights for {num_vessels} vessels")
             }
             Self::ProcessingTimesLength {
                 len,
-                vessel_count,
-                berth_count,
+                num_vessels,
+                num_berths,
             } => write!(
                 f,
-                "{len} processing times for {vessel_count} vessels and {berth_count} berths, which need one per pair"
+                "{len} processing times for {num_vessels} vessels and {num_berths} berths, which need one per pair"
             ),
             Self::NegativeProcessingTime {
                 vessel,
@@ -797,7 +794,7 @@ mod tests {
             error,
             ModelError::LatestDepartureTimesLength {
                 len: 1,
-                vessel_count: 2
+                num_vessels: 2
             }
         );
     }
@@ -816,7 +813,7 @@ mod tests {
             error,
             ModelError::WeightsLength {
                 len: 3,
-                vessel_count: 2
+                num_vessels: 2
             }
         );
     }
@@ -835,8 +832,8 @@ mod tests {
             error,
             ModelError::ProcessingTimesLength {
                 len: 3,
-                vessel_count: 2,
-                berth_count: 2
+                num_vessels: 2,
+                num_berths: 2
             }
         );
     }
@@ -905,8 +902,8 @@ mod tests {
             error,
             ModelError::ProcessingTimesLength {
                 len: 0,
-                vessel_count: usize::MAX,
-                berth_count: 2
+                num_vessels: usize::MAX,
+                num_berths: 2
             }
         );
     }
@@ -924,8 +921,8 @@ mod tests {
         );
         let length: ModelError<i64> = ModelError::ProcessingTimesLength {
             len: 3,
-            vessel_count: 2,
-            berth_count: 2,
+            num_vessels: 2,
+            num_berths: 2,
         };
         assert_eq!(
             length.to_string(),
@@ -982,7 +979,7 @@ mod tests {
     #[test]
     fn test_openings_of_berths_without_any_are_empty() {
         let openings = Openings::new(&[vec![], vec![interval(0, 5)], vec![]]);
-        assert_eq!(openings.berth_count(), 3);
+        assert_eq!(openings.num_berths(), 3);
         assert_eq!(openings.of_berth(BerthIndex::new(0)), []);
         assert_eq!(openings.of_berth(BerthIndex::new(1)), [interval(0, 5)]);
         assert_eq!(openings.of_berth(BerthIndex::new(2)), []);
@@ -1010,13 +1007,13 @@ mod tests {
 
     /// A small model, with a processing time absent wherever its seed is odd.
     fn small_model() -> impl Strategy<Value = Model<i64>> {
-        (0usize..5, 0usize..5).prop_flat_map(|(vessel_count, berth_count)| {
+        (0usize..5, 0usize..5).prop_flat_map(|(num_vessels, num_berths)| {
             (
-                prop::collection::vec(0i64..100, vessel_count),
-                prop::collection::vec(0i64..100, vessel_count),
-                prop::collection::vec(0i64..100, vessel_count),
-                prop::collection::vec(0i64..100, vessel_count * berth_count),
-                prop::collection::vec(intervals_within_forty(), berth_count),
+                prop::collection::vec(0i64..100, num_vessels),
+                prop::collection::vec(0i64..100, num_vessels),
+                prop::collection::vec(0i64..100, num_vessels),
+                prop::collection::vec(0i64..100, num_vessels * num_berths),
+                prop::collection::vec(intervals_within_forty(), num_berths),
             )
                 .prop_map(|(arrivals, departures, weights, seeds, openings)| {
                     let processing = seeds
