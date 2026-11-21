@@ -11,7 +11,6 @@
 //! moving a vessel right after one whose window lies wholly before its own keeps the forced order, and may still be
 //! a move an optimum needs, which such a neighbourhood then does not propose.
 
-use crate::schedule::ScheduleGraph;
 use talos_core::SolverNumeric;
 use talos_model::{BerthIndex, Model, VesselIndex};
 
@@ -75,52 +74,6 @@ where
     unsafe { windows_overlap_unchecked(first, second, model) }
 }
 
-/// Whether swapping `first` and `second`, which lie on different berths, may help: each may use the other's
-/// berth.
-///
-/// # Safety
-///
-/// `first` and `second` must be vessels of `graph`, and `graph` must have the vessels and berths of `model`.
-#[inline]
-pub(super) unsafe fn inter_berth_swap_filter_unchecked<T>(
-    first: VesselIndex,
-    second: VesselIndex,
-    graph: &ScheduleGraph,
-    model: &Model<T>,
-) -> bool
-where
-    T: SolverNumeric,
-{
-    debug_assert!(
-        first.index() < graph.num_vessels() && second.index() < graph.num_vessels(),
-        "called `inter_berth_swap_filter_unchecked` with {first} or {second}, outside the graph"
-    );
-    // SAFETY: both vessels are the graph's, the precondition of this function.
-    let (first_berth, second_berth) = unsafe {
-        (
-            graph.vessel_berth_unchecked(first),
-            graph.vessel_berth_unchecked(second),
-        )
-    };
-    debug_assert!(
-        first.index() < model.num_vessels()
-            && second.index() < model.num_vessels()
-            && first_berth.index() < model.num_berths()
-            && second_berth.index() < model.num_berths(),
-        "called `inter_berth_swap_filter_unchecked` with a graph whose vessels or berths are not the model's"
-    );
-    // SAFETY: the vessels are the graph's and their berths are berths of the graph, whose vessels and berths are
-    // the model's, the precondition of this function.
-    unsafe {
-        model
-            .vessel_processing_time_unchecked(first, second_berth)
-            .is_some()
-            && model
-                .vessel_processing_time_unchecked(second, first_berth)
-                .is_some()
-    }
-}
-
 /// Whether moving `vessel` right after `anchor`, on the berth they share, is proposed: their windows overlap.
 ///
 /// A shift after an anchor whose window lies wholly before the vessel's own keeps the order the windows force and
@@ -175,13 +128,14 @@ where
     unsafe { windows_overlap_unchecked(vessel, head, model) }
 }
 
-/// Whether moving `vessel` onto `berth`, another berth than its own, may help: `vessel` may use `berth`.
+/// Whether a move that takes `vessel` onto `berth`, another berth than its own, may help: `vessel` may use
+/// `berth`. A swap across two berths is proposed where each vessel may use the other's berth.
 ///
 /// # Safety
 ///
 /// `vessel` and `berth` must be `model`'s.
 #[inline]
-pub(super) unsafe fn inter_berth_shift_filter_unchecked<T>(
+pub(super) unsafe fn inter_berth_filter_unchecked<T>(
     vessel: VesselIndex,
     berth: BerthIndex,
     model: &Model<T>,
@@ -191,7 +145,7 @@ where
 {
     debug_assert!(
         vessel.index() < model.num_vessels() && berth.index() < model.num_berths(),
-        "called `inter_berth_shift_filter_unchecked` with {vessel} or {berth}, outside the model"
+        "called `inter_berth_filter_unchecked` with {vessel} or {berth}, outside the model"
     );
     // SAFETY: the vessel and the berth are the model's, the precondition of this function.
     unsafe { model.vessel_processing_time_unchecked(vessel, berth) }.is_some()
@@ -255,33 +209,28 @@ mod tests {
     }
 
     #[test]
-    fn test_inter_berth_filters_refuse_a_berth_the_vessel_may_not_use() {
+    fn test_the_filter_between_berths_refuses_a_berth_the_vessel_may_not_use() {
         let model = three_vessels();
-        // V0 and V2 on B0, V1 on B1.
-        let berths = [BerthIndex::new(0), BerthIndex::new(1), BerthIndex::new(0)];
-        let graph = ScheduleGraph::from_slices(&berths, &[0_i64, 0, 1], 2);
-        // SAFETY: every vessel named is the graph's, and the graph has the vessels and berths of the model.
+        // SAFETY: every vessel and berth named is the model's.
         unsafe {
-            assert!(!inter_berth_swap_filter_unchecked(
+            assert!(inter_berth_filter_unchecked(
                 vessel(0),
-                vessel(1),
-                &graph,
+                BerthIndex::new(0),
                 &model
             ));
-            assert!(inter_berth_swap_filter_unchecked(
-                vessel(2),
-                vessel(1),
-                &graph,
-                &model
-            ));
-            assert!(!inter_berth_shift_filter_unchecked(
+            assert!(!inter_berth_filter_unchecked(
                 vessel(0),
                 BerthIndex::new(1),
                 &model
             ));
-            assert!(inter_berth_shift_filter_unchecked(
+            assert!(inter_berth_filter_unchecked(
                 vessel(1),
                 BerthIndex::new(0),
+                &model
+            ));
+            assert!(inter_berth_filter_unchecked(
+                vessel(2),
+                BerthIndex::new(1),
                 &model
             ));
         }

@@ -4,8 +4,9 @@
 //! The neighbourhoods a search explores, and the operator the engine draws its candidate moves from.
 
 use super::{
-    shift::{InterBerthShiftOperator, IntraBerthShiftOperator},
-    swap::{InterBerthSwapOperator, IntraBerthSwapOperator},
+    scan::VesselScan,
+    shift::{InterBerthShifts, IntraBerthShifts},
+    swap::{InterBerthSwaps, IntraBerthSwaps},
 };
 use crate::schedule::{Mutator, ScheduleGraph};
 use talos_core::SolverNumeric;
@@ -13,21 +14,25 @@ use talos_model::Model;
 
 /// A kind of move from one schedule to its neighbours.
 ///
-/// Each neighbourhood proposes its moves in a fixed order and skips a move its filter refuses: where the instance
-/// rules it out, and on one berth wherever the move sets a vessel next to one whose window from arrival to latest
-/// departure does not overlap its own. For a swap and a move to the head of a berth that refuses only infeasible
-/// moves, unless both vessels take no time to serve; for a move after another vessel it may skip a move an optimum
-/// needs.
-/// Together the two shifts insert a vessel at every place of every berth: after any vessel, at the head of any
-/// berth, and onto an empty berth.
+/// Each neighbourhood proposes its moves in a fixed order, vessel by vessel in increasing order, and skips a move
+/// its filter refuses: where the instance rules it out, and on one berth wherever the move sets a vessel next to
+/// one whose window from arrival to latest departure does not overlap its own. For a swap and a move to the head of
+/// a berth that refuses only infeasible moves, unless both vessels take no time to serve; for a move after another
+/// vessel it may skip a move an optimum needs.
+///
+/// No two moves of the four neighbourhoods make the same schedule: the swap of two neighbours on a berth is
+/// [`IntraBerthSwap`](Self::IntraBerthSwap)'s alone, and the shifts on one berth move a vessel by at least two
+/// places. Together the swaps on one berth and the two shifts insert a vessel at every place of every berth: after
+/// any vessel, at the head of any berth, and onto an empty berth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Neighborhood {
     /// Exchange two vessels on one berth whose windows from arrival to latest departure overlap.
     IntraBerthSwap,
     /// Exchange two vessels on different berths that may each use the other's berth.
     InterBerthSwap,
-    /// Move a vessel to another place of its berth: right after another vessel whose window overlaps its own, or
-    /// to the head of the berth before a vessel whose window overlaps its own.
+    /// Move a vessel at least two places along its berth: right after another vessel whose window overlaps its
+    /// own, or to the head of the berth before a vessel whose window overlaps its own. A move by one place is the
+    /// swap of two neighbours, which [`IntraBerthSwap`](Self::IntraBerthSwap) proposes.
     IntraBerthShift,
     /// Move a vessel onto another berth that it may use: right after one of its vessels, or to its head, an empty
     /// berth included.
@@ -83,20 +88,20 @@ pub enum AcceptedMove {
 /// The scan of one neighbourhood, with its place in the scan.
 #[derive(Debug, Clone)]
 pub(super) enum NeighborhoodOperator {
-    IntraBerthSwap(IntraBerthSwapOperator),
-    InterBerthSwap(InterBerthSwapOperator),
-    IntraBerthShift(IntraBerthShiftOperator),
-    InterBerthShift(InterBerthShiftOperator),
+    IntraBerthSwap(VesselScan<IntraBerthSwaps>),
+    InterBerthSwap(VesselScan<InterBerthSwaps>),
+    IntraBerthShift(VesselScan<IntraBerthShifts>),
+    InterBerthShift(VesselScan<InterBerthShifts>),
 }
 
 impl NeighborhoodOperator {
     /// The scan of `neighborhood`, which proposes no move until it is prepared for a graph.
     pub(super) fn new(neighborhood: Neighborhood) -> Self {
         match neighborhood {
-            Neighborhood::IntraBerthSwap => Self::IntraBerthSwap(IntraBerthSwapOperator::new()),
-            Neighborhood::InterBerthSwap => Self::InterBerthSwap(InterBerthSwapOperator::new()),
-            Neighborhood::IntraBerthShift => Self::IntraBerthShift(IntraBerthShiftOperator::new()),
-            Neighborhood::InterBerthShift => Self::InterBerthShift(InterBerthShiftOperator::new()),
+            Neighborhood::IntraBerthSwap => Self::IntraBerthSwap(VesselScan::new()),
+            Neighborhood::InterBerthSwap => Self::InterBerthSwap(VesselScan::new()),
+            Neighborhood::IntraBerthShift => Self::IntraBerthShift(VesselScan::new()),
+            Neighborhood::InterBerthShift => Self::InterBerthShift(VesselScan::new()),
         }
     }
 
@@ -149,5 +154,47 @@ impl NeighborhoodOperator {
                 unsafe { operator.next_neighbor_unchecked(model, mutator) }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::reference::{self, OVERLAPPING_WINDOWS, Order};
+    use super::*;
+    use std::collections::BTreeMap;
+
+    // A round of the four neighbourhoods proposes every feasible neighbour of the start once: no two moves of any
+    // two neighbourhoods make the same order, and every order one swap or one insertion makes, that decodes to a
+    // feasible schedule, is proposed. The windows all overlap, so only the berths a vessel may not use rule a
+    // neighbour out.
+    #[test]
+    fn test_a_round_of_the_neighborhoods_proposes_each_feasible_neighbor_once() {
+        let model = reference::model(&OVERLAPPING_WINDOWS);
+        let mut mutator = Mutator::new(reference::start_graph());
+        let mut proposed: BTreeMap<Order, Vec<Neighborhood>> = BTreeMap::new();
+        for neighborhood in Neighborhood::ALL {
+            let mut operator = NeighborhoodOperator::new(neighborhood);
+            operator.prepare(mutator.graph());
+            // No neighbourhood holds more than a move per vessel and per place, 7 * (7 + 5) of them.
+            for _ in 0..=84 {
+                // SAFETY: the mutator's graph, rolled back after each move, has the counts the operator was
+                // prepared for, which are the model's.
+                if !unsafe { operator.next_neighbor_unchecked(&model, &mut mutator) } {
+                    break;
+                }
+                let order = reference::order_of(mutator.graph());
+                proposed.entry(order).or_default().push(neighborhood);
+                mutator.rollback();
+            }
+        }
+        let duplicates: Vec<_> = proposed.iter().filter(|(_, by)| by.len() > 1).collect();
+        assert!(
+            duplicates.is_empty(),
+            "proposed more than once: {duplicates:?}"
+        );
+        let orders: Vec<Order> = proposed.into_keys().collect();
+        assert_eq!(orders, reference::feasible_neighbors(&model));
+        // Ten swaps and twelve shifts on B0, six swaps and forty-two shifts across berths.
+        assert_eq!(orders.len(), 10 + 6 + 12 + 42);
     }
 }

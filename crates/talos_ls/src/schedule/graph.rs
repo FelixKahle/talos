@@ -186,6 +186,7 @@ enum Step {
     VesselBerth,
     VesselCount,
     VesselPredecessor,
+    VesselsAfter,
     VesselSequenceIter,
     BerthTopologyIter,
     #[cfg(test)]
@@ -202,6 +203,7 @@ impl fmt::Display for Step {
             Self::VesselBerth => "vessel_berth",
             Self::VesselCount => "vessel_count",
             Self::VesselPredecessor => "vessel_predecessor",
+            Self::VesselsAfter => "vessels_after",
             Self::VesselSequenceIter => "vessel_sequence_iter",
             Self::BerthTopologyIter => "berth_topology_iter",
             #[cfg(test)]
@@ -681,6 +683,48 @@ impl ScheduleGraph {
         self.node_vessel(node)
     }
 
+    /// The vessels after `vessel` on its berth, from the one directly after it to the tail.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `vessel` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn vessels_after(&self, vessel: VesselIndex) -> VesselSequenceIter<'_> {
+        self.check(Step::VesselsAfter, [vessel], []);
+        // SAFETY: `vessel` is the graph's, as the check above found.
+        unsafe { self.vessels_after_unchecked(vessel) }
+    }
+
+    /// The vessels after `vessel` on its berth, from the one directly after it to the tail, for a vessel the
+    /// caller knows to be the graph's.
+    ///
+    /// # Safety
+    ///
+    /// `vessel` must be one of the graph's, the condition [`vessels_after`](Self::vessels_after) checks.
+    #[inline(always)]
+    pub unsafe fn vessels_after_unchecked(&self, vessel: VesselIndex) -> VesselSequenceIter<'_> {
+        debug_assert!(
+            vessel.index() < self.num_vessels(),
+            "called `ScheduleGraph::vessels_after_unchecked` with {vessel}, outside a graph of {} vessels",
+            self.num_vessels()
+        );
+        // SAFETY: `vessel` is the graph's, the precondition of this function.
+        let berth = unsafe { self.vessel_berth_unchecked(vessel) };
+        let sentinel = self.sentinel_of(berth);
+        // SAFETY: `vessel` is the graph's, the precondition of this function, and `berth` was read from its column
+        // of berths, so the vessel's node, the berth's sentinel and the node read after the vessel's lie in the
+        // arena by the invariant of `ScheduleGraph`.
+        let inner = unsafe {
+            let after = self.arena.next_unchecked(node_of(vessel));
+            self.arena.sequence_unchecked(after, sentinel)
+        };
+        VesselSequenceIter {
+            inner,
+            num_vessels: self.num_vessels(),
+        }
+    }
+
     /// The vessels of `berth`, from its head to its tail.
     ///
     /// # Panics
@@ -928,6 +972,15 @@ mod tests {
                 Some(vessel(pair[0]))
             );
         }
+        for (place, &v) in expected.iter().enumerate() {
+            let after: Vec<usize> = graph.vessels_after(vessel(v)).map(|v| v.index()).collect();
+            assert_eq!(after, expected[place + 1..], "the vessels after {v}");
+            // SAFETY: `v` stands on the berth, so it is one of the graph's.
+            let unchecked: Vec<usize> = unsafe { graph.vessels_after_unchecked(vessel(v)) }
+                .map(|v| v.index())
+                .collect();
+            assert_eq!(unchecked, after, "the vessels after {v}, unchecked");
+        }
         if let Some(&head) = expected.first() {
             assert_eq!(graph.vessel_predecessor(vessel(head)), None);
         }
@@ -1158,6 +1211,7 @@ mod tests {
         VesselBerth,
         VesselCount,
         VesselPredecessor,
+        VesselsAfter,
         VesselSequenceIter,
         BerthTopologyIter,
         SwapVessels,
@@ -1166,10 +1220,11 @@ mod tests {
     }
 
     impl Call {
-        const ALL: [Self; 8] = [
+        const ALL: [Self; 9] = [
             Self::VesselBerth,
             Self::VesselCount,
             Self::VesselPredecessor,
+            Self::VesselsAfter,
             Self::VesselSequenceIter,
             Self::BerthTopologyIter,
             Self::SwapVessels,
@@ -1180,7 +1235,7 @@ mod tests {
         /// The number of vessels and of berths the step takes.
         fn arity(self) -> (usize, usize) {
             match self {
-                Self::VesselBerth | Self::VesselPredecessor => (1, 0),
+                Self::VesselBerth | Self::VesselPredecessor | Self::VesselsAfter => (1, 0),
                 Self::VesselCount | Self::VesselSequenceIter | Self::BerthTopologyIter => (0, 1),
                 Self::SwapVessels | Self::RelocateAfter => (2, 0),
                 Self::RelocateToHead => (1, 1),
@@ -1200,6 +1255,7 @@ mod tests {
                 Self::VesselBerth => drop(graph.vessel_berth(a)),
                 Self::VesselCount => drop(graph.vessel_count(berth)),
                 Self::VesselPredecessor => drop(graph.vessel_predecessor(a)),
+                Self::VesselsAfter => drop(graph.vessels_after(a)),
                 Self::VesselSequenceIter => drop(graph.vessel_sequence_iter(berth)),
                 Self::BerthTopologyIter => drop(graph.berth_topology_iter(berth)),
                 Self::SwapVessels => graph.swap_vessels(a, b),

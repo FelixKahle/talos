@@ -4,91 +4,19 @@
 //! The neighbourhoods that insert one vessel at another place: on its own berth, or on another.
 //!
 //! A place is where a link of a berth starts: right after a vessel, or at the head of a berth. Every place of
-//! every berth is so reachable, the head of a berth and an empty berth included.
+//! every berth is so reachable, the head of a berth and an empty berth included. A vessel's places are proposed
+//! in increasing order of the vessel they follow and then of the berth whose head they are. On its own berth a
+//! vessel walks only that berth; onto other berths it reads the berth of every other vessel, a plain pass over a
+//! column.
 
 use super::filter::{
-    inter_berth_shift_filter_unchecked, intra_berth_shift_filter_unchecked,
+    inter_berth_filter_unchecked, intra_berth_shift_filter_unchecked,
     intra_berth_shift_to_head_filter_unchecked,
 };
+use super::scan::VesselMoves;
 use crate::schedule::{LinkEnd, Mutator, ScheduleGraph};
-use std::iter::FusedIterator;
 use talos_core::SolverNumeric;
-use talos_model::{BerthIndex, Model, VesselIndex};
-
-/// The placements of a graph of `num_vessels` vessels and `num_berths` berths: each vessel paired with every place
-/// it could be inserted at, right after every other vessel and then at the head of every berth, in increasing
-/// order of the vessel, then of the place, the vessels before the berths.
-#[derive(Debug, Clone)]
-struct PlacementsIter {
-    /// The vessels of the graph.
-    num_vessels: usize,
-    /// The berths of the graph.
-    num_berths: usize,
-    /// The vessel of the next placement, or `num_vessels` once every placement is given.
-    vessel: usize,
-    /// The place of the next placement: the vessel of this index below `num_vessels`, the head of berth
-    /// `place - num_vessels` from there, and `num_vessels + num_berths` once the placements of `vessel` are given.
-    place: usize,
-}
-
-impl PlacementsIter {
-    /// The placements of a graph of `num_vessels` vessels and `num_berths` berths, from the first.
-    fn new(num_vessels: usize, num_berths: usize) -> Self {
-        Self {
-            num_vessels,
-            num_berths,
-            vessel: 0,
-            place: 0,
-        }
-    }
-}
-
-impl Iterator for PlacementsIter {
-    type Item = (VesselIndex, LinkEnd);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // A vessel is no place of its own: one step past it lands on a place that is not, as places are distinct.
-        if self.place == self.vessel {
-            self.place += 1;
-        }
-        // Past its last place, the next vessel starts at place 0, which is not itself, as it is at least 1.
-        if self.place >= self.num_vessels + self.num_berths {
-            self.vessel += 1;
-            self.place = 0;
-        }
-        if self.vessel >= self.num_vessels {
-            return None;
-        }
-        let place = self.place;
-        self.place += 1;
-        let anchor = match place.checked_sub(self.num_vessels) {
-            None => LinkEnd::Vessel(VesselIndex::new(place)),
-            Some(berth) => LinkEnd::Berth(BerthIndex::new(berth)),
-        };
-        Some((VesselIndex::new(self.vessel), anchor))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.len();
-        (len, Some(len))
-    }
-}
-
-impl ExactSizeIterator for PlacementsIter {
-    fn len(&self) -> usize {
-        if self.vessel >= self.num_vessels {
-            return 0;
-        }
-        // Each vessel has every place but itself; the current one those from `place` on, itself excepted if it
-        // lies among them.
-        let num_places = self.num_vessels + self.num_berths;
-        let current =
-            num_places.saturating_sub(self.place) - usize::from(self.vessel >= self.place);
-        current + (self.num_vessels - self.vessel - 1) * (num_places - 1)
-    }
-}
-
-impl FusedIterator for PlacementsIter {}
+use talos_model::{Model, VesselIndex};
 
 /// Moves `vessel` to the place `anchor` names: right after a vessel, or at the head of a berth.
 ///
@@ -122,525 +50,327 @@ unsafe fn insert_unchecked(mutator: &mut Mutator, vessel: VesselIndex, anchor: L
     }
 }
 
-/// The insertions of a vessel at another place of its own berth, right after another vessel whose window overlaps
-/// its own or at the head before a vessel whose window overlaps its own, in the order of the placements.
-///
-/// A berth of `k` vessels offers each of them `k - 1` places, so the neighbourhood holds at most the sum of
-/// `k * (k - 1)` over the berths before its filter; each move touches one berth.
-#[derive(Debug, Clone)]
-pub(super) struct IntraBerthShiftOperator {
-    placements: PlacementsIter,
+/// Whether `vessel` and the vessel or berth of `anchor` are the graph's.
+fn names_only_ids_of(graph: &ScheduleGraph, vessel: VesselIndex, anchor: LinkEnd) -> bool {
+    let anchor_inside = match anchor {
+        LinkEnd::Vessel(anchor) => anchor.index() < graph.num_vessels(),
+        LinkEnd::Berth(berth) => berth.index() < graph.num_berths(),
+    };
+    vessel.index() < graph.num_vessels() && anchor_inside
 }
 
-impl IntraBerthShiftOperator {
-    /// The operator, which proposes no move until it is prepared for a graph.
-    pub(super) fn new() -> Self {
-        Self {
-            placements: PlacementsIter::new(0, 0),
-        }
-    }
+/// The places of a vessel's own berth that an insertion on that berth leaves out: the one it holds, and the two
+/// that would only exchange it with a neighbour.
+///
+/// Inserting a vessel at the place it holds, right after its predecessor or at the head it holds, changes nothing.
+/// Inserting it right after its successor, or at the place before its predecessor, exchanges it with that
+/// neighbour: the swap of two neighbours, which [`IntraBerthSwaps`](super::swap::IntraBerthSwaps) proposes, under a
+/// filter that refuses only infeasible swaps unless both take no time to serve. Every other place moves the vessel
+/// by at least two places, a rotation of three vessels or more that no other place and no swap makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NearPlaces {
+    /// The place the vessel holds: right after its predecessor, or the head of its berth.
+    held: LinkEnd,
+    /// The place before its predecessor, or `None` if it heads its berth.
+    before_predecessor: Option<LinkEnd>,
+    /// Its successor, or `None` if it is the tail of its berth.
+    successor: Option<VesselIndex>,
+}
 
-    /// Starts the neighbourhood of `graph` from its first move.
-    pub(super) fn prepare(&mut self, graph: &ScheduleGraph) {
-        self.placements = PlacementsIter::new(graph.num_vessels(), graph.num_berths());
-    }
-
-    /// Makes the next move of the neighbourhood on the graph of `mutator` and answers `true`, or answers `false`
-    /// and changes nothing once the neighbourhood is exhausted.
+impl NearPlaces {
+    /// The near places of `vessel`.
     ///
     /// # Safety
     ///
-    /// The graph of `mutator` must count the vessels and berths of the graph the operator was last prepared for,
-    /// and have the vessels and berths of `model`.
-    pub(super) unsafe fn next_neighbor_unchecked<T>(
-        &mut self,
-        model: &Model<T>,
-        mutator: &mut Mutator,
-    ) -> bool
-    where
-        T: SolverNumeric,
-    {
-        for (vessel, anchor) in &mut self.placements {
-            // SAFETY: the placements count the vessels and berths of the graph, which are the model's, the
-            // precondition of this function.
-            if unsafe { Self::proposes_unchecked(vessel, anchor, mutator.graph(), model) } {
-                // SAFETY: the placements count the vessels and berths of the graph, the precondition of this
-                // function.
-                unsafe { insert_unchecked(mutator, vessel, anchor) };
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Whether the neighbourhood proposes inserting `vessel` at `anchor`: a place of its own berth it does not
-    /// already hold, beside a vessel whose window overlaps its own.
-    ///
-    /// # Safety
-    ///
-    /// `vessel` and the vessel or berth of `anchor` must be the graph's, and the graph must have the vessels and
-    /// berths of `model`.
-    #[inline(always)] // Called once per placement of the scan, and the scan's loop is its only caller.
-    unsafe fn proposes_unchecked<T>(
-        vessel: VesselIndex,
-        anchor: LinkEnd,
-        graph: &ScheduleGraph,
-        model: &Model<T>,
-    ) -> bool
-    where
-        T: SolverNumeric,
-    {
+    /// `vessel` must be the graph's.
+    #[inline(always)] // Called once per vessel of the scan on one berth, whose gathering is its only caller.
+    unsafe fn of_unchecked(vessel: VesselIndex, graph: &ScheduleGraph) -> Self {
         debug_assert!(
-            vessel.index() < graph.num_vessels()
-                && graph.num_vessels() == model.num_vessels()
-                && graph.num_berths() == model.num_berths(),
-            "called `IntraBerthShiftOperator::proposes_unchecked` with {vessel} outside the graph, or a graph \
-             whose counts are not the model's"
+            vessel.index() < graph.num_vessels(),
+            "called `NearPlaces::of_unchecked` with {vessel}, outside a graph of {} vessels",
+            graph.num_vessels()
         );
         // SAFETY: `vessel` is the graph's, the precondition of this function.
-        let (berth, predecessor) = unsafe {
+        let (berth, predecessor, successor) = unsafe {
             (
                 graph.vessel_berth_unchecked(vessel),
                 graph.vessel_predecessor_unchecked(vessel),
+                graph.vessels_after_unchecked(vessel).next(),
             )
         };
-        match anchor {
-            LinkEnd::Vessel(anchor) => {
-                debug_assert!(
-                    anchor.index() < graph.num_vessels(),
-                    "called `IntraBerthShiftOperator::proposes_unchecked` with anchor {anchor}, outside a graph of {} \
-                     vessels",
-                    graph.num_vessels()
-                );
-                // SAFETY: `anchor` is the graph's, the precondition of this function.
-                let anchor_berth = unsafe { graph.vessel_berth_unchecked(anchor) };
-                if anchor_berth != berth || predecessor == Some(anchor) {
-                    return false;
-                }
-                debug_assert!(
-                    anchor.index() < model.num_vessels(),
-                    "called `IntraBerthShiftOperator::proposes_unchecked` with anchor {anchor}, outside a model of {} \
-                     vessels",
-                    model.num_vessels()
-                );
-                // SAFETY: both vessels are the graph's, whose vessels are the model's, the precondition of this
-                // function.
-                unsafe { intra_berth_shift_filter_unchecked(vessel, anchor, model) }
-            }
-            LinkEnd::Berth(target) => {
-                if target != berth || predecessor.is_none() {
-                    return false;
-                }
-                debug_assert!(
-                    berth.index() < graph.num_berths(),
-                    "called `IntraBerthShiftOperator::proposes_unchecked` with a graph that puts {vessel} on {berth}, \
-                     outside its {} berths",
-                    graph.num_berths()
-                );
-                // SAFETY: `berth` was read from the graph's column of berths, so it is one of its berths
-                // (`ScheduleGraph`).
-                let head = unsafe { graph.vessel_sequence_iter_unchecked(berth) }.next();
-                // The berth holds `vessel`, so it has a head; the walk yields only vessels of the graph, whose
-                // vessels are the model's, the precondition of this function.
-                head.is_some_and(|head| {
-                    debug_assert!(
-                        head.index() < model.num_vessels(),
-                        "called `IntraBerthShiftOperator::proposes_unchecked` with a graph whose head {head} of \
-                         {berth} is outside a model of {} vessels",
-                        model.num_vessels()
-                    );
-                    // SAFETY: `vessel` is the graph's by the precondition of this function, and `head` was yielded
-                    // by a walk of the graph, which yields only its vessels (`VesselSequenceIter`); the graph's
-                    // vessels are the model's, the precondition of this function.
-                    unsafe { intra_berth_shift_to_head_filter_unchecked(vessel, head, model) }
-                })
-            }
+        let place_after =
+            |vessel: Option<VesselIndex>| vessel.map_or(LinkEnd::Berth(berth), LinkEnd::Vessel);
+        let before_predecessor = predecessor.map(|predecessor| {
+            debug_assert!(
+                predecessor.index() < graph.num_vessels(),
+                "called `NearPlaces::of_unchecked` with a graph whose {predecessor} is outside its {} vessels",
+                graph.num_vessels()
+            );
+            // SAFETY: the predecessor was read from the graph's links, which name only its vessels
+            // (`ScheduleGraph`).
+            place_after(unsafe { graph.vessel_predecessor_unchecked(predecessor) })
+        });
+        Self {
+            held: place_after(predecessor),
+            before_predecessor,
+            successor,
         }
+    }
+
+    /// Whether inserting the vessel at `place` is left out.
+    #[inline(always)]
+    fn contains(&self, place: LinkEnd) -> bool {
+        place == self.held
+            || Some(place) == self.before_predecessor
+            || self
+                .successor
+                .is_some_and(|successor| place == LinkEnd::Vessel(successor))
     }
 }
 
-/// The insertions of a vessel on another berth that it may use, right after a vessel of that berth or at its
-/// head, in the order of the placements.
+/// The insertions of a vessel at another place of its own berth, at least two places from where it stands: right
+/// after each vessel of the berth whose window overlaps its own, in increasing order of that vessel, then at the
+/// head before a vessel whose window overlaps its own.
+///
+/// A berth of `k` vessels offers its vessels `(k - 1) * (k - 2)` such places in all, the head among them, so the
+/// neighbourhood holds at most the sum of that over the berths before its filter; each move touches one berth.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct IntraBerthShifts;
+
+impl VesselMoves for IntraBerthShifts {
+    type Target = LinkEnd;
+
+    #[inline]
+    unsafe fn gather_unchecked<T>(
+        vessel: VesselIndex,
+        graph: &ScheduleGraph,
+        model: &Model<T>,
+        targets: &mut Vec<LinkEnd>,
+    ) where
+        T: SolverNumeric,
+    {
+        debug_assert!(
+            vessel.index() < graph.num_vessels() && graph.num_vessels() == model.num_vessels(),
+            "called `IntraBerthShifts::gather_unchecked` with {vessel} outside the graph, or a graph whose vessels \
+             are not the model's"
+        );
+        // SAFETY: `vessel` is the graph's, the precondition of this function.
+        let berth = unsafe { graph.vessel_berth_unchecked(vessel) };
+        // SAFETY: `vessel` is the graph's, the precondition of this function.
+        let near = unsafe { NearPlaces::of_unchecked(vessel, graph) };
+        debug_assert!(
+            berth.index() < graph.num_berths(),
+            "called `IntraBerthShifts::gather_unchecked` with a graph that puts {vessel} on {berth}, outside its {} \
+             berths",
+            graph.num_berths()
+        );
+        // SAFETY: `berth` was read from the graph's column of berths, so it is one of its berths (`ScheduleGraph`).
+        let berth_mates = unsafe { graph.vessel_sequence_iter_unchecked(berth) };
+        let first = targets.len();
+        let mut head = None;
+        for anchor in berth_mates {
+            head = head.or(Some(anchor));
+            if anchor == vessel || near.contains(LinkEnd::Vessel(anchor)) {
+                continue;
+            }
+            debug_assert!(
+                anchor.index() < model.num_vessels(),
+                "called `IntraBerthShifts::gather_unchecked` with a graph whose {anchor} is outside a model of {} \
+                 vessels",
+                model.num_vessels()
+            );
+            // SAFETY: `vessel` is the graph's by the precondition of this function, and the walk yields only the
+            // graph's vessels (`VesselSequenceIter`); the graph's vessels are the model's, the precondition of this
+            // function.
+            if unsafe { intra_berth_shift_filter_unchecked(vessel, anchor, model) } {
+                targets.push(LinkEnd::Vessel(anchor));
+            }
+        }
+        // The walk gives the berth's order; the scan's order is that of the index.
+        targets[first..].sort_unstable_by_key(|place| match place {
+            LinkEnd::Vessel(anchor) => anchor.index(),
+            LinkEnd::Berth(_) => usize::MAX,
+        });
+        // The berth holds `vessel`, so it has a head.
+        if let Some(head) = head
+            && !near.contains(LinkEnd::Berth(berth))
+        {
+            debug_assert!(
+                head.index() < model.num_vessels(),
+                "called `IntraBerthShifts::gather_unchecked` with a graph whose head {head} of {berth} is outside a \
+                 model of {} vessels",
+                model.num_vessels()
+            );
+            // SAFETY: `vessel` is the graph's by the precondition of this function, and the walk yields only the
+            // graph's vessels (`VesselSequenceIter`); the graph's vessels are the model's, the precondition of this
+            // function.
+            if unsafe { intra_berth_shift_to_head_filter_unchecked(vessel, head, model) } {
+                targets.push(LinkEnd::Berth(berth));
+            }
+        }
+    }
+
+    #[inline(always)] // Called once per proposed move, and only forwards to one move.
+    unsafe fn make_unchecked(mutator: &mut Mutator, vessel: VesselIndex, anchor: LinkEnd) {
+        debug_assert!(
+            names_only_ids_of(mutator.graph(), vessel, anchor),
+            "called `IntraBerthShifts::make_unchecked` with {vessel} or {anchor}, outside the graph"
+        );
+        // SAFETY: the vessel and the place are the graph's, the precondition of this function.
+        unsafe { insert_unchecked(mutator, vessel, anchor) }
+    }
+}
+
+/// The insertions of a vessel on each other berth that it may use: right after each vessel of such a berth, in
+/// increasing order of that vessel, then at the head of each such berth, an empty one included, in increasing
+/// order of the berth.
 ///
 /// A vessel on a berth of `k` vessels has `n - k` vessels and `m - 1` heads of other berths to go to, in a schedule
 /// of `n` vessels and `m` berths, so the neighbourhood holds at most `n * (n - 1)`, less the sum of `k * (k - 1)`
 /// over the berths, plus `n * (m - 1)` moves before its filter; each move touches two berths.
-#[derive(Debug, Clone)]
-pub(super) struct InterBerthShiftOperator {
-    placements: PlacementsIter,
-}
+#[derive(Debug, Clone, Copy)]
+pub(super) struct InterBerthShifts;
 
-impl InterBerthShiftOperator {
-    /// The operator, which proposes no move until it is prepared for a graph.
-    pub(super) fn new() -> Self {
-        Self {
-            placements: PlacementsIter::new(0, 0),
-        }
-    }
+impl VesselMoves for InterBerthShifts {
+    type Target = LinkEnd;
 
-    /// Starts the neighbourhood of `graph` from its first move.
-    pub(super) fn prepare(&mut self, graph: &ScheduleGraph) {
-        self.placements = PlacementsIter::new(graph.num_vessels(), graph.num_berths());
-    }
-
-    /// Makes the next move of the neighbourhood on the graph of `mutator` and answers `true`, or answers `false`
-    /// and changes nothing once the neighbourhood is exhausted.
-    ///
-    /// # Safety
-    ///
-    /// The graph of `mutator` must count the vessels and berths of the graph the operator was last prepared for,
-    /// and have the vessels and berths of `model`.
-    pub(super) unsafe fn next_neighbor_unchecked<T>(
-        &mut self,
-        model: &Model<T>,
-        mutator: &mut Mutator,
-    ) -> bool
-    where
-        T: SolverNumeric,
-    {
-        for (vessel, anchor) in &mut self.placements {
-            // SAFETY: the placements count the vessels and berths of the graph, which are the model's, the
-            // precondition of this function.
-            if unsafe { Self::proposes_unchecked(vessel, anchor, mutator.graph(), model) } {
-                // SAFETY: the placements count the vessels and berths of the graph, the precondition of this
-                // function.
-                unsafe { insert_unchecked(mutator, vessel, anchor) };
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Whether the neighbourhood proposes inserting `vessel` at `anchor`: a place of another berth, which
-    /// `vessel` may use.
-    ///
-    /// # Safety
-    ///
-    /// `vessel` and the vessel or berth of `anchor` must be the graph's, and the graph must have the vessels and
-    /// berths of `model`.
-    #[inline(always)] // Called once per placement of the scan, and the scan's loop is its only caller.
-    unsafe fn proposes_unchecked<T>(
+    #[inline]
+    unsafe fn gather_unchecked<T>(
         vessel: VesselIndex,
-        anchor: LinkEnd,
         graph: &ScheduleGraph,
         model: &Model<T>,
-    ) -> bool
-    where
+        targets: &mut Vec<LinkEnd>,
+    ) where
         T: SolverNumeric,
     {
         debug_assert!(
             vessel.index() < graph.num_vessels()
                 && graph.num_vessels() == model.num_vessels()
                 && graph.num_berths() == model.num_berths(),
-            "called `InterBerthShiftOperator::proposes_unchecked` with {vessel} outside the graph, or a graph \
-             whose counts are not the model's"
+            "called `InterBerthShifts::gather_unchecked` with {vessel} outside the graph, or a graph whose counts \
+             are not the model's"
         );
-        let target = match anchor {
-            LinkEnd::Vessel(anchor) => {
-                debug_assert!(
-                    anchor.index() < graph.num_vessels(),
-                    "called `InterBerthShiftOperator::proposes_unchecked` with anchor {anchor}, outside a graph of {} \
-                     vessels",
-                    graph.num_vessels()
-                );
-                // SAFETY: `anchor` is the graph's, the precondition of this function.
-                unsafe { graph.vessel_berth_unchecked(anchor) }
-            }
-            LinkEnd::Berth(berth) => berth,
-        };
         // SAFETY: `vessel` is the graph's, the precondition of this function.
-        if unsafe { graph.vessel_berth_unchecked(vessel) } == target {
-            return false;
+        let own = unsafe { graph.vessel_berth_unchecked(vessel) };
+        for anchor in graph.vessels() {
+            debug_assert!(
+                anchor.index() < graph.num_vessels(),
+                "called `InterBerthShifts::gather_unchecked` with {anchor}, beyond the graph's {} vessels",
+                graph.num_vessels()
+            );
+            // SAFETY: `anchor` is below the graph's count of vessels, the bound of the walk.
+            let berth = unsafe { graph.vessel_berth_unchecked(anchor) };
+            debug_assert!(
+                berth.index() < model.num_berths(),
+                "called `InterBerthShifts::gather_unchecked` with a graph that puts {anchor} on {berth}, outside the \
+                 model"
+            );
+            // SAFETY: `vessel` is the graph's by the precondition of this function and `berth` was read from its
+            // column of berths (`ScheduleGraph`); the graph's vessels and berths are the model's, the precondition of
+            // this function.
+            if berth != own && unsafe { inter_berth_filter_unchecked(vessel, berth, model) } {
+                targets.push(LinkEnd::Vessel(anchor));
+            }
         }
+        for berth in graph.berths() {
+            debug_assert!(
+                berth.index() < model.num_berths(),
+                "called `InterBerthShifts::gather_unchecked` with a graph of more berths than the model"
+            );
+            // SAFETY: `vessel` is the graph's by the precondition of this function and `berth` one of its berths,
+            // and the graph's vessels and berths are the model's, the precondition of this function.
+            if berth != own && unsafe { inter_berth_filter_unchecked(vessel, berth, model) } {
+                targets.push(LinkEnd::Berth(berth));
+            }
+        }
+    }
+
+    #[inline(always)] // Called once per proposed move, and only forwards to one move.
+    unsafe fn make_unchecked(mutator: &mut Mutator, vessel: VesselIndex, anchor: LinkEnd) {
         debug_assert!(
-            target.index() < model.num_berths(),
-            "called `InterBerthShiftOperator::proposes_unchecked` with a place on {target}, outside a model of {} \
-             berths",
-            model.num_berths()
+            names_only_ids_of(mutator.graph(), vessel, anchor),
+            "called `InterBerthShifts::make_unchecked` with {vessel} or {anchor}, outside the graph"
         );
-        // SAFETY: `vessel` is the graph's and `target` one of its berths, read from its column of berths or the
-        // precondition of this function, and the graph's vessels and berths are the model's.
-        unsafe { inter_berth_shift_filter_unchecked(vessel, target, model) }
+        // SAFETY: the vessel and the place are the graph's, the precondition of this function.
+        unsafe { insert_unchecked(mutator, vessel, anchor) }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::reference::{self, OVERLAPPING_WINDOWS, WINDOWS};
     use super::*;
-    use talos_core::ClosedOpenInterval;
+    use talos_model::BerthIndex;
 
-    fn vessel(index: usize) -> LinkEnd {
-        LinkEnd::Vessel(VesselIndex::new(index))
+    fn vessel(index: usize) -> VesselIndex {
+        VesselIndex::new(index)
     }
 
-    fn head(index: usize) -> LinkEnd {
-        LinkEnd::Berth(BerthIndex::new(index))
+    /// The near places of `index` in the start of the reference.
+    fn near_places_of(index: usize) -> NearPlaces {
+        let graph = reference::start_graph();
+        // SAFETY: every vessel of the reference is the graph's.
+        unsafe { NearPlaces::of_unchecked(vessel(index), &graph) }
     }
 
+    // On B0: V0 -> V1 -> V2 -> V3 -> V4, and V5 alone on B1.
     #[test]
-    fn test_placements_pair_each_vessel_with_every_other_vessel_and_every_head_in_order() {
-        let placements: Vec<(usize, LinkEnd)> = PlacementsIter::new(3, 2)
-            .map(|(moved, anchor)| (moved.index(), anchor))
-            .collect();
+    fn test_the_near_places_are_the_held_one_and_those_of_a_swap_with_a_neighbour() {
+        let head = LinkEnd::Berth(BerthIndex::new(0));
+        let after = |index| LinkEnd::Vessel(vessel(index));
         let expected = [
-            (0, vessel(1)),
-            (0, vessel(2)),
-            (0, head(0)),
-            (0, head(1)),
-            (1, vessel(0)),
-            (1, vessel(2)),
-            (1, head(0)),
-            (1, head(1)),
-            (2, vessel(0)),
-            (2, vessel(1)),
-            (2, head(0)),
-            (2, head(1)),
+            (0, head, None, Some(1)),
+            (1, after(0), Some(head), Some(2)),
+            (2, after(1), Some(after(0)), Some(3)),
+            (4, after(3), Some(after(2)), None),
         ];
-        assert_eq!(placements, expected);
+        for (index, held, before_predecessor, successor) in expected {
+            let near = near_places_of(index);
+            assert_eq!(
+                near,
+                NearPlaces {
+                    held,
+                    before_predecessor,
+                    successor: successor.map(vessel)
+                },
+                "the near places of V{index}"
+            );
+        }
+        let alone = near_places_of(5);
+        assert!(alone.contains(LinkEnd::Berth(BerthIndex::new(1))));
+        assert!(!alone.contains(LinkEnd::Vessel(vessel(4))));
+        let second = near_places_of(1);
+        for place in [head, after(0), after(2)] {
+            assert!(second.contains(place), "V1 should leave out {place}");
+        }
+        assert!(!second.contains(after(3)));
     }
 
+    // At least two places along the own berth, the head last, once each in the order of the anchors; refused
+    // only where V4 would precede or follow V0. By hand: V0 after V2 and V3; V1 after V3 and V4; V2 to the head and
+    // after V4; V3 to the head and after V0; V4 after V1. The berths of one vessel offer none.
     #[test]
-    fn test_placements_of_one_vessel_are_the_heads_and_of_none_are_none() {
-        let placements: Vec<_> = PlacementsIter::new(1, 2).collect();
-        assert_eq!(
-            placements,
-            [
-                (VesselIndex::new(0), head(0)),
-                (VesselIndex::new(0), head(1))
-            ]
-        );
-        assert_eq!(PlacementsIter::new(0, 3).next(), None);
-        assert_eq!(PlacementsIter::new(1, 0).next(), None);
-    }
-
-    // The length a placement iterator states is the count of placements it then gives, at every step.
-    #[test]
-    fn test_placements_state_their_exact_length() {
-        for (num_vessels, num_berths) in [(0, 0), (0, 2), (1, 0), (1, 2), (2, 0), (3, 2), (4, 1)] {
-            let mut placements = PlacementsIter::new(num_vessels, num_berths);
-            let total = num_vessels * (num_vessels + num_berths).saturating_sub(1);
-            for given in 0..=total {
-                assert_eq!(
-                    placements.len(),
-                    total - given,
-                    "{num_vessels} vessels and {num_berths} berths after {given} placements"
-                );
-                assert_eq!(placements.next().is_some(), given < total);
-            }
-            assert_eq!(placements.len(), 0);
-        }
-    }
-
-    #[test]
-    fn test_placements_stay_exhausted() {
-        let mut placements = PlacementsIter::new(2, 1);
-        assert_eq!(placements.by_ref().count(), 4);
-        assert_eq!(placements.next(), None);
-        assert_eq!(placements.next(), None);
-    }
-
-    /// The vessels of each berth of `graph` in order.
-    fn order_of(graph: &ScheduleGraph) -> Vec<Vec<usize>> {
-        graph
-            .berths()
-            .map(|berth| {
-                graph
-                    .vessel_sequence_iter(berth)
-                    .map(VesselIndex::index)
-                    .collect()
-            })
-            .collect()
-    }
-
-    /// The order of `berths` with `moved` taken out and inserted at `anchor`.
-    fn inserted(berths: &[Vec<usize>], moved: usize, anchor: LinkEnd) -> Vec<Vec<usize>> {
-        let mut berths = berths.to_vec();
-        for vessels in &mut berths {
-            vessels.retain(|&other| other != moved);
-        }
-        match anchor {
-            LinkEnd::Vessel(anchor) => {
-                for vessels in &mut berths {
-                    if let Some(place) = vessels.iter().position(|&other| other == anchor.index()) {
-                        vessels.insert(place + 1, moved);
-                    }
-                }
-            }
-            LinkEnd::Berth(berth) => berths[berth.index()].insert(0, moved),
-        }
-        berths
-    }
-
-    /// The window of each vessel of [`five_vessels`], from its arrival to its latest departure.
-    const WINDOWS: [(i64, i64); 5] = [(0, 400), (0, 1000), (0, 1000), (0, 1000), (500, 600)];
-
-    /// Five vessels of the windows [`WINDOWS`] on four berths open on [0, 1000), each taking 10 where it may
-    /// berth; V3 may not use B2.
-    fn five_vessels() -> Model<i64> {
-        let mut processing = vec![Some(10); 20];
-        processing[3 * 4 + 2] = None;
-        Model::new(
-            WINDOWS.map(|(arrival, _)| arrival).to_vec(),
-            WINDOWS.map(|(_, departure)| departure).to_vec(),
-            vec![1; 5],
-            processing,
-            vec![vec![ClosedOpenInterval::new(0, 1000)]; 4],
-        )
-    }
-
-    /// Whether the windows of `a` and `b` overlap.
-    fn overlap(a: usize, b: usize) -> bool {
-        WINDOWS[a].0 < WINDOWS[b].1 && WINDOWS[b].0 < WINDOWS[a].1
-    }
-
-    /// B0: V0 -> V1 -> V2 -> V4, B1: V3, B2 and B3 empty. V4's window misses V0's alone.
-    fn five_vessels_graph() -> ScheduleGraph {
-        let berths = [0, 0, 0, 1, 0].map(BerthIndex::new);
-        ScheduleGraph::from_slices(&berths, &[0_i64, 10, 20, 0, 500], 4)
-    }
-
-    /// Every move of a scan of `next` from a fresh mutator of the graph, as the order each makes; each is undone
-    /// before the next, as a run undoes a rejected candidate.
-    fn moves_of(mut next: impl FnMut(&mut Mutator) -> bool) -> Vec<Vec<Vec<usize>>> {
-        let mut mutator = Mutator::new(five_vessels_graph());
-        let mut moves = Vec::new();
-        // The scan holds at most one move per placement, 5 * (5 - 1 + 4) of them.
-        for _ in 0..=40 {
-            if !next(&mut mutator) {
-                return moves;
-            }
-            moves.push(order_of(mutator.graph()));
-            mutator.rollback();
-        }
-        panic!("the scan should end within its 40 placements")
-    }
-
-    /// The orders of the insertions that `keep` keeps, of each of the five vessels at every place, right after
-    /// every other vessel and then at the head of each of the four berths, in that order.
-    fn expected_moves(keep: impl Fn(usize, LinkEnd) -> bool) -> Vec<Vec<Vec<usize>>> {
-        let start = order_of(&five_vessels_graph());
-        let mut moves = Vec::new();
-        for moved in 0..5 {
-            for other in 0..5 {
-                if other != moved && keep(moved, vessel(other)) {
-                    moves.push(inserted(&start, moved, vessel(other)));
-                }
-            }
-            for berth in 0..4 {
-                if keep(moved, head(berth)) {
-                    moves.push(inserted(&start, moved, head(berth)));
-                }
-            }
-        }
-        moves
-    }
-
-    /// The berth of each vessel of the start, and whether a vessel heads its berth there.
-    const START_BERTHS: [usize; 5] = [0, 0, 0, 1, 0];
-    const START_PREDECESSORS: [Option<usize>; 5] = [None, Some(0), Some(1), None, Some(2)];
-
-    // Every placement on the vessel's own berth that changes the order, once, in the order of the placements, the
-    // head included; refused only where V4's window misses that of V0, the anchor or the head it would precede.
-    #[test]
-    fn test_the_intra_berth_scan_proposes_every_insertion_on_the_own_berth_once_in_order() {
-        let model = five_vessels();
-        let mut operator = IntraBerthShiftOperator::new();
-        operator.prepare(&five_vessels_graph());
-        // SAFETY: the mutator's graph has the counts the operator was prepared for, which are the model's.
-        let moves =
-            moves_of(|mutator| unsafe { operator.next_neighbor_unchecked(&model, mutator) });
-        let expected = expected_moves(|moved, anchor| {
-            let berth = START_BERTHS[moved];
-            match anchor {
-                LinkEnd::Vessel(anchor) => {
-                    let anchor = anchor.index();
-                    START_BERTHS[anchor] == berth
-                        && START_PREDECESSORS[moved] != Some(anchor)
-                        && overlap(moved, anchor)
-                }
-                LinkEnd::Berth(target) => {
-                    target.index() == berth
-                        && START_PREDECESSORS[moved].is_some()
-                        && overlap(moved, 0)
-                }
-            }
-        });
-        assert_eq!(moves, expected);
-        // V0 after V1 and V2; V1 after V2 and V4 and to the head; V2 after V0 and V4 and to the head; V4 after V1.
+    fn test_the_intra_berth_scan_proposes_every_far_insertion_on_the_own_berth_once_in_order() {
+        let moves = reference::moves_of::<IntraBerthShifts>(&reference::model(&WINDOWS));
+        assert_eq!(moves, reference::intra_berth_shifts(&WINDOWS));
         assert_eq!(moves.len(), 9);
-        assert!(
-            moves.iter().any(|order| order[0][0] == 1),
-            "V1 should reach the head of B0"
-        );
-        assert!(
-            !moves.iter().any(|order| order[0][0] == 4),
-            "V4 should not be set before V0"
-        );
-        assert!(
-            !moves.iter().any(|order| order[0] == [1, 2, 4, 0]),
-            "V0 should not be set after V4"
-        );
+        let all = reference::moves_of::<IntraBerthShifts>(&reference::model(&OVERLAPPING_WINDOWS));
+        assert_eq!(all, reference::intra_berth_shifts(&OVERLAPPING_WINDOWS));
+        // A berth of five vessels offers (5 - 1) * (5 - 2) such places in all.
+        assert_eq!(all.len(), 12);
     }
 
-    // Every placement on another berth the vessel may use, once, in the order of the placements: after a vessel of
-    // B1, and at the heads of B1, of the empty B2 and B3, and of B0 for V3, which may not use B2.
+    // Every place of every other berth the vessel may use, once each, after the anchors in increasing order and then
+    // at the heads, the empty B2 and B4 included: six for V0, V1, V2 and V4, five for V3, which may not use B2, four
+    // for V5, which may not use B0, and nine for V6, which may not use B4.
     #[test]
     fn test_the_inter_berth_scan_proposes_every_insertion_on_another_allowed_berth_once_in_order() {
-        let model = five_vessels();
-        let mut operator = InterBerthShiftOperator::new();
-        operator.prepare(&five_vessels_graph());
-        // SAFETY: the mutator's graph has the counts the operator was prepared for, which are the model's.
-        let moves =
-            moves_of(|mutator| unsafe { operator.next_neighbor_unchecked(&model, mutator) });
-        let expected = expected_moves(|moved, anchor| {
-            let target = match anchor {
-                LinkEnd::Vessel(anchor) => START_BERTHS[anchor.index()],
-                LinkEnd::Berth(target) => target.index(),
-            };
-            target != START_BERTHS[moved] && !(moved == 3 && target == 2)
-        });
-        assert_eq!(moves, expected);
-        assert_eq!(moves.len(), 4 * (1 + 3) + (4 + 2));
+        let moves = reference::moves_of::<InterBerthShifts>(&reference::model(&WINDOWS));
+        assert_eq!(moves, reference::inter_berth_shifts());
+        assert_eq!(moves.len(), 4 * 6 + 5 + 4 + 9);
         assert!(
-            moves.iter().any(|order| order[2] == [0]),
+            moves.contains(&vec![vec![1, 2, 3, 4], vec![5], vec![0], vec![6], vec![]]),
             "V0 should reach the empty B2"
         );
-    }
-
-    // A scan prepared anew starts again from its first move, whatever the cursor had reached.
-    #[test]
-    fn test_prepare_restarts_the_scan_from_its_first_move() {
-        let model = five_vessels();
-        let mut operator = InterBerthShiftOperator::new();
-        operator.prepare(&five_vessels_graph());
-        let mut mutator = Mutator::new(five_vessels_graph());
-        // SAFETY: the mutator's graph has the counts the operator was prepared for, which are the model's.
-        let first = unsafe { operator.next_neighbor_unchecked(&model, &mut mutator) };
-        let first_order = order_of(mutator.graph());
-        mutator.rollback();
-        for _ in 0..5 {
-            // SAFETY: the mutator's graph, rolled back after each move, has the counts the operator was prepared
-            // for, which are the model's.
-            assert!(unsafe { operator.next_neighbor_unchecked(&model, &mut mutator) });
-            mutator.rollback();
-        }
-        operator.prepare(&five_vessels_graph());
-        // SAFETY: the mutator's graph, rolled back to the start, has the counts the operator was prepared for
-        // anew, which are the model's.
-        let again = unsafe { operator.next_neighbor_unchecked(&model, &mut mutator) };
-        assert!(first && again);
-        assert_eq!(order_of(mutator.graph()), first_order);
-    }
-
-    #[test]
-    fn test_a_new_operator_proposes_nothing_until_it_is_prepared() {
-        let model = five_vessels();
-        let mut mutator = Mutator::new(five_vessels_graph());
-        // SAFETY: an operator that was never prepared counts no vessel, so it reads nothing of the graph.
-        unsafe {
-            assert!(!IntraBerthShiftOperator::new().next_neighbor_unchecked(&model, &mut mutator));
-            assert!(!InterBerthShiftOperator::new().next_neighbor_unchecked(&model, &mut mutator));
-        }
-        assert_eq!(mutator.graph(), &five_vessels_graph());
     }
 }
