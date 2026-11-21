@@ -673,7 +673,27 @@ impl RingArena {
         let b_pred = self.prev[b_first.index()];
         let b_succ = self.next[b_last.index()];
 
-        if a_succ == b_first && b_succ == a_first {
+        let a_is_whole_ring = a_succ == a_first;
+        let b_is_whole_ring = b_succ == b_first;
+
+        if a_is_whole_ring && b_is_whole_ring {
+            // Two whole rings: exchanging them leaves the same rings.
+        } else if a_is_whole_ring {
+            // A takes B's place in B's ring, and B closes into a ring of its own.
+            self.next[b_pred.index()] = a_first;
+            self.prev[a_first.index()] = b_pred;
+            self.next[a_last.index()] = b_succ;
+            self.prev[b_succ.index()] = a_last;
+            self.next[b_last.index()] = b_first;
+            self.prev[b_first.index()] = b_last;
+        } else if b_is_whole_ring {
+            self.next[a_pred.index()] = b_first;
+            self.prev[b_first.index()] = a_pred;
+            self.next[b_last.index()] = a_succ;
+            self.prev[a_succ.index()] = b_last;
+            self.next[a_last.index()] = a_first;
+            self.prev[a_first.index()] = a_last;
+        } else if a_succ == b_first && b_succ == a_first {
             // Full-ring case
             self.next[b_last.index()] = a_first;
             self.prev[a_first.index()] = b_last;
@@ -747,7 +767,31 @@ impl RingArena {
         let b_pred = *unsafe { self.prev.get_unchecked(b_first.index()) };
         let b_succ = *unsafe { self.next.get_unchecked(b_last.index()) };
 
-        if a_succ == b_first && b_succ == a_first {
+        let a_is_whole_ring = a_succ == a_first;
+        let b_is_whole_ring = b_succ == b_first;
+
+        if a_is_whole_ring && b_is_whole_ring {
+            // Two whole rings: exchanging them leaves the same rings.
+        } else if a_is_whole_ring {
+            // A takes B's place in B's ring, and B closes into a ring of its own.
+            unsafe {
+                *self.next.get_unchecked_mut(b_pred.index()) = a_first;
+                *self.prev.get_unchecked_mut(a_first.index()) = b_pred;
+                *self.next.get_unchecked_mut(a_last.index()) = b_succ;
+                *self.prev.get_unchecked_mut(b_succ.index()) = a_last;
+                *self.next.get_unchecked_mut(b_last.index()) = b_first;
+                *self.prev.get_unchecked_mut(b_first.index()) = b_last;
+            }
+        } else if b_is_whole_ring {
+            unsafe {
+                *self.next.get_unchecked_mut(a_pred.index()) = b_first;
+                *self.prev.get_unchecked_mut(b_first.index()) = a_pred;
+                *self.next.get_unchecked_mut(b_last.index()) = a_succ;
+                *self.prev.get_unchecked_mut(a_succ.index()) = b_last;
+                *self.next.get_unchecked_mut(a_last.index()) = a_first;
+                *self.prev.get_unchecked_mut(a_first.index()) = a_last;
+            }
+        } else if a_succ == b_first && b_succ == a_first {
             // Full-ring case: both segments together cover the entire ring.
             // Just rotate: swap the connection point between them.
             unsafe {
@@ -2249,5 +2293,27 @@ mod tests {
         unsafe { arena.reverse_segment_unchecked(Node::new(5), Node::new(4)) };
         verify_integrity(&arena);
         assert_eq!(extract_ring(&arena, 4), [4, 6, 5].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_with_a_whole_ring_moves_it_into_the_other_place() {
+        // Node 7 is a ring of its own; swapping it with segment [5] of ring [4, 5, 6] exchanges their places.
+        let mut arena = complex_fixture();
+        arena.swap_segments(Node::new(7), Node::new(7), Node::new(5), Node::new(5));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 4), [4, 7, 6].map(Node::new));
+        assert_eq!(extract_ring(&arena, 5), [5].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_segments_unchecked_with_a_whole_ring_moves_it_into_the_other_place() {
+        // Ring [4, 5, 6] as one segment swapped with segment [1, 2] of ring [0, 1, 2, 3].
+        let mut arena = complex_fixture();
+        unsafe {
+            arena.swap_segments_unchecked(Node::new(1), Node::new(2), Node::new(4), Node::new(6))
+        };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 4, 5, 6, 3].map(Node::new));
+        assert_eq!(extract_ring(&arena, 1), [1, 2].map(Node::new));
     }
 }
