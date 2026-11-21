@@ -1,12 +1,14 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The tests that let a neighbourhood skip a move no optimum needs.
+//! The tests by which a neighbourhood skips moves its instance makes unpromising.
 //!
-//! Each neighbourhood proposes only the moves its filter lets through. A filter refuses a move only where the
-//! instance alone rules it out (the vessel may not use the berth it would reach) or forces the order it would
-//! reverse (two vessels whose windows from arrival to latest departure do not overlap), so it never discards a
-//! move an optimum could need.
+//! Each neighbourhood proposes only the moves its filter lets through. The filters between berths refuse a move
+//! only where the instance rules it out: a vessel may not use the berth it would reach. The filters on one berth
+//! refuse every move of two vessels whose windows from arrival to latest departure do not overlap. That is exact
+//! for a swap, which would reverse the order the windows force, but conservative for a shift: moving a vessel
+//! right after one whose window lies wholly before its own keeps the forced order, and may still be a move an
+//! optimum needs, which such a neighbourhood then does not propose.
 
 use crate::schedule::ScheduleGraph;
 use talos_core::SolverNumeric;
@@ -15,7 +17,7 @@ use talos_model::{Model, VesselIndex};
 /// Whether the windows of `first` and `second`, each from its arrival to its latest departure, overlap.
 ///
 /// Where they do not, the earlier window's vessel is served first on any berth in every feasible schedule, so a
-/// move that puts the other before it is either infeasible or no better.
+/// move that puts the other before it is infeasible.
 ///
 /// # Safety
 ///
@@ -114,7 +116,10 @@ where
     }
 }
 
-/// Whether moving `vessel` right after `anchor`, on the berth they share, may help: their windows overlap.
+/// Whether moving `vessel` right after `anchor`, on the berth they share, is proposed: their windows overlap.
+///
+/// A shift after an anchor whose window lies wholly before the vessel's own keeps the order the windows force and
+/// is refused all the same; the filter is conservative.
 ///
 /// # Safety
 ///

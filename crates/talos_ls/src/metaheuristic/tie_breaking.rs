@@ -1,6 +1,8 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! How a best-improvement descent decides between two improving moves of equal objective.
+
 use rand::RngExt;
 use rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -13,7 +15,7 @@ pub enum TieBreaking {
     KeepFirst,
     /// Keep the move found last.
     KeepLast,
-    /// Flip a fair coin, drawn from the run's seeded generator, which avoids cycling on a flat landscape.
+    /// Flip a fair coin, drawn from the run's seeded generator.
     Random,
 }
 

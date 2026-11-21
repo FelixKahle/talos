@@ -13,8 +13,9 @@ use talos_model::Model;
 
 /// A kind of move from one schedule to its neighbours.
 ///
-/// Each neighbourhood proposes its moves in a fixed order and skips a move only where the instance rules it out or
-/// forces the order the move would reverse, so it never skips a move an optimum could need.
+/// Each neighbourhood proposes its moves in a fixed order and skips a move its filter refuses: where the instance
+/// rules it out, and on one berth wherever the windows of the two vessels do not overlap, which for a shift may skip
+/// a move an optimum needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Neighborhood {
     /// Exchange two vessels on one berth whose windows from arrival to latest departure overlap.

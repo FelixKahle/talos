@@ -7,7 +7,8 @@
 //! [`Neighborhood`]s, under a [`Metaheuristic`], until a limit of [`SearchLimits`], the metaheuristic or a
 //! [`LocalSearchMonitor`] ends the run. Its [`LocalSearchParameters`] say what a run explores, how it decides,
 //! which [`Objective`] it minimises, when it ends and the seed of its random choices; a run is reproducible from
-//! its model, its initial schedule, its parameters and its monitor.
+//! its model, its initial schedule, its parameters and its monitor, unless a deadline of its limits, which reads
+//! the clock, ends it.
 //!
 //! The crate is a stack of layers, each on the ones before it:
 //!

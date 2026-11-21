@@ -30,8 +30,8 @@ use talos_model::{Model, Solution, SolutionView};
 /// metaheuristic, within limits.
 ///
 /// An engine owns the states and records a run works in, and keeps their memory from one run to the next. A run is
-/// reproducible from its model, its initial schedule, its parameters and its monitor; two engines share nothing,
-/// so runs on different engines may go on in parallel.
+/// reproducible from its model, its initial schedule, its parameters and its monitor, unless a deadline ends it;
+/// two engines share nothing, so runs on different engines may go on in parallel.
 ///
 /// The states of an engine count the vessels and berths of the model of its last run, and so do its graphs, once a
 /// run has loaded it.
