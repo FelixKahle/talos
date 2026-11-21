@@ -15,7 +15,9 @@ use talos_model::Model;
 ///
 /// Each neighbourhood proposes its moves in a fixed order and skips a move its filter refuses: where the instance
 /// rules it out, and on one berth wherever the move sets a vessel next to one whose window from arrival to latest
-/// departure does not overlap its own, which for a move after another vessel may skip a move an optimum needs.
+/// departure does not overlap its own. For a swap and a move to the head of a berth that refuses only infeasible
+/// moves, unless both vessels take no time to serve; for a move after another vessel it may skip a move an optimum
+/// needs.
 /// Together the two shifts insert a vessel at every place of every berth: after any vessel, at the head of any
 /// berth, and onto an empty berth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -502,7 +502,7 @@ mod tests {
     use super::super::diff::Link;
     use super::*;
     use proptest::prelude::*;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
 
     fn b(i: usize) -> BerthIndex {
         BerthIndex::new(i)
@@ -682,8 +682,9 @@ mod tests {
             }
         }
 
-        /// Applies `change` to the reference and to both graphs.
-        fn apply(&mut self, change: Change) {
+        /// Applies `change` to the reference and to both graphs, and answers the berth the moved vessel leaves
+        /// and the berth it reaches, for a swap the berths of the two vessels.
+        fn apply(&mut self, change: Change) -> [usize; 2] {
             let n = self.checked.graph().num_vessels();
             let (checked, unchecked) = (&mut self.checked, &mut self.unchecked);
             let reference = &mut self.reference;
@@ -697,9 +698,11 @@ mod tests {
                     checked.swap_vessels(v(a), v(c));
                     // SAFETY: both vessels are below the count.
                     unsafe { unchecked.swap_vessels_unchecked(v(a), v(c)) };
+                    [berth_a, berth_c]
                 }
                 Change::After(a, c) => {
                     let (a, c) = (a % n, c % n);
+                    let ends = [locate(reference, a).0, locate(reference, c).0];
                     if a != c {
                         take(reference, a);
                         let (berth, place) = locate(reference, c);
@@ -708,14 +711,17 @@ mod tests {
                     checked.relocate_after(v(a), v(c));
                     // SAFETY: both vessels are below the count.
                     unsafe { unchecked.relocate_after_unchecked(v(a), v(c)) };
+                    ends
                 }
                 Change::ToHead(a, berth) => {
                     let (a, berth) = (a % n, berth % reference.len());
+                    let ends = [locate(reference, a).0, berth];
                     take(reference, a);
                     reference[berth].insert(0, a);
                     checked.relocate_to_head(v(a), b(berth));
                     // SAFETY: the vessel and the berth are below their counts.
                     unsafe { unchecked.relocate_to_head_unchecked(v(a), b(berth)) };
+                    ends
                 }
             }
         }
@@ -723,6 +729,9 @@ mod tests {
         /// Applies `change` after clearing the records, and checks the graphs against the reference: the order of
         /// every berth, the touched berths, the vessels moved between berths, the links the diff records against
         /// those that changed, and the unchecked records against the checked ones.
+        ///
+        /// A move touches exactly the berths it changed and the two it names, the one the vessel leaves and the
+        /// one it reaches; a move that changes nothing, such as one onto the place a vessel holds, touches none.
         fn step(&mut self, change: Change) -> Result<(), TestCaseError> {
             let before = order_of(self.checked.graph());
             let links_before = links_of(self.checked.graph());
@@ -730,7 +739,7 @@ mod tests {
                 mutator.clear_diff();
                 mutator.touched.reset();
             }
-            self.apply(change);
+            let ends = self.apply(change);
             let after = order_of(self.checked.graph());
             prop_assert_eq!(&after, &self.reference, "after {:?}", change);
             prop_assert_eq!(
@@ -739,12 +748,26 @@ mod tests {
                 "unchecked, after {:?}",
                 change
             );
-            for berth in 0..after.len() {
-                if before[berth] != after[berth] {
-                    let touched = self.checked.touched().is_touched(b(berth));
-                    prop_assert!(touched, "{:?} changed berth {}", change, berth);
-                }
+            let changed: BTreeSet<usize> = (0..after.len())
+                .filter(|&berth| before[berth] != after[berth])
+                .collect();
+            let mut expected = changed.clone();
+            if !changed.is_empty() {
+                expected.extend(ends);
             }
+            let touched: BTreeSet<usize> = self
+                .checked
+                .touched()
+                .iter_touched_berths()
+                .map(BerthIndex::index)
+                .collect();
+            prop_assert_eq!(
+                touched,
+                expected,
+                "{:?} changed berths {:?}",
+                change,
+                changed
+            );
             let moved: Vec<_> = self.checked.diff().reallocations().collect();
             for vessel in 0..self.checked.graph().num_vessels() {
                 let (from, to) = (locate(&before, vessel).0, locate(&after, vessel).0);

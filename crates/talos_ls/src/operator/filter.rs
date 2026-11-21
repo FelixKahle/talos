@@ -7,9 +7,9 @@
 //! only where the instance rules it out: a vessel may not use the berth it would reach. The filters on one berth
 //! refuse every move that sets a vessel next to one whose window from arrival to latest departure does not overlap
 //! its own. That is exact for a swap and for a move to the head of a berth, which would reverse the order the
-//! windows force, but conservative for a move after another vessel: moving a vessel right after one whose window
-//! lies wholly before its own keeps the forced order, and may still be a move an optimum needs, which such a
-//! neighbourhood then does not propose.
+//! windows force, unless both vessels take no time to serve; it is conservative for a move after another vessel:
+//! moving a vessel right after one whose window lies wholly before its own keeps the forced order, and may still be
+//! a move an optimum needs, which such a neighbourhood then does not propose.
 
 use crate::schedule::ScheduleGraph;
 use talos_core::SolverNumeric;
@@ -17,8 +17,8 @@ use talos_model::{BerthIndex, Model, VesselIndex};
 
 /// Whether the windows of `first` and `second`, each from its arrival to its latest departure, overlap.
 ///
-/// Where they do not, the earlier window's vessel is served first on any berth in every feasible schedule, so a
-/// move that puts the other before it is infeasible.
+/// Where they do not, a schedule that serves the later window's vessel before the other on one berth is
+/// infeasible, unless both take no time to serve.
 ///
 /// # Safety
 ///
@@ -46,6 +46,10 @@ where
             model.vessel_latest_departure_time_unchecked(second),
         )
     };
+    // Were the windows disjoint, say the latest departure of `first` at or before the arrival of `second`, then
+    // `first` served after `second` on one berth would end no earlier than that arrival plus the times both take
+    // to serve, past its latest departure if either takes any time. Only where both take none may both orders be
+    // feasible.
     first_arrival < second_deadline && second_arrival < first_deadline
 }
 
@@ -145,11 +149,8 @@ where
 /// Whether moving `vessel` to the head of the berth it stands on, before `head`, the vessel heading it, may help:
 /// their windows overlap.
 ///
-/// The refusal is exact for a feasible schedule. In one, `vessel` stands after `head`; were the windows disjoint,
-/// the window of `head` would lie wholly before that of `vessel` wherever one of the two takes any time to serve,
-/// since the vessel served second could otherwise not leave in time. Moving `vessel` before `head` then ends `head`
-/// no earlier than the arrival of `vessel`, which is at or after the latest departure of `head`, plus the times both
-/// take to serve: the move is infeasible. Only where both take no time at the berth may a refused move be feasible.
+/// From a feasible schedule, the filter refuses only moves that are infeasible, unless both vessels take no time
+/// to serve.
 ///
 /// # Safety
 ///
@@ -167,6 +168,9 @@ where
         vessel.index() < model.num_vessels() && head.index() < model.num_vessels(),
         "called `intra_berth_shift_to_head_filter_unchecked` with {vessel} or {head}, outside the model"
     );
+    // In a feasible schedule `vessel` stands after `head`, so were the windows disjoint, that of `head` would lie
+    // wholly before that of `vessel` wherever either takes time to serve (`windows_overlap_unchecked`), and
+    // moving `vessel` before `head` would serve them in the order that leaves one late.
     // SAFETY: both vessels are the model's, the precondition of this function.
     unsafe { windows_overlap_unchecked(vessel, head, model) }
 }
