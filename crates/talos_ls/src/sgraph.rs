@@ -28,7 +28,7 @@
 //!              |__Real Vessels__|___Berth Sentinels__|
 //! ```
 
-use crate::ring_arena::{Node, RingArena, RingEdgeIter, RingSequenceIter, RingSequenceRevIter};
+use crate::ring_arena::{Node, RingArena, RingLinkIter, RingSequenceIter};
 use std::iter::FusedIterator;
 use talos_model::{
     index::{BerthIndex, VesselIndex},
@@ -67,7 +67,7 @@ impl FusedIterator for VesselSequenceIter<'_> {}
 /// Reverse iterator over the vessels assigned to a berth, from last to first.
 #[derive(Clone, PartialEq, Eq)]
 pub struct VesselSequenceRevIter<'a> {
-    inner: RingSequenceRevIter<'a>,
+    inner: RingSequenceIter<'a>,
     num_vessels: usize,
 }
 
@@ -110,7 +110,7 @@ impl std::fmt::Display for ScheduleGraphEdge {
 /// Iterator over the edges (adjacent vessel pairs) within a single berth.
 #[derive(Clone, Debug)]
 pub struct BerthEdgeIter<'a> {
-    inner: RingEdgeIter<'a>,
+    inner: RingLinkIter<'a>,
     num_vessels: usize,
 }
 
@@ -331,7 +331,7 @@ impl ScheduleGraph {
         T: Ord,
     {
         let mut graph = Self {
-            arena: RingArena::new(Vec::new(), Vec::new()),
+            arena: RingArena::default(),
             vessel_berth: Vec::new(),
             berth_vessel_count: Vec::new(),
             num_vessels: 0,
@@ -442,7 +442,7 @@ impl ScheduleGraph {
     /// Overwrites the current `ScheduleGraph` with data from another graph.
     #[inline]
     pub fn overwrite_from_graph(&mut self, other: &ScheduleGraph) {
-        self.arena.overwrite_from_arena(&other.arena);
+        self.arena.clone_from(&other.arena);
         self.vessel_berth.clone_from(&other.vessel_berth);
         self.berth_vessel_count
             .clone_from(&other.berth_vessel_count);
@@ -744,7 +744,7 @@ impl ScheduleGraph {
         let start = self.arena.next(sentinel);
 
         VesselSequenceIter {
-            inner: unsafe { self.arena.sequence_iter_unchecked(start, sentinel) },
+            inner: self.arena.sequence(start, sentinel),
             num_vessels: self.num_vessels,
         }
     }
@@ -762,7 +762,7 @@ impl ScheduleGraph {
         let start = self.arena.prev(sentinel);
 
         VesselSequenceRevIter {
-            inner: unsafe { self.arena.sequence_rev_iter_unchecked(start, sentinel) },
+            inner: self.arena.sequence_rev(start, sentinel),
             num_vessels: self.num_vessels,
         }
     }
@@ -781,7 +781,7 @@ impl ScheduleGraph {
         let start = unsafe { self.arena.next_unchecked(sentinel) };
 
         VesselSequenceIter {
-            inner: unsafe { self.arena.sequence_iter_unchecked(start, sentinel) },
+            inner: unsafe { self.arena.sequence_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
         }
     }
@@ -800,7 +800,7 @@ impl ScheduleGraph {
         let start = unsafe { self.arena.prev_unchecked(sentinel) };
 
         VesselSequenceRevIter {
-            inner: unsafe { self.arena.sequence_rev_iter_unchecked(start, sentinel) },
+            inner: unsafe { self.arena.sequence_rev_unchecked(start, sentinel) },
             num_vessels: self.num_vessels,
         }
     }
@@ -818,7 +818,7 @@ impl ScheduleGraph {
         let start = self.arena.next(sentinel);
 
         BerthEdgeIter {
-            inner: unsafe { self.arena.edge_iter_unchecked(start, sentinel) },
+            inner: self.arena.links(start, sentinel),
             num_vessels: self.num_vessels,
         }
     }
@@ -838,7 +838,7 @@ impl ScheduleGraph {
         let start = self.arena.next(sentinel);
 
         BerthTopologyIter {
-            inner: unsafe { self.arena.sequence_iter_unchecked(start, sentinel) },
+            inner: self.arena.sequence(start, sentinel),
             sentinel,
             state: BerthTopologyState::StartSentinel,
         }
@@ -858,7 +858,7 @@ impl ScheduleGraph {
         let start = unsafe { self.arena.next_unchecked(sentinel) };
 
         BerthTopologyIter {
-            inner: unsafe { self.arena.sequence_iter_unchecked(start, sentinel) },
+            inner: unsafe { self.arena.sequence_unchecked(start, sentinel) },
             sentinel,
             state: BerthTopologyState::StartSentinel,
         }
@@ -1072,8 +1072,7 @@ impl ScheduleGraph {
         let old_berth = self.vessel_berth[vessel.index()];
         let new_berth = self.vessel_berth[reference.index()];
 
-        let anchor_predecessor = self.arena.prev(reference.map());
-        self.arena.relocate_after(vessel.map(), anchor_predecessor);
+        self.arena.relocate_before(vessel.map(), reference.map());
 
         if old_berth != new_berth {
             self.transfer_vessel_berth(vessel.map(), old_berth, new_berth);

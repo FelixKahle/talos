@@ -3,91 +3,110 @@
 
 //! The arena of rings: its columns, its steps and the checks at its door.
 
-use super::iter::{RingEdgeIter, RingSequenceIter, RingSequenceRevIter};
+use super::iter::{RingLinkIter, RingSequenceIter};
 use super::node::Node;
 use super::slot::Slot;
 use std::fmt;
+use typed_index_collections::TiVec;
 
 /// A fixed set of nodes arranged in closed rings, as a doubly linked list per ring.
 ///
 /// Every node has a successor and a predecessor, following which leads around its ring and back; a node alone is
 /// a ring of one. The rings are rearranged in place by steps that each touch a constant number of links (moving a
 /// node or a segment, swapping two nodes or two segments) and by reversing a segment, which costs its length.
-/// Nodes never enter or leave once the arena is built: [`len`](RingArena::len) stays fixed until the arena is
-/// rebuilt by [`reset_to_self_loops`](RingArena::reset_to_self_loops) or one of the `overwrite_from_*` methods.
+/// Nodes never enter or leave: [`len`](RingArena::len) stays fixed until the arena is rebuilt by
+/// [`reset_to_self_loops`](RingArena::reset_to_self_loops) or overwritten by [`Clone::clone_from`], which reuses
+/// the arena's memory.
 ///
-/// Every step comes as a pair: a safe method that checks in every build that the nodes it is handed lie in the
-/// arena, and an `_unchecked` twin for the caller whose own invariant proves that they do.
+/// A safe step checks in every build that the nodes it is handed lie in the arena; its `_unchecked` form, where the
+/// crate calls one, is for the caller whose own invariant proves that they do.
 ///
 /// The steps on segments also take a condition no constant-time check can confirm: `last` follows `first` along
 /// the successors, and the segments or the anchor they are given do not overlap. It is stated in each step's
 /// `# Preconditions` and checked in debug builds. Breaking it breaks the rings (a wrong answer), but never makes an
 /// access out of bounds: every link the arena holds names one of its nodes, whatever the steps are handed.
-// Invariant: `prev` and `next` have the same length, every entry of both is a node below that length, and
-// `prev[next[v]] == v` for every node `v`, so that `next` is a permutation whose cycles are the rings and `prev` is
-// its inverse. The first two parts are what memory rests on: they make every link a valid index into both columns,
-// and every step keeps them, since a step writes only nodes it was handed (which lie in the arena) or read from a
-// column. The last part makes the nodes rings; the steps keep it under their preconditions.
-#[derive(Clone, PartialEq, Eq, Debug, Hash, Default)]
+// Invariant: `prev` and `next` have the same length, at most one node for every `u32`, every entry of both is a
+// node below that length, and `prev[next[v]] == v` for every node `v`, so that `next` is a permutation whose cycles
+// are the rings and `prev` is its inverse. The first parts are what memory rests on: they make every link a valid
+// index into both columns, and every step keeps them, since a step writes only nodes it was handed (which lie in the
+// arena) or read from a column. The last part makes the nodes rings; the steps keep it under their preconditions.
+//
+// The segment conditions are held by no type: whether `last` follows `first`, or a node lies in a segment, is a fact
+// of the rings as they stand, which every step changes. Nor can the steps be made total: telling a segment from two
+// nodes that are not one walks the segment, and the steps are constant-time. Their callers own the rings' shape and
+// hold the conditions; a debug build checks them at each step's entry.
+#[derive(PartialEq, Eq, Debug, Hash, Default)]
 pub struct RingArena {
     /// The predecessor of each node, per node.
-    prev: Vec<Node>,
+    prev: TiVec<Node, Node>,
     /// The successor of each node, per node.
-    next: Vec<Node>,
+    next: TiVec<Node, Node>,
 }
 
-/// A node handed to an arena that does not lie in it.
+/// A safe step of the arena, as its refusal names it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Step {
+    Next,
+    Prev,
+    Sequence,
+    SequenceRev,
+    Links,
+    SwapNodes,
+    SwapSegments,
+    RelocateAfter,
+    RelocateBefore,
+    RelocateSegmentAfter,
+    ReverseSegment,
+}
+
+impl fmt::Display for Step {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Next => "next",
+            Self::Prev => "prev",
+            Self::Sequence => "sequence",
+            Self::SequenceRev => "sequence_rev",
+            Self::Links => "links",
+            Self::SwapNodes => "swap_nodes",
+            Self::SwapSegments => "swap_segments",
+            Self::RelocateAfter => "relocate_after",
+            Self::RelocateBefore => "relocate_before",
+            Self::RelocateSegmentAfter => "relocate_segment_after",
+            Self::ReverseSegment => "reverse_segment",
+        };
+        write!(f, "`RingArena::{name}`")
+    }
+}
+
+/// A node handed to a safe step of an arena that does not lie in it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct NodeOutside {
+    /// The step that was handed the node.
+    step: Step,
+    /// The first node handed over that lies outside.
     node: Node,
+    /// The number of nodes of the arena.
     len: usize,
+}
+
+impl NodeOutside {
+    /// Panics with the refusal of the step.
+    // Kept out of line so that the check of every safe step stays a compare and a branch on the caller's path.
+    #[cold]
+    #[inline(never)]
+    #[track_caller]
+    fn panic(self) -> ! {
+        panic!("{self}")
+    }
 }
 
 impl fmt::Display for NodeOutside {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}, outside an arena of {} nodes", self.node, self.len)
-    }
-}
-
-/// Why a pair of link columns does not describe closed rings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum RingViolation {
-    /// The two columns have different lengths.
-    LengthsDiffer { prev: usize, next: usize },
-    /// The columns have more nodes than a [`Node`] can name.
-    TooManyNodes { len: usize },
-    /// A link names a node outside the columns.
-    LinkOutside { node: Node, link: Node, len: usize },
-    /// The predecessor of a node's successor is not the node.
-    NotInverse {
-        node: Node,
-        next: Node,
-        prev_of_next: Node,
-    },
-}
-
-impl fmt::Display for RingViolation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::LengthsDiffer { prev, next } => {
-                write!(f, "{prev} predecessors and {next} successors")
-            }
-            Self::TooManyNodes { len } => write!(f, "{len} nodes, more than a node id can name"),
-            Self::LinkOutside { node, link, len } => {
-                write!(
-                    f,
-                    "a link from {node} to {link}, outside an arena of {len} nodes"
-                )
-            }
-            Self::NotInverse {
-                node,
-                next,
-                prev_of_next,
-            } => write!(
-                f,
-                "{node} followed by {next}, whose predecessor is {prev_of_next}"
-            ),
-        }
+        write!(
+            f,
+            "called {} with {}, outside an arena of {} nodes",
+            self.step, self.node, self.len
+        )
     }
 }
 
@@ -97,77 +116,8 @@ fn nameable(len: usize) -> bool {
         .is_none_or(|last| Node::try_new(last).is_some())
 }
 
-/// The first way in which `prev` and `next` fail to describe closed rings, or `None` if they describe them.
-fn ring_violation(prev: &[Node], next: &[Node]) -> Option<RingViolation> {
-    let len = prev.len();
-    if next.len() != len {
-        return Some(RingViolation::LengthsDiffer {
-            prev: len,
-            next: next.len(),
-        });
-    }
-    if !nameable(len) {
-        return Some(RingViolation::TooManyNodes { len });
-    }
-    for (node, (&prev_link, &next_link)) in (0..len).map(Node::new).zip(prev.iter().zip(next)) {
-        if let Some(link) = [prev_link, next_link]
-            .into_iter()
-            .find(|link| link.index() >= len)
-        {
-            return Some(RingViolation::LinkOutside { node, link, len });
-        }
-    }
-    (0..len).map(Node::new).find_map(|node| {
-        let following = next[node.index()];
-        let prev_of_next = prev[following.index()];
-        (prev_of_next != node).then_some(RingViolation::NotInverse {
-            node,
-            next: following,
-            prev_of_next,
-        })
-    })
-}
-
 impl RingArena {
-    /// The arena whose node `v` has predecessor `prev[v]` and successor `next[v]`.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless the two columns describe closed rings: they must have the same length, every link must name
-    /// a node below that length, and the predecessor of each node's successor must be the node.
-    #[track_caller]
-    pub fn new(prev: Vec<Node>, next: Vec<Node>) -> Self {
-        if let Some(violation) = ring_violation(&prev, &next) {
-            panic!("called `RingArena::new` with {violation}");
-        }
-        Self { prev, next }
-    }
-
-    /// Replaces the arena by the one [`new`](RingArena::new) builds from copies of the two columns, reusing the
-    /// arena's memory.
-    ///
-    /// # Panics
-    ///
-    /// Panics unless the two columns describe closed rings, as for [`new`](RingArena::new); the arena is then
-    /// left unchanged.
-    #[track_caller]
-    pub fn overwrite_from_slices(&mut self, prev: &[Node], next: &[Node]) {
-        if let Some(violation) = ring_violation(prev, next) {
-            panic!("called `RingArena::overwrite_from_slices` with {violation}");
-        }
-        self.prev.clear();
-        self.prev.extend_from_slice(prev);
-        self.next.clear();
-        self.next.extend_from_slice(next);
-    }
-
-    /// Replaces the arena by a copy of `other`, reusing the arena's memory.
-    pub fn overwrite_from_arena(&mut self, other: &RingArena) {
-        self.prev.clone_from(&other.prev);
-        self.next.clone_from(&other.next);
-    }
-
-    /// Replaces the arena by `len` nodes, each a ring of its own.
+    /// Replaces the arena by `len` nodes, each a ring of its own, reusing the arena's memory.
     ///
     /// # Panics
     ///
@@ -182,8 +132,8 @@ impl RingArena {
             "called `RingArena::reset_to_self_loops` with {len} nodes, more than a node id can name"
         );
         self.prev.clear();
-        self.next.clear();
         self.prev.extend((0..len).map(Node::new));
+        self.next.clear();
         self.next.extend_from_slice(&self.prev);
     }
 
@@ -191,12 +141,6 @@ impl RingArena {
     #[inline]
     pub fn len(&self) -> usize {
         self.prev.len()
-    }
-
-    /// Whether the arena has no node.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.prev.is_empty()
     }
 
     /// The successor of `node` in its ring.
@@ -209,9 +153,9 @@ impl RingArena {
     pub fn next(&self, node: Node) -> Node {
         let [node] = match self.slots([node]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::next` with {outside}"),
+            Err(node) => self.outside(Step::Next, node).panic(),
         };
-        self.next_slot(node).0
+        self.next_slot(node).node()
     }
 
     /// The successor of `node` in its ring, for a `node` the caller knows to lie in the arena.
@@ -223,11 +167,12 @@ impl RingArena {
     pub unsafe fn next_unchecked(&self, node: Node) -> Node {
         debug_assert!(
             node.index() < self.len(),
-            "called `RingArena::next_unchecked` with {node} outside the arena"
+            "called `RingArena::next_unchecked` with {node}, outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that `node` lies in the arena.
-        let node = unsafe { self.slot_unchecked(node) };
-        self.next_slot(node).0
+        // SAFETY: `node` lies in the arena, the precondition of this function.
+        let [node] = unsafe { self.slots_unchecked([node]) };
+        self.next_slot(node).node()
     }
 
     /// The predecessor of `node` in its ring.
@@ -240,9 +185,9 @@ impl RingArena {
     pub fn prev(&self, node: Node) -> Node {
         let [node] = match self.slots([node]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::prev` with {outside}"),
+            Err(node) => self.outside(Step::Prev, node).panic(),
         };
-        self.prev_slot(node).0
+        self.prev_slot(node).node()
     }
 
     /// The predecessor of `node` in its ring, for a `node` the caller knows to lie in the arena.
@@ -254,140 +199,94 @@ impl RingArena {
     pub unsafe fn prev_unchecked(&self, node: Node) -> Node {
         debug_assert!(
             node.index() < self.len(),
-            "called `RingArena::prev_unchecked` with {node} outside the arena"
+            "called `RingArena::prev_unchecked` with {node}, outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that `node` lies in the arena.
-        let node = unsafe { self.slot_unchecked(node) };
-        self.prev_slot(node).0
+        // SAFETY: `node` lies in the arena, the precondition of this function.
+        let [node] = unsafe { self.slots_unchecked([node]) };
+        self.prev_slot(node).node()
     }
 
-    /// The nodes from `start_node` along the successors, up to but not including `stop_node`.
+    /// The nodes from `start` along the successors, up to but not including `stop`.
     ///
-    /// The walk ends after at most [`len`](RingArena::len) nodes: if `stop_node` is not on the ring of
-    /// `start_node`, the walk goes round that ring until it has yielded that many.
+    /// The walk ends after at most [`len`](RingArena::len) nodes: if `stop` is not on the ring of `start`, the
+    /// walk goes round that ring until it has yielded that many.
     ///
     /// # Panics
     ///
-    /// Panics if `start_node` or `stop_node` lies outside the arena.
+    /// Panics if `start` or `stop` lies outside the arena.
     #[track_caller]
-    pub fn sequence_iter(&self, start_node: Node, stop_node: Node) -> RingSequenceIter<'_> {
-        let [start_node, stop_node] = match self.slots([start_node, stop_node]) {
+    pub fn sequence(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
+        let [start, stop] = match self.slots([start, stop]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::sequence_iter` with {outside}"),
+            Err(node) => self.outside(Step::Sequence, node).panic(),
         };
-        RingSequenceIter::new(&self.next, start_node, stop_node)
+        RingSequenceIter::new(&self.next, start, stop)
     }
 
-    /// The nodes from `start_node` along the successors, up to but not including `stop_node`, for nodes the
-    /// caller knows to lie in the arena.
+    /// The nodes from `start` along the successors, up to but not including `stop`, for nodes the caller knows to
+    /// lie in the arena.
     ///
     /// # Safety
     ///
-    /// `start_node` and `stop_node` must lie in the arena, the condition
-    /// [`sequence_iter`](RingArena::sequence_iter) checks.
-    pub unsafe fn sequence_iter_unchecked(
-        &self,
-        start_node: Node,
-        stop_node: Node,
-    ) -> RingSequenceIter<'_> {
+    /// `start` and `stop` must lie in the arena, the condition [`sequence`](RingArena::sequence) checks.
+    pub unsafe fn sequence_unchecked(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
         debug_assert!(
-            start_node.index() < self.len() && stop_node.index() < self.len(),
-            "called `RingArena::sequence_iter_unchecked` with {start_node} or {stop_node} outside the arena"
+            start.index() < self.len() && stop.index() < self.len(),
+            "called `RingArena::sequence_unchecked` with {start} or {stop}, outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that both nodes lie in the arena.
-        let (start_node, stop_node) = unsafe {
-            (
-                self.slot_unchecked(start_node),
-                self.slot_unchecked(stop_node),
-            )
-        };
-        RingSequenceIter::new(&self.next, start_node, stop_node)
+        // SAFETY: both nodes lie in the arena, the precondition of this function.
+        let [start, stop] = unsafe { self.slots_unchecked([start, stop]) };
+        RingSequenceIter::new(&self.next, start, stop)
     }
 
-    /// The nodes from `start_node` along the predecessors, up to but not including `stop_node`.
+    /// The nodes from `start` along the predecessors, up to but not including `stop`.
     ///
-    /// The walk ends after at most [`len`](RingArena::len) nodes, as for
-    /// [`sequence_iter`](RingArena::sequence_iter).
+    /// The walk ends after at most [`len`](RingArena::len) nodes, as for [`sequence`](RingArena::sequence).
     ///
     /// # Panics
     ///
-    /// Panics if `start_node` or `stop_node` lies outside the arena.
+    /// Panics if `start` or `stop` lies outside the arena.
     #[track_caller]
-    pub fn sequence_rev_iter(&self, start_node: Node, stop_node: Node) -> RingSequenceRevIter<'_> {
-        let [start_node, stop_node] = match self.slots([start_node, stop_node]) {
+    pub fn sequence_rev(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
+        let [start, stop] = match self.slots([start, stop]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::sequence_rev_iter` with {outside}"),
+            Err(node) => self.outside(Step::SequenceRev, node).panic(),
         };
-        RingSequenceRevIter::new(&self.prev, start_node, stop_node)
+        RingSequenceIter::new(&self.prev, start, stop)
     }
 
-    /// The nodes from `start_node` along the predecessors, up to but not including `stop_node`, for nodes the
-    /// caller knows to lie in the arena.
+    /// The nodes from `start` along the predecessors, up to but not including `stop`, for nodes the caller knows
+    /// to lie in the arena.
     ///
     /// # Safety
     ///
-    /// `start_node` and `stop_node` must lie in the arena, the condition
-    /// [`sequence_rev_iter`](RingArena::sequence_rev_iter) checks.
-    pub unsafe fn sequence_rev_iter_unchecked(
-        &self,
-        start_node: Node,
-        stop_node: Node,
-    ) -> RingSequenceRevIter<'_> {
+    /// `start` and `stop` must lie in the arena, the condition [`sequence_rev`](RingArena::sequence_rev) checks.
+    pub unsafe fn sequence_rev_unchecked(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
         debug_assert!(
-            start_node.index() < self.len() && stop_node.index() < self.len(),
-            "called `RingArena::sequence_rev_iter_unchecked` with {start_node} or {stop_node} outside the arena"
+            start.index() < self.len() && stop.index() < self.len(),
+            "called `RingArena::sequence_rev_unchecked` with {start} or {stop}, outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that both nodes lie in the arena.
-        let (start_node, stop_node) = unsafe {
-            (
-                self.slot_unchecked(start_node),
-                self.slot_unchecked(stop_node),
-            )
-        };
-        RingSequenceRevIter::new(&self.prev, start_node, stop_node)
+        // SAFETY: both nodes lie in the arena, the precondition of this function.
+        let [start, stop] = unsafe { self.slots_unchecked([start, stop]) };
+        RingSequenceIter::new(&self.prev, start, stop)
     }
 
-    /// The links `(node, successor)` from `start_node` along the successors whose successor is not `stop_node`.
-    ///
-    /// These are the links between consecutive nodes of [`sequence_iter`](RingArena::sequence_iter) with the
-    /// same nodes.
+    /// The links `(node, successor)` between consecutive nodes of [`sequence`](RingArena::sequence) with the same
+    /// nodes.
     ///
     /// # Panics
     ///
-    /// Panics if `start_node` or `stop_node` lies outside the arena.
+    /// Panics if `start` or `stop` lies outside the arena.
     #[track_caller]
-    pub fn edge_iter(&self, start_node: Node, stop_node: Node) -> RingEdgeIter<'_> {
-        let [start_node, stop_node] = match self.slots([start_node, stop_node]) {
+    pub fn links(&self, start: Node, stop: Node) -> RingLinkIter<'_> {
+        let [start, stop] = match self.slots([start, stop]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::edge_iter` with {outside}"),
+            Err(node) => self.outside(Step::Links, node).panic(),
         };
-        RingEdgeIter::new(&self.next, start_node, stop_node)
-    }
-
-    /// The links `(node, successor)` from `start_node` along the successors whose successor is not `stop_node`,
-    /// for nodes the caller knows to lie in the arena.
-    ///
-    /// # Safety
-    ///
-    /// `start_node` and `stop_node` must lie in the arena, the condition [`edge_iter`](RingArena::edge_iter)
-    /// checks.
-    pub unsafe fn edge_iter_unchecked(
-        &self,
-        start_node: Node,
-        stop_node: Node,
-    ) -> RingEdgeIter<'_> {
-        debug_assert!(
-            start_node.index() < self.len() && stop_node.index() < self.len(),
-            "called `RingArena::edge_iter_unchecked` with {start_node} or {stop_node} outside the arena"
-        );
-        // SAFETY: the caller promises that both nodes lie in the arena.
-        let (start_node, stop_node) = unsafe {
-            (
-                self.slot_unchecked(start_node),
-                self.slot_unchecked(stop_node),
-            )
-        };
-        RingEdgeIter::new(&self.next, start_node, stop_node)
+        RingLinkIter::new(RingSequenceIter::new(&self.next, start, stop))
     }
 
     /// Exchanges the places of `first` and `second`, in one ring or across two.
@@ -404,7 +303,7 @@ impl RingArena {
     pub fn swap_nodes(&mut self, first: Node, second: Node) {
         let [first, second] = match self.slots([first, second]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::swap_nodes` with {outside}"),
+            Err(node) => self.outside(Step::SwapNodes, node).panic(),
         };
         self.swap(first, second);
     }
@@ -417,10 +316,11 @@ impl RingArena {
     pub unsafe fn swap_nodes_unchecked(&mut self, first: Node, second: Node) {
         debug_assert!(
             first.index() < self.len() && second.index() < self.len(),
-            "called `RingArena::swap_nodes_unchecked` with {first} or {second} outside the arena"
+            "called `RingArena::swap_nodes_unchecked` with {first} or {second}, outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that both nodes lie in the arena.
-        let (first, second) = unsafe { (self.slot_unchecked(first), self.slot_unchecked(second)) };
+        // SAFETY: both nodes lie in the arena, the precondition of this function.
+        let [first, second] = unsafe { self.slots_unchecked([first, second]) };
         self.swap(first, second);
     }
 
@@ -435,8 +335,9 @@ impl RingArena {
     /// # Preconditions
     ///
     /// `a_last` follows `a_first` along the successors, `b_last` follows `b_first`, and the two segments share no
-    /// node unless they are the same segment. Otherwise the rings break, though no access leaves the arena; this
-    /// is checked in debug builds only, as the check walks both segments of a constant-time step.
+    /// node unless they are the same segment, which leaves the rings as they are. Otherwise the rings break,
+    /// though no access leaves the arena; the caller that owns the rings' shape holds this, and a debug build
+    /// checks it.
     ///
     /// # Panics
     ///
@@ -446,8 +347,19 @@ impl RingArena {
         let [a_first, a_last, b_first, b_last] =
             match self.slots([a_first, a_last, b_first, b_last]) {
                 Ok(slots) => slots,
-                Err(outside) => panic!("called `RingArena::swap_segments` with {outside}"),
+                Err(node) => self.outside(Step::SwapSegments, node).panic(),
             };
+        // Held by no type and not made total, as the segment conditions on `RingArena` say.
+        debug_assert!(
+            self.follows(a_first, a_last) && self.follows(b_first, b_last),
+            "called `RingArena::swap_segments` with a last node that does not follow its first: \
+             {a_first} to {a_last}, {b_first} to {b_last}"
+        );
+        debug_assert!(
+            self.same_or_disjoint(a_first, a_last, b_first, b_last),
+            "called `RingArena::swap_segments` with overlapping segments {a_first} to {a_last} and \
+             {b_first} to {b_last}"
+        );
         self.swap_ranges(a_first, a_last, b_first, b_last);
     }
 
@@ -471,11 +383,24 @@ impl RingArena {
             [a_first, a_last, b_first, b_last]
                 .iter()
                 .all(|node| node.index() < self.len()),
-            "called `RingArena::swap_segments_unchecked` with a node outside the arena"
+            "called `RingArena::swap_segments_unchecked` with {a_first}, {a_last}, {b_first} or {b_last}, \
+             outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that all four nodes lie in the arena.
+        // SAFETY: the four nodes lie in the arena, the precondition of this function.
         let [a_first, a_last, b_first, b_last] =
-            [a_first, a_last, b_first, b_last].map(|node| unsafe { self.slot_unchecked(node) });
+            unsafe { self.slots_unchecked([a_first, a_last, b_first, b_last]) };
+        // Held by no type and not made total, as the segment conditions on `RingArena` say.
+        debug_assert!(
+            self.follows(a_first, a_last) && self.follows(b_first, b_last),
+            "called `RingArena::swap_segments_unchecked` with a last node that does not follow its first: \
+             {a_first} to {a_last}, {b_first} to {b_last}"
+        );
+        debug_assert!(
+            self.same_or_disjoint(a_first, a_last, b_first, b_last),
+            "called `RingArena::swap_segments_unchecked` with overlapping segments {a_first} to {a_last} and \
+             {b_first} to {b_last}"
+        );
         self.swap_ranges(a_first, a_last, b_first, b_last);
     }
 
@@ -494,7 +419,7 @@ impl RingArena {
     pub fn relocate_after(&mut self, node: Node, anchor: Node) {
         let [node, anchor] = match self.slots([node, anchor]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::relocate_after` with {outside}"),
+            Err(node) => self.outside(Step::RelocateAfter, node).panic(),
         };
         self.move_after(node, anchor);
     }
@@ -508,14 +433,16 @@ impl RingArena {
     pub unsafe fn relocate_after_unchecked(&mut self, node: Node, anchor: Node) {
         debug_assert!(
             node.index() < self.len() && anchor.index() < self.len(),
-            "called `RingArena::relocate_after_unchecked` with {node} or {anchor} outside the arena"
+            "called `RingArena::relocate_after_unchecked` with {node} or {anchor}, outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that both nodes lie in the arena.
-        let (node, anchor) = unsafe { (self.slot_unchecked(node), self.slot_unchecked(anchor)) };
+        // SAFETY: both nodes lie in the arena, the precondition of this function.
+        let [node, anchor] = unsafe { self.slots_unchecked([node, anchor]) };
         self.move_after(node, anchor);
     }
 
-    /// Moves `node` out of its ring to directly before `anchor`; nothing changes if `node` already precedes it.
+    /// Moves `node` out of its ring to directly before `anchor`; nothing changes if `node` is `anchor` or already
+    /// precedes it.
     ///
     /// # Panics
     ///
@@ -524,10 +451,9 @@ impl RingArena {
     pub fn relocate_before(&mut self, node: Node, anchor: Node) {
         let [node, anchor] = match self.slots([node, anchor]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::relocate_before` with {outside}"),
+            Err(node) => self.outside(Step::RelocateBefore, node).panic(),
         };
-        let anchor_prev = self.prev_slot(anchor);
-        self.move_after(node, anchor_prev);
+        self.move_before(node, anchor);
     }
 
     /// Moves `node` to directly before `anchor`, for nodes the caller knows to lie in the arena.
@@ -539,12 +465,12 @@ impl RingArena {
     pub unsafe fn relocate_before_unchecked(&mut self, node: Node, anchor: Node) {
         debug_assert!(
             node.index() < self.len() && anchor.index() < self.len(),
-            "called `RingArena::relocate_before_unchecked` with {node} or {anchor} outside the arena"
+            "called `RingArena::relocate_before_unchecked` with {node} or {anchor}, outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that both nodes lie in the arena.
-        let (node, anchor) = unsafe { (self.slot_unchecked(node), self.slot_unchecked(anchor)) };
-        let anchor_prev = self.prev_slot(anchor);
-        self.move_after(node, anchor_prev);
+        // SAFETY: both nodes lie in the arena, the precondition of this function.
+        let [node, anchor] = unsafe { self.slots_unchecked([node, anchor]) };
+        self.move_before(node, anchor);
     }
 
     /// Moves the segment `first ..= last` out of its ring to directly after `anchor`; nothing changes if the
@@ -558,8 +484,8 @@ impl RingArena {
     /// # Preconditions
     ///
     /// `last` follows `first` along the successors, and `anchor` is not a node of the segment. Otherwise the
-    /// rings break, though no access leaves the arena; this is checked in debug builds only, as the check walks
-    /// the segment of a constant-time step.
+    /// rings break, though no access leaves the arena; the caller that owns the rings' shape holds this, and a
+    /// debug build checks it.
     ///
     /// # Panics
     ///
@@ -568,8 +494,18 @@ impl RingArena {
     pub fn relocate_segment_after(&mut self, first: Node, last: Node, anchor: Node) {
         let [first, last, anchor] = match self.slots([first, last, anchor]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::relocate_segment_after` with {outside}"),
+            Err(node) => self.outside(Step::RelocateSegmentAfter, node).panic(),
         };
+        // Held by no type and not made total, as the segment conditions on `RingArena` say.
+        debug_assert!(
+            self.follows(first, last),
+            "called `RingArena::relocate_segment_after` with {last}, which does not follow {first}"
+        );
+        debug_assert!(
+            !self.segment_holds(first, last, anchor),
+            "called `RingArena::relocate_segment_after` with anchor {anchor} inside the segment {first} to \
+             {last}"
+        );
         self.move_range_after(first, last, anchor);
     }
 
@@ -594,45 +530,37 @@ impl RingArena {
             [first, last, anchor]
                 .iter()
                 .all(|node| node.index() < self.len()),
-            "called `RingArena::relocate_segment_after_unchecked` with a node outside the arena"
+            "called `RingArena::relocate_segment_after_unchecked` with {first}, {last} or {anchor}, outside an \
+             arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that all three nodes lie in the arena.
-        let [first, last, anchor] =
-            [first, last, anchor].map(|node| unsafe { self.slot_unchecked(node) });
+        // SAFETY: the three nodes lie in the arena, the precondition of this function.
+        let [first, last, anchor] = unsafe { self.slots_unchecked([first, last, anchor]) };
+        // Held by no type and not made total, as the segment conditions on `RingArena` say.
+        debug_assert!(
+            self.follows(first, last),
+            "called `RingArena::relocate_segment_after_unchecked` with {last}, which does not follow {first}"
+        );
+        debug_assert!(
+            !self.segment_holds(first, last, anchor),
+            "called `RingArena::relocate_segment_after_unchecked` with anchor {anchor} inside the segment \
+             {first} to {last}"
+        );
         self.move_range_after(first, last, anchor);
     }
 
-    /// Moves the segment `first ..= last` out of its ring to directly before `anchor`; nothing changes if the
-    /// segment already precedes it.
-    ///
-    /// # Preconditions
-    ///
-    /// `last` follows `first` along the successors, and `anchor` is not a node of the segment, as for
-    /// [`relocate_segment_after`](RingArena::relocate_segment_after).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `first`, `last` or `anchor` lies outside the arena.
-    #[track_caller]
-    pub fn relocate_segment_before(&mut self, first: Node, last: Node, anchor: Node) {
-        let [first, last, anchor] = match self.slots([first, last, anchor]) {
-            Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::relocate_segment_before` with {outside}"),
-        };
-        self.move_range_before(first, last, anchor);
-    }
-
     /// Moves the segment `first ..= last` to directly before `anchor`, for nodes the caller knows to lie in the
-    /// arena.
+    /// arena; nothing changes if the segment already precedes it.
     ///
     /// # Preconditions
     ///
-    /// Those of [`relocate_segment_before`](RingArena::relocate_segment_before).
+    /// `last` follows `first` along the successors, and `anchor` is not a node of the segment. Otherwise the
+    /// rings break, though no access leaves the arena; the caller that owns the rings' shape holds this, and a
+    /// debug build checks it.
     ///
     /// # Safety
     ///
-    /// The three nodes must lie in the arena, the condition
-    /// [`relocate_segment_before`](RingArena::relocate_segment_before) checks.
+    /// The three nodes must lie in the arena.
     pub unsafe fn relocate_segment_before_unchecked(
         &mut self,
         first: Node,
@@ -643,11 +571,22 @@ impl RingArena {
             [first, last, anchor]
                 .iter()
                 .all(|node| node.index() < self.len()),
-            "called `RingArena::relocate_segment_before_unchecked` with a node outside the arena"
+            "called `RingArena::relocate_segment_before_unchecked` with {first}, {last} or {anchor}, outside an \
+             arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that all three nodes lie in the arena.
-        let [first, last, anchor] =
-            [first, last, anchor].map(|node| unsafe { self.slot_unchecked(node) });
+        // SAFETY: the three nodes lie in the arena, the precondition of this function.
+        let [first, last, anchor] = unsafe { self.slots_unchecked([first, last, anchor]) };
+        // Held by no type and not made total, as the segment conditions on `RingArena` say.
+        debug_assert!(
+            self.follows(first, last),
+            "called `RingArena::relocate_segment_before_unchecked` with {last}, which does not follow {first}"
+        );
+        debug_assert!(
+            !self.segment_holds(first, last, anchor),
+            "called `RingArena::relocate_segment_before_unchecked` with anchor {anchor} inside the segment \
+             {first} to {last}"
+        );
         self.move_range_before(first, last, anchor);
     }
 
@@ -663,8 +602,8 @@ impl RingArena {
     /// # Preconditions
     ///
     /// `last` follows `first` along the successors. Otherwise the rings break, though no access leaves the arena
-    /// and the walk ends after [`len`](RingArena::len) nodes; this is checked in debug builds only, as the check
-    /// walks the segment a second time.
+    /// and the walk ends after [`len`](RingArena::len) nodes; the caller that owns the rings' shape holds this,
+    /// and a debug build checks it.
     ///
     /// # Panics
     ///
@@ -673,8 +612,13 @@ impl RingArena {
     pub fn reverse_segment(&mut self, first: Node, last: Node) {
         let [first, last] = match self.slots([first, last]) {
             Ok(slots) => slots,
-            Err(outside) => panic!("called `RingArena::reverse_segment` with {outside}"),
+            Err(node) => self.outside(Step::ReverseSegment, node).panic(),
         };
+        // Held by no type and not made total, as the segment conditions on `RingArena` say.
+        debug_assert!(
+            self.follows(first, last),
+            "called `RingArena::reverse_segment` with {last}, which does not follow {first}"
+        );
         self.reverse(first, last);
     }
 
@@ -691,73 +635,126 @@ impl RingArena {
     pub unsafe fn reverse_segment_unchecked(&mut self, first: Node, last: Node) {
         debug_assert!(
             first.index() < self.len() && last.index() < self.len(),
-            "called `RingArena::reverse_segment_unchecked` with {first} or {last} outside the arena"
+            "called `RingArena::reverse_segment_unchecked` with {first} or {last}, outside an arena of {} nodes",
+            self.len()
         );
-        // SAFETY: the caller promises that both nodes lie in the arena.
-        let (first, last) = unsafe { (self.slot_unchecked(first), self.slot_unchecked(last)) };
+        // SAFETY: both nodes lie in the arena, the precondition of this function.
+        let [first, last] = unsafe { self.slots_unchecked([first, last]) };
+        // Held by no type and not made total, as the segment conditions on `RingArena` say.
+        debug_assert!(
+            self.follows(first, last),
+            "called `RingArena::reverse_segment_unchecked` with {last}, which does not follow {first}"
+        );
         self.reverse(first, last);
     }
 
     /// The slots of `nodes`, or the first of them that lies outside the arena.
     #[inline]
-    fn slots<const N: usize>(&self, nodes: [Node; N]) -> Result<[Slot; N], NodeOutside> {
+    fn slots<const N: usize>(&self, nodes: [Node; N]) -> Result<[Slot; N], Node> {
         let len = self.len();
-        match nodes.iter().find(|node| node.index() >= len) {
-            Some(&node) => Err(NodeOutside { node, len }),
-            None => Ok(nodes.map(Slot)),
+        if let Some(&node) = nodes.iter().find(|node| node.index() >= len) {
+            return Err(node);
+        }
+        Ok(nodes.map(|node| {
+            debug_assert!(
+                node.index() < len,
+                "{node} should have been found inside the arena"
+            );
+            // SAFETY: every node lies below the arena's length, as the search above found, and `&self` keeps that
+            // length while the slots are used by the step that asked for them (`Slot`).
+            unsafe { Slot::new_unchecked(node) }
+        }))
+    }
+
+    /// The refusal of `step`, which was handed `node`, a node outside the arena.
+    fn outside(&self, step: Step, node: Node) -> NodeOutside {
+        NodeOutside {
+            step,
+            node,
+            len: self.len(),
         }
     }
 
-    /// The slot of `node`.
+    /// The slots of `nodes`.
     ///
     /// # Safety
     ///
-    /// `node` must lie in the arena: every later access through the slot trusts it.
+    /// Every node of `nodes` must lie in the arena: every later access through its slot trusts it.
     #[inline]
-    unsafe fn slot_unchecked(&self, node: Node) -> Slot {
-        debug_assert!(
-            node.index() < self.len(),
-            "called `RingArena::slot_unchecked` with {node} outside the arena"
-        );
-        Slot(node)
+    unsafe fn slots_unchecked<const N: usize>(&self, nodes: [Node; N]) -> [Slot; N] {
+        nodes.map(|node| {
+            debug_assert!(
+                node.index() < self.len(),
+                "called `RingArena::slots_unchecked` with {node}, outside an arena of {} nodes",
+                self.len()
+            );
+            // SAFETY: the node lies in the arena, the precondition of this function.
+            unsafe { Slot::new_unchecked(node) }
+        })
     }
 
     /// The slot of the successor of `node`.
     #[inline]
     fn next_slot(&self, node: Slot) -> Slot {
-        debug_assert!(node.0.index() < self.next.len());
-        // SAFETY: a `Slot` lies in its arena, and every link of the arena names one of its nodes (`RingArena`).
-        Slot(unsafe { *self.next.get_unchecked(node.0.index()) })
+        Self::follow(&self.next, node)
     }
 
     /// The slot of the predecessor of `node`.
     #[inline]
     fn prev_slot(&self, node: Slot) -> Slot {
-        debug_assert!(node.0.index() < self.prev.len());
-        // SAFETY: a `Slot` lies in its arena, and every link of the arena names one of its nodes (`RingArena`).
-        Slot(unsafe { *self.prev.get_unchecked(node.0.index()) })
+        Self::follow(&self.prev, node)
+    }
+
+    /// The slot of the link of `node` in `column`, one of the arena's two columns.
+    #[inline]
+    fn follow(column: &TiVec<Node, Node>, node: Slot) -> Slot {
+        let node = node.node();
+        debug_assert!(
+            node.index() < column.len(),
+            "the slot {node} should lie in the arena of {} nodes",
+            column.len()
+        );
+        // SAFETY: a slot lies in its arena, whose columns have its length (`Slot`, `RingArena`).
+        let link = unsafe { *column.get_unchecked(node) };
+        debug_assert!(
+            link.index() < column.len(),
+            "the link of {node} should name a node of the arena of {} nodes",
+            column.len()
+        );
+        // SAFETY: every link of the arena names one of its nodes (`RingArena`).
+        unsafe { Slot::new_unchecked(link) }
     }
 
     /// Makes `to` the successor of `from` and `from` the predecessor of `to`.
     #[inline]
     fn link(&mut self, from: Slot, to: Slot) {
-        debug_assert!(from.0.index() < self.next.len() && to.0.index() < self.prev.len());
+        let (from, to) = (from.node(), to.node());
+        debug_assert!(
+            from.index() < self.next.len() && to.index() < self.prev.len(),
+            "the slots {from} and {to} should lie in the arena of {} nodes",
+            self.len()
+        );
         // SAFETY: both slots lie in the arena, whose two columns have its length (`Slot`, `RingArena`).
         unsafe {
-            *self.next.get_unchecked_mut(from.0.index()) = to.0;
-            *self.prev.get_unchecked_mut(to.0.index()) = from.0;
+            *self.next.get_unchecked_mut(from) = to;
+            *self.prev.get_unchecked_mut(to) = from;
         }
     }
 
     /// Exchanges the successor and the predecessor of `node`.
     #[inline]
     fn flip(&mut self, node: Slot) {
-        debug_assert!(node.0.index() < self.next.len() && node.0.index() < self.prev.len());
+        let node = node.node();
+        debug_assert!(
+            node.index() < self.next.len() && node.index() < self.prev.len(),
+            "the slot {node} should lie in the arena of {} nodes",
+            self.len()
+        );
         // SAFETY: the slot lies in the arena, whose two columns have its length (`Slot`, `RingArena`).
         unsafe {
             std::mem::swap(
-                self.next.get_unchecked_mut(node.0.index()),
-                self.prev.get_unchecked_mut(node.0.index()),
+                self.next.get_unchecked_mut(node),
+                self.prev.get_unchecked_mut(node),
             );
         }
     }
@@ -789,6 +786,14 @@ impl RingArena {
             current = self.next_slot(current);
         }
         false
+    }
+
+    /// Whether the segments `a_first ..= a_last` and `b_first ..= b_last` are one segment or share no node.
+    fn same_or_disjoint(&self, a_first: Slot, a_last: Slot, b_first: Slot, b_last: Slot) -> bool {
+        // Two segments of one ring that share a node hold each other's first node.
+        (a_first == b_first && a_last == b_last)
+            || !(self.segment_holds(a_first, a_last, b_first)
+                || self.segment_holds(b_first, b_last, a_first))
     }
 
     /// Exchanges the places of two nodes.
@@ -827,18 +832,9 @@ impl RingArena {
         }
     }
 
-    /// Exchanges the places of the segments `a_first ..= a_last` and `b_first ..= b_last`.
+    /// Exchanges the places of the segments `a_first ..= a_last` and `b_first ..= b_last`, which are one segment
+    /// or share no node.
     fn swap_ranges(&mut self, a_first: Slot, a_last: Slot, b_first: Slot, b_last: Slot) {
-        debug_assert!(
-            self.follows(a_first, a_last) && self.follows(b_first, b_last),
-            "called `RingArena::swap_ranges` with a last node that does not follow its first"
-        );
-        debug_assert!(
-            (a_first == b_first && a_last == b_last)
-                || !(self.segment_holds(a_first, a_last, b_first)
-                    || self.segment_holds(b_first, b_last, a_first)),
-            "called `RingArena::swap_ranges` with overlapping segments"
-        );
         if a_first == b_first {
             return;
         }
@@ -888,16 +884,16 @@ impl RingArena {
         self.link(node, anchor_next);
     }
 
-    /// Moves the segment `first ..= last` to directly after `anchor`.
+    /// Moves `node` to directly before `anchor`.
+    fn move_before(&mut self, node: Slot, anchor: Slot) {
+        // Nothing moves when `node` already precedes the anchor or is the anchor: the move after the anchor's
+        // predecessor then puts a node after itself or after its own predecessor.
+        let anchor_prev = self.prev_slot(anchor);
+        self.move_after(node, anchor_prev);
+    }
+
+    /// Moves the segment `first ..= last` to directly after `anchor`, a node outside it.
     fn move_range_after(&mut self, first: Slot, last: Slot, anchor: Slot) {
-        debug_assert!(
-            self.follows(first, last),
-            "called `RingArena::move_range_after` with a last node that does not follow the first"
-        );
-        debug_assert!(
-            !self.segment_holds(first, last, anchor),
-            "called `RingArena::move_range_after` with an anchor inside the segment"
-        );
         let prev = self.prev_slot(first);
         if prev == anchor {
             return;
@@ -910,7 +906,7 @@ impl RingArena {
         self.link(last, anchor_next);
     }
 
-    /// Moves the segment `first ..= last` to directly before `anchor`.
+    /// Moves the segment `first ..= last` to directly before `anchor`, a node outside it.
     fn move_range_before(&mut self, first: Slot, last: Slot, anchor: Slot) {
         // A segment that already precedes the anchor stays; otherwise the anchor's predecessor lies outside the
         // segment, since only `last` has a successor outside it, and the move after that predecessor is the move.
@@ -923,10 +919,6 @@ impl RingArena {
 
     /// Reverses the order of the segment `first ..= last`.
     fn reverse(&mut self, first: Slot, last: Slot) {
-        debug_assert!(
-            self.follows(first, last),
-            "called `RingArena::reverse` with a last node that does not follow the first"
-        );
         if first == last {
             return;
         }
@@ -951,1161 +943,57 @@ impl RingArena {
     }
 }
 
+impl Clone for RingArena {
+    fn clone(&self) -> Self {
+        Self {
+            prev: self.prev.clone(),
+            next: self.next.clone(),
+        }
+    }
+
+    // Written out so that overwriting an arena reuses both of its buffers; the columns' own `clone_from` would not.
+    fn clone_from(&mut self, source: &Self) {
+        self.prev.raw.clone_from(&source.prev.raw);
+        self.next.raw.clone_from(&source.next.raw);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::ring_lists::{
+        Rings, arena_of, assert_links_are_inverse, canonical, locate, ring_of, rings_of, segment,
+        some_rings, three_rings,
+    };
     use super::*;
     use proptest::prelude::*;
 
-    /// A robust test fixture containing three distinct, closed rings:
-    /// - Ring 0: [0 <-> 1 <-> 2 <-> 3] (4 nodes)
-    /// - Ring 1: [4 <-> 5 <-> 6]       (3 nodes)
-    /// - Ring 2: [7]                   (1 node, points to itself)
-    fn complex_fixture() -> RingArena {
-        RingArena::new(
-            // prev pointers
-            [
-                3, 0, 1, 2, // Ring 0
-                6, 4, 5, // Ring 1
-                7, // Ring 2
-            ]
-            .map(Node::new)
-            .to_vec(),
-            // next pointers
-            [
-                1, 2, 3, 0, // Ring 0
-                5, 6, 4, // Ring 1
-                7, // Ring 2
-            ]
-            .map(Node::new)
-            .to_vec(),
-        )
+    fn nodes<const N: usize>(indices: [usize; N]) -> [Node; N] {
+        indices.map(Node::new)
     }
 
-    /// Helper to verify the foundational mathematical invariant of the arena:
-    /// For every node `i`, `prev[next[i]] == i` and `next[prev[i]] == i`.
-    fn verify_integrity(arena: &RingArena) {
-        for i in 0..arena.len() {
-            let node = Node::new(i);
-            let next_node = arena.next(node);
-            let prev_node = arena.prev(node);
-            assert_eq!(
-                arena.prev(next_node),
-                node,
-                "Integrity failure at node {}: prev of next is not self",
-                i
-            );
-            assert_eq!(
-                arena.next(prev_node),
-                node,
-                "Integrity failure at node {}: next of prev is not self",
-                i
-            );
-        }
+    /// The rings of `arena` that hold `starts`, each from its start.
+    fn rings_from(arena: &RingArena, starts: &[usize]) -> Rings {
+        starts.iter().map(|&start| ring_of(arena, start)).collect()
     }
 
-    /// Helper to extract a full ring into a Vec for easy assertions.
-    /// Walks the `next` pointers until it cycles back to `start`.
-    fn extract_ring(arena: &RingArena, start: usize) -> Vec<Node> {
-        let start_node = Node::new(start);
-        let mut result = vec![start_node];
-        let mut current = arena.next(start_node);
-        while current != start_node {
-            result.push(current);
-            current = arena.next(current);
-        }
-        result
+    /// One ring `0 -> 1 -> ... -> len - 1`.
+    fn one_ring(len: usize) -> RingArena {
+        arena_of(&[(0..len).collect()], len)
     }
 
     #[test]
-    fn test_initialization_and_integrity() {
-        let arena = complex_fixture();
-        assert_eq!(arena.len(), 8);
-        assert!(!arena.is_empty());
-        verify_integrity(&arena);
-
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 5, 6].map(Node::new));
-        assert_eq!(extract_ring(&arena, 7), [7].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Swap Nodes
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_swap_nodes_adjacent_same_ring() {
-        let mut arena = complex_fixture();
-        arena.swap_nodes(Node::new(1), Node::new(2));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 1, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_non_adjacent_same_ring() {
-        let mut arena = complex_fixture();
-        arena.swap_nodes(Node::new(0), Node::new(2));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 2), [2, 1, 0, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_different_rings() {
-        let mut arena = complex_fixture();
-        arena.swap_nodes(Node::new(1), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 5, 2, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_with_single_node_ring() {
-        let mut arena = complex_fixture();
-        arena.swap_nodes(Node::new(2), Node::new(7));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 7, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 2), [2].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_self_noop() {
-        let mut arena = complex_fixture();
-        arena.swap_nodes(Node::new(1), Node::new(1));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Swap Segments
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_swap_segments_different_rings() {
-        let mut arena = complex_fixture();
-        // Swap [1, 2] from Ring 0 with [5, 6] from Ring 1
-        arena.swap_segments(Node::new(1), Node::new(2), Node::new(5), Node::new(6));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 5, 6, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 2].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_different_lengths() {
-        let mut arena = complex_fixture();
-        // Swap [1, 2, 3] from Ring 0 with [5] from Ring 1
-        arena.swap_segments(Node::new(1), Node::new(3), Node::new(5), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 5].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 2, 3, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_same_ring_adjacent() {
-        let mut arena = complex_fixture();
-        // Swap [0, 1] with [2, 3]
-        arena.swap_segments(Node::new(0), Node::new(1), Node::new(2), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 2), [2, 3, 0, 1].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Relocate Single Nodes
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_relocate_after_same_ring() {
-        let mut arena = complex_fixture();
-        // Move 1 to be after 3
-        arena.relocate_after(Node::new(1), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 3, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_after_different_ring() {
-        let mut arena = complex_fixture();
-        // Move 1 from Ring 0 to after 5 in Ring 1
-        arena.relocate_after(Node::new(1), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 5, 1, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_after_noop() {
-        let mut arena = complex_fixture();
-        arena.relocate_after(Node::new(1), Node::new(0)); // 1 is already after 0
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_before_different_ring() {
-        let mut arena = complex_fixture();
-        // Move 1 from Ring 0 to before 5 in Ring 1 (which means after 4)
-        arena.relocate_before(Node::new(1), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 5, 6].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Relocate Segments
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_relocate_segment_after_different_ring() {
-        let mut arena = complex_fixture();
-        // Move [1, 2] from Ring 0 to after 5 in Ring 1
-        arena.relocate_segment_after(Node::new(1), Node::new(2), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 5, 1, 2, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_before_different_ring() {
-        let mut arena = complex_fixture();
-        // Move [1, 2] from Ring 0 to before 5 in Ring 1 (after 4)
-        arena.relocate_segment_before(Node::new(1), Node::new(2), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 2, 5, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_into_single_node_ring() {
-        let mut arena = complex_fixture();
-        // Move [1, 2] into the single-node ring (after 7)
-        arena.relocate_segment_after(Node::new(1), Node::new(2), Node::new(7));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 7), [7, 1, 2].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Reverse Segments
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_reverse_segment_partial_ring() {
-        let mut arena = complex_fixture();
-        // Reverse [1, 2] in Ring 0
-        arena.reverse_segment(Node::new(1), Node::new(2));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 1, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_full_data_with_sentinel() {
-        // Actually let's just build it correctly:
-        // 4 -> 0 -> 1 -> 2 -> 3 -> 4
-        // next: [1, 2, 3, 4, 0]
-        // prev: [4, 0, 1, 2, 3]
-        let mut arena = RingArena::new(
-            [4, 0, 1, 2, 3].map(Node::new).to_vec(),
-            [1, 2, 3, 4, 0].map(Node::new).to_vec(),
-        );
-
-        // Reverse all data nodes [0, 1, 2, 3], leaving sentinel 4 in place.
-        arena.reverse_segment(Node::new(0), Node::new(3));
-        verify_integrity(&arena);
-        // Ring should now be: 4 -> 3 -> 2 -> 1 -> 0 -> 4
-        assert_eq!(extract_ring(&arena, 4), [4, 3, 2, 1, 0].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_single_node_noop() {
-        let mut arena = complex_fixture();
-        arena.reverse_segment(Node::new(1), Node::new(1));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Iterators
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_sequence_iter() {
-        let arena = complex_fixture();
-        // Start at 1, stop at 0 (so it should yield 1, 2, 3)
-        // SAFETY: every node handed over lies in the arena under test.
-        let seq: Vec<Node> = unsafe {
-            arena
-                .sequence_iter_unchecked(Node::new(1), Node::new(0))
-                .collect()
-        };
-        assert_eq!(seq, [1, 2, 3].map(Node::new).to_vec());
-
-        // Start at 4, stop at 4 (empty)
-        // SAFETY: every node handed over lies in the arena under test.
-        let seq_empty: Vec<Node> = unsafe {
-            arena
-                .sequence_iter_unchecked(Node::new(4), Node::new(4))
-                .collect()
-        };
-        assert!(seq_empty.is_empty());
-    }
-
-    #[test]
-    fn test_sequence_rev_iter() {
-        let arena = complex_fixture();
-        // Start at 3, reverse stop at 0 (should yield 3, 2, 1)
-        // SAFETY: every node handed over lies in the arena under test.
-        let seq: Vec<Node> = unsafe {
-            arena
-                .sequence_rev_iter_unchecked(Node::new(3), Node::new(0))
-                .collect()
-        };
-        assert_eq!(seq, [3, 2, 1].map(Node::new).to_vec());
-    }
-
-    #[test]
-    fn test_edge_iter() {
-        let arena = complex_fixture();
-        // Edges starting at 0, stopping at 3 (should yield (0,1), (1,2))
-        // SAFETY: every node handed over lies in the arena under test.
-        let edges: Vec<(Node, Node)> = unsafe {
-            arena
-                .edge_iter_unchecked(Node::new(0), Node::new(3))
-                .collect()
-        };
-        assert_eq!(
-            edges,
-            vec![(Node::new(0), Node::new(1)), (Node::new(1), Node::new(2))]
-        );
-    }
-
-    #[test]
-    fn test_overwrite() {
-        let mut arena1 = complex_fixture();
-        let arena2 = RingArena::new(
-            [1, 0].map(Node::new).to_vec(),
-            [1, 0].map(Node::new).to_vec(),
-        ); // Two node ring
-
-        arena1.overwrite_from_arena(&arena2);
-        assert_eq!(arena1.len(), 2);
-        assert_eq!(extract_ring(&arena1, 0), [0, 1].map(Node::new));
-
-        let binding_prev = [Node::new(0)];
-        let binding_next = [Node::new(0)];
-        arena1.overwrite_from_slices(&binding_prev, &binding_next); // Single node ring
-        assert_eq!(arena1.len(), 1);
-        assert_eq!(extract_ring(&arena1, 0), [0].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Construction, Accessors, and Resizing
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_empty_arena() {
-        let arena = RingArena::new(vec![], vec![]);
-        assert_eq!(arena.len(), 0);
-        assert!(arena.is_empty());
-    }
-
-    #[test]
-    #[should_panic(expected = "called `RingArena::new` with 1 predecessors and 0 successors")]
-    fn test_new_mismatched_lengths_panics() {
-        RingArena::new(vec![Node::new(0)], vec![]);
-    }
-
-    #[test]
-    fn test_reset_to_self_loops() {
-        let mut arena = complex_fixture();
+    fn test_reset_to_self_loops_makes_each_node_a_ring_of_its_own() {
+        let mut arena = three_rings();
         arena.reset_to_self_loops(5);
         assert_eq!(arena.len(), 5);
-        verify_integrity(&arena);
-        for i in 0..5 {
-            assert_eq!(extract_ring(&arena, i), [Node::new(i)]);
-        }
-    }
-
-    #[test]
-    fn test_reset_to_self_loops_zero() {
-        let mut arena = complex_fixture();
+        assert_eq!(rings_of(&arena), [[0], [1], [2], [3], [4]]);
         arena.reset_to_self_loops(0);
         assert_eq!(arena.len(), 0);
-        assert!(arena.is_empty());
     }
 
     #[test]
-    fn test_prev_next_accessors() {
-        let arena = complex_fixture();
-        assert_eq!(arena.next(Node::new(0)), Node::new(1));
-        assert_eq!(arena.prev(Node::new(1)), Node::new(0));
-        assert_eq!(arena.next(Node::new(3)), Node::new(0));
-        assert_eq!(arena.prev(Node::new(0)), Node::new(3));
-        // Self-loop
-        assert_eq!(arena.next(Node::new(7)), Node::new(7));
-        assert_eq!(arena.prev(Node::new(7)), Node::new(7));
-    }
-
-    #[test]
-    fn test_prev_next_unchecked() {
-        let arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            assert_eq!(arena.next_unchecked(Node::new(0)), Node::new(1));
-            assert_eq!(arena.prev_unchecked(Node::new(1)), Node::new(0));
-            assert_eq!(arena.next_unchecked(Node::new(7)), Node::new(7));
-            assert_eq!(arena.prev_unchecked(Node::new(7)), Node::new(7));
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Swap Nodes (unchecked + extra edge cases)
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_swap_nodes_both_self_loops() {
-        // Two distinct self-loop rings — swapping is a no-op.
-        let mut arena = RingArena::new(
-            [0, 1].map(Node::new).to_vec(),
-            [0, 1].map(Node::new).to_vec(),
-        );
-        arena.swap_nodes(Node::new(0), Node::new(1));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0].map(Node::new));
-        assert_eq!(extract_ring(&arena, 1), [1].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_end_nodes_same_ring() {
-        // Swap the first and last node in Ring 0: [0,1,2,3] -> [3,1,2,0]
-        let mut arena = complex_fixture();
-        arena.swap_nodes(Node::new(0), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 3), [3, 1, 2, 0].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_unchecked_adjacent() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.swap_nodes_unchecked(Node::new(1), Node::new(2)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 1, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_unchecked_non_adjacent() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.swap_nodes_unchecked(Node::new(0), Node::new(2)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 2), [2, 1, 0, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_unchecked_different_rings() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.swap_nodes_unchecked(Node::new(1), Node::new(5)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 5, 2, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_unchecked_with_self_loop() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.swap_nodes_unchecked(Node::new(2), Node::new(7)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 7, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 2), [2].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_unchecked_self_noop() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.swap_nodes_unchecked(Node::new(3), Node::new(3)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_unchecked_reverse_adjacent() {
-        // Test the second_next == first branch.
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.swap_nodes_unchecked(Node::new(2), Node::new(1)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 1, 3].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Swap Segments (unchecked + extra edge cases)
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_swap_segments_self_noop() {
-        let mut arena = complex_fixture();
-        arena.swap_segments(Node::new(1), Node::new(2), Node::new(1), Node::new(2));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_single_nodes() {
-        let mut arena = complex_fixture();
-        arena.swap_segments(Node::new(1), Node::new(1), Node::new(5), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 5, 2, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_full_ring() {
-        // Swap the two halves that together form the entire ring.
-        // Ring: 0 <-> 1 <-> 2 <-> 3; swap [0,1] with [2,3].
-        let mut arena = complex_fixture();
-        arena.swap_segments(Node::new(0), Node::new(1), Node::new(2), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 2), [2, 3, 0, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_reverse_adjacent() {
-        // Adjacent: B immediately before A.
-        let mut arena = complex_fixture();
-        arena.swap_segments(Node::new(2), Node::new(3), Node::new(0), Node::new(1));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_unchecked_different_rings() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            arena.swap_segments_unchecked(Node::new(1), Node::new(2), Node::new(5), Node::new(6));
-        }
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 5, 6, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 2].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_unchecked_adjacent() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            arena.swap_segments_unchecked(Node::new(0), Node::new(1), Node::new(2), Node::new(3));
-        }
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 2), [2, 3, 0, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_unchecked_reverse_adjacent() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            arena.swap_segments_unchecked(Node::new(2), Node::new(3), Node::new(0), Node::new(1));
-        }
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_unchecked_self_noop() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            arena.swap_segments_unchecked(Node::new(1), Node::new(2), Node::new(1), Node::new(2));
-        }
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Relocate (unchecked + extra edge cases)
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_relocate_after_self_noop() {
-        let mut arena = complex_fixture();
-        arena.relocate_after(Node::new(1), Node::new(1));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_before_same_ring() {
-        let mut arena = complex_fixture();
-        // Move 3 to before 1 (after 0)
-        arena.relocate_before(Node::new(3), Node::new(1));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3, 1, 2].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_before_noop() {
-        let mut arena = complex_fixture();
-        // Node 1 is already before 2, moving 1 before 2 is a no-op.
-        arena.relocate_before(Node::new(1), Node::new(2));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_after_into_self_loop() {
-        let mut arena = complex_fixture();
-        // Move node 2 after the self-loop node 7.
-        arena.relocate_after(Node::new(2), Node::new(7));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 7), [7, 2].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_before_into_self_loop() {
-        let mut arena = complex_fixture();
-        // Move node 2 before the self-loop node 7 (which is after 7 since it's a self-loop).
-        arena.relocate_before(Node::new(2), Node::new(7));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 7), [7, 2].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_after_unchecked_same_ring() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.relocate_after_unchecked(Node::new(1), Node::new(3)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 3, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_after_unchecked_different_ring() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.relocate_after_unchecked(Node::new(1), Node::new(5)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 5, 1, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_after_unchecked_noop() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.relocate_after_unchecked(Node::new(1), Node::new(0)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_after_unchecked_self_noop() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.relocate_after_unchecked(Node::new(2), Node::new(2)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_before_unchecked_different_ring() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.relocate_before_unchecked(Node::new(1), Node::new(5)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 5, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_after_same_ring() {
-        let mut arena = complex_fixture();
-        // Move [1,2] to after 3 in Ring 0.
-        arena.relocate_segment_after(Node::new(1), Node::new(2), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3, 1, 2].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_after_noop() {
-        let mut arena = complex_fixture();
-        // Segment [1,2] is already after 0, so using anchor 0 is a no-op.
-        arena.relocate_segment_after(Node::new(1), Node::new(2), Node::new(0));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_before_same_ring() {
-        let mut arena = complex_fixture();
-        // Move [2,3] to before 1 (after 0).
-        arena.relocate_segment_before(Node::new(2), Node::new(3), Node::new(1));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 3, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_before_the_node_it_already_precedes_changes_nothing() {
-        // One ring 0 -> 1 -> 2 -> 3 -> 4; the segment [1, 2] already stands directly before 3.
-        let mut arena = RingArena::new(
-            [4, 0, 1, 2, 3].map(Node::new).to_vec(),
-            [1, 2, 3, 4, 0].map(Node::new).to_vec(),
-        );
-        arena.relocate_segment_before(Node::new(1), Node::new(2), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3, 4].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_after_unchecked_different_ring() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            arena.relocate_segment_after_unchecked(Node::new(1), Node::new(2), Node::new(5));
-        }
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 5, 1, 2, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_after_unchecked_noop() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            arena.relocate_segment_after_unchecked(Node::new(1), Node::new(2), Node::new(0));
-        }
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_segment_before_unchecked_different_ring() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            arena.relocate_segment_before_unchecked(Node::new(1), Node::new(2), Node::new(5));
-        }
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 1, 2, 5, 6].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_single_node_segment() {
-        let mut arena = complex_fixture();
-        arena.relocate_segment_after(Node::new(2), Node::new(2), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 5, 2, 6].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Reverse Segments (unchecked + extra edge cases)
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_reverse_segment_three_nodes() {
-        let mut arena = complex_fixture();
-        // Reverse [1, 2, 3] in Ring 0.
-        arena.reverse_segment(Node::new(1), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3, 2, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_entire_ring_via_all_nodes() {
-        // Ring: 4 -> 0 -> 1 -> 2 -> 3. Reverse [0,1,2,3].
-        let mut arena = RingArena::new(
-            [4, 0, 1, 2, 3].map(Node::new).to_vec(),
-            [1, 2, 3, 4, 0].map(Node::new).to_vec(),
-        );
-        arena.reverse_segment(Node::new(0), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 4), [4, 3, 2, 1, 0].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_two_nodes() {
-        let mut arena = complex_fixture();
-        arena.reverse_segment(Node::new(2), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 3, 2].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_partial_three_node_ring() {
-        let mut arena = complex_fixture();
-        // Reverse [5,6] within Ring 1: [4,5,6] -> [4,6,5]
-        arena.reverse_segment(Node::new(5), Node::new(6));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 4), [4, 6, 5].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_unchecked_partial() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.reverse_segment_unchecked(Node::new(1), Node::new(2)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 2, 1, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_unchecked_three_nodes() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.reverse_segment_unchecked(Node::new(1), Node::new(3)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3, 2, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_unchecked_single_noop() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.reverse_segment_unchecked(Node::new(5), Node::new(5)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 4), [4, 5, 6].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Checked Iterator Variants
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_sequence_iter_checked() {
-        let arena = complex_fixture();
-        let seq: Vec<Node> = arena.sequence_iter(Node::new(1), Node::new(0)).collect();
-        assert_eq!(seq, [1, 2, 3].map(Node::new).to_vec());
-    }
-
-    #[test]
-    fn test_sequence_iter_checked_empty() {
-        let arena = complex_fixture();
-        let seq: Vec<Node> = arena.sequence_iter(Node::new(4), Node::new(4)).collect();
-        assert!(seq.is_empty());
-    }
-
-    #[test]
-    fn test_sequence_iter_checked_full_ring() {
-        let arena = complex_fixture();
-        // Start at 0, stop at 0 — yields nothing (stop is exclusive and immediate).
-        let seq: Vec<Node> = arena.sequence_iter(Node::new(0), Node::new(0)).collect();
-        assert!(seq.is_empty());
-    }
-
-    #[test]
-    fn test_sequence_iter_single_node_ring() {
-        let arena = complex_fixture();
-        let seq: Vec<Node> = arena.sequence_iter(Node::new(7), Node::new(7)).collect();
-        assert!(seq.is_empty());
-    }
-
-    #[test]
-    fn test_sequence_iter_size_hint() {
-        let arena = complex_fixture();
-        let iter = arena.sequence_iter(Node::new(1), Node::new(0));
-        let (lo, hi) = iter.size_hint();
-        assert_eq!(lo, 0);
-        assert!(hi.unwrap() >= 3);
-    }
-
-    #[test]
-    fn test_sequence_rev_iter_full_ring() {
-        let arena = complex_fixture();
-        // Reverse iterate Ring 1 starting from 6, stopping at 4 to get [6, 5].
-        // SAFETY: every node handed over lies in the arena under test.
-        let seq: Vec<Node> = unsafe {
-            arena
-                .sequence_rev_iter_unchecked(Node::new(6), Node::new(4))
-                .collect()
-        };
-        assert_eq!(seq, [6, 5].map(Node::new).to_vec());
-    }
-
-    #[test]
-    fn test_sequence_rev_iter_empty() {
-        let arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        let seq: Vec<Node> = unsafe {
-            arena
-                .sequence_rev_iter_unchecked(Node::new(5), Node::new(5))
-                .collect()
-        };
-        assert!(seq.is_empty());
-    }
-
-    #[test]
-    fn test_edge_iter_checked() {
-        let arena = complex_fixture();
-        let edges: Vec<(Node, Node)> = arena.edge_iter(Node::new(0), Node::new(3)).collect();
-        assert_eq!(
-            edges,
-            vec![(Node::new(0), Node::new(1)), (Node::new(1), Node::new(2))]
-        );
-    }
-
-    #[test]
-    fn test_edge_iter_checked_empty() {
-        let arena = complex_fixture();
-        let edges: Vec<(Node, Node)> = arena.edge_iter(Node::new(4), Node::new(4)).collect();
-        assert!(edges.is_empty());
-    }
-
-    #[test]
-    fn test_edge_iter_single_edge() {
-        let arena = complex_fixture();
-        // From node 5, stop at 4. next(5)=6, next(6)=4 (stop). Should yield (5,6).
-        let edges: Vec<(Node, Node)> = arena.edge_iter(Node::new(5), Node::new(4)).collect();
-        assert_eq!(edges, vec![(Node::new(5), Node::new(6))]);
-    }
-
-    #[test]
-    fn test_edge_iter_immediate_stop() {
-        let arena = complex_fixture();
-        // From 3, stop at 0. next(3) = 0 = stop, so no edges.
-        let edges: Vec<(Node, Node)> = arena.edge_iter(Node::new(3), Node::new(0)).collect();
-        assert!(edges.is_empty());
-    }
-
-    #[test]
-    fn test_edge_iter_size_hint() {
-        let arena = complex_fixture();
-        let iter = arena.edge_iter(Node::new(0), Node::new(3));
-        let (lo, hi) = iter.size_hint();
-        assert_eq!(lo, 0);
-        assert!(hi.is_some());
-    }
-
-    // ----------------------------------------------------------------
-    // Combined / Compound Operations
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_swap_then_reverse() {
-        let mut arena = complex_fixture();
-        arena.swap_nodes(Node::new(1), Node::new(2));
-        verify_integrity(&arena);
-        // After swap: Ring 0 is [0, 2, 1, 3]. Reverse middle segment [2, 1].
-        arena.reverse_segment(Node::new(2), Node::new(1));
-        verify_integrity(&arena);
-        // After reverse [2,1] -> [1,2]: Ring 0 is [0, 1, 2, 3] — back to original.
-        assert_eq!(extract_ring(&arena, 0), [0, 1, 2, 3].map(Node::new));
-    }
-
-    #[test]
-    fn test_relocate_then_swap() {
-        let mut arena = complex_fixture();
-        arena.relocate_after(Node::new(1), Node::new(3));
-        verify_integrity(&arena);
-        // Ring 0 is now [0, 2, 3, 1].
-        arena.swap_nodes(Node::new(0), Node::new(3));
-        verify_integrity(&arena);
-        // After swap: [3, 2, 0, 1].
-        assert_eq!(extract_ring(&arena, 3), [3, 2, 0, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_then_relocate() {
-        let mut arena = complex_fixture();
-        arena.reverse_segment(Node::new(1), Node::new(3));
-        verify_integrity(&arena);
-        // Ring 0: [0, 3, 2, 1].
-        arena.relocate_after(Node::new(0), Node::new(5));
-        verify_integrity(&arena);
-        // Ring 0 becomes [3, 2, 1], Ring 1 becomes [4, 5, 0, 6].
-        assert_eq!(extract_ring(&arena, 3), [3, 2, 1].map(Node::new));
-        assert_eq!(extract_ring(&arena, 4), [4, 5, 0, 6].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Clone / Equality
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_clone_equality() {
-        let arena = complex_fixture();
-        let cloned = arena.clone();
-        assert_eq!(arena, cloned);
-    }
-
-    #[test]
-    fn test_inequality_after_mutation() {
-        let arena = complex_fixture();
-        let mut mutated = arena.clone();
-        mutated.swap_nodes(Node::new(0), Node::new(1));
-        assert_ne!(arena, mutated);
-    }
-
-    #[test]
-    fn test_overwrite_from_arena_equality() {
-        let source = complex_fixture();
-        let mut target = RingArena::new(vec![], vec![]);
-        target.overwrite_from_arena(&source);
-        assert_eq!(source, target);
-    }
-
-    // ----------------------------------------------------------------
-    // Panics
-    // ----------------------------------------------------------------
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::overwrite_from_slices` with 1 predecessors and 0 successors"
-    )]
-    fn test_overwrite_from_slices_mismatched_panics() {
-        let mut arena = complex_fixture();
-        arena.overwrite_from_slices(&[Node::new(0)], &[]);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::sequence_iter` with Node 99, outside an arena of 8 nodes"
-    )]
-    fn test_sequence_iter_out_of_bounds_panics() {
-        let arena = complex_fixture();
-        let _ = arena.sequence_iter(Node::new(99), Node::new(0));
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::edge_iter` with Node 99, outside an arena of 8 nodes"
-    )]
-    fn test_edge_iter_out_of_bounds_panics() {
-        let arena = complex_fixture();
-        let _ = arena.edge_iter(Node::new(99), Node::new(0));
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::new` with a link from Node 2 to Node 3, outside an arena of 3 nodes"
-    )]
-    fn test_new_prev_out_of_bounds_panics() {
-        // prev contains index 3, but len is only 3 (valid range 0..2).
-        RingArena::new(
-            vec![Node::new(1), Node::new(2), Node::new(3)],
-            vec![Node::new(1), Node::new(2), Node::new(0)],
-        );
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::new` with a link from Node 1 to Node 5, outside an arena of 3 nodes"
-    )]
-    fn test_new_next_out_of_bounds_panics() {
-        // next contains index 5, but len is only 3.
-        RingArena::new(
-            vec![Node::new(2), Node::new(0), Node::new(1)],
-            vec![Node::new(1), Node::new(5), Node::new(0)],
-        );
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::overwrite_from_slices` with a link from Node 1 to Node 99, outside"
-    )]
-    fn test_overwrite_from_slices_prev_out_of_bounds_panics() {
-        let mut arena = complex_fixture();
-        arena.overwrite_from_slices(
-            &[Node::new(1), Node::new(99)],
-            &[Node::new(1), Node::new(0)],
-        );
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "called `RingArena::overwrite_from_slices` with a link from Node 1 to Node 42, outside"
-    )]
-    fn test_overwrite_from_slices_next_out_of_bounds_panics() {
-        let mut arena = complex_fixture();
-        arena.overwrite_from_slices(
-            &[Node::new(1), Node::new(0)],
-            &[Node::new(1), Node::new(42)],
-        );
-    }
-
-    #[test]
-    fn test_swap_nodes_in_two_node_ring_keeps_the_ring() {
-        let mut arena = RingArena::new(
-            [1, 0].map(Node::new).to_vec(),
-            [1, 0].map(Node::new).to_vec(),
-        );
-        arena.swap_nodes(Node::new(0), Node::new(1));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_nodes_unchecked_in_two_node_ring_keeps_the_ring() {
-        let mut arena = RingArena::new(
-            [1, 0].map(Node::new).to_vec(),
-            [1, 0].map(Node::new).to_vec(),
-        );
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.swap_nodes_unchecked(Node::new(1), Node::new(0)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_over_a_whole_ring_reverses_it() {
-        let mut arena = complex_fixture();
-        arena.reverse_segment(Node::new(0), Node::new(3));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 3, 2, 1].map(Node::new));
-    }
-
-    #[test]
-    fn test_reverse_segment_unchecked_over_a_whole_ring_reverses_it() {
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe { arena.reverse_segment_unchecked(Node::new(5), Node::new(4)) };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 4), [4, 6, 5].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_with_a_whole_ring_moves_it_into_the_other_place() {
-        // Node 7 is a ring of its own; swapping it with segment [5] of ring [4, 5, 6] exchanges their places.
-        let mut arena = complex_fixture();
-        arena.swap_segments(Node::new(7), Node::new(7), Node::new(5), Node::new(5));
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 4), [4, 7, 6].map(Node::new));
-        assert_eq!(extract_ring(&arena, 5), [5].map(Node::new));
-    }
-
-    #[test]
-    fn test_swap_segments_unchecked_with_a_whole_ring_moves_it_into_the_other_place() {
-        // Ring [4, 5, 6] as one segment swapped with segment [1, 2] of ring [0, 1, 2, 3].
-        let mut arena = complex_fixture();
-        // SAFETY: every node handed over lies in the arena under test.
-        unsafe {
-            arena.swap_segments_unchecked(Node::new(1), Node::new(2), Node::new(4), Node::new(6))
-        };
-        verify_integrity(&arena);
-        assert_eq!(extract_ring(&arena, 0), [0, 4, 5, 6, 3].map(Node::new));
-        assert_eq!(extract_ring(&arena, 1), [1, 2].map(Node::new));
-    }
-
-    // ----------------------------------------------------------------
-    // Private steps
-    // ----------------------------------------------------------------
-
-    fn nodes(indices: &[usize]) -> Vec<Node> {
-        indices.iter().copied().map(Node::new).collect()
-    }
-
-    #[test]
-    fn test_ring_violation_accepts_rings() {
-        assert_eq!(
-            ring_violation(&nodes(&[3, 0, 1, 2]), &nodes(&[1, 2, 3, 0])),
-            None
-        );
-        assert_eq!(ring_violation(&[], &[]), None);
+    fn test_default_has_no_node() {
+        assert_eq!(RingArena::default().len(), 0);
     }
 
     #[cfg(target_pointer_width = "64")]
@@ -2122,76 +1010,312 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn test_reset_to_self_loops_refuses_too_many_nodes_before_changing_anything() {
-        let mut arena = complex_fixture();
+        let mut arena = three_rings();
         let too_many = usize::try_from(u32::MAX).unwrap() + 2;
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             arena.reset_to_self_loops(too_many);
         }));
         assert!(refused.is_err());
-        assert_eq!(arena, complex_fixture());
+        assert_eq!(arena, three_rings());
     }
 
     #[test]
-    fn test_ring_violation_finds_columns_of_different_lengths() {
+    fn test_next_and_prev_follow_the_rings() {
+        let arena = three_rings();
+        let [n0, n1, n3, n7] = nodes([0, 1, 3, 7]);
+        assert_eq!((arena.next(n0), arena.prev(n1)), (n1, n0));
+        assert_eq!((arena.next(n3), arena.prev(n0)), (n0, n3));
+        assert_eq!((arena.next(n7), arena.prev(n7)), (n7, n7));
+    }
+
+    #[test]
+    fn test_swap_nodes_in_one_ring() {
+        for ([first, second], expected) in [
+            ([1, 2], [0, 2, 1, 3]),
+            ([2, 1], [0, 2, 1, 3]),
+            ([0, 2], [0, 3, 2, 1]),
+            ([0, 3], [0, 3, 1, 2]),
+            ([1, 1], [0, 1, 2, 3]),
+        ] {
+            let mut arena = three_rings();
+            arena.swap_nodes(Node::new(first), Node::new(second));
+            assert_links_are_inverse(&arena);
+            assert_eq!(
+                ring_of(&arena, 0),
+                expected,
+                "after swapping {first} and {second}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_swap_nodes_across_rings() {
+        let mut arena = three_rings();
+        arena.swap_nodes(Node::new(1), Node::new(5));
         assert_eq!(
-            ring_violation(&nodes(&[0]), &[]),
-            Some(RingViolation::LengthsDiffer { prev: 1, next: 0 })
+            rings_from(&arena, &[0, 4]),
+            [vec![0, 5, 2, 3], vec![4, 1, 6]]
+        );
+
+        let mut arena = three_rings();
+        arena.swap_nodes(Node::new(2), Node::new(7));
+        assert_eq!(rings_from(&arena, &[0, 2]), [vec![0, 1, 7, 3], vec![2]]);
+    }
+
+    #[test]
+    fn test_swap_nodes_of_rings_of_one_or_two_keeps_the_rings() {
+        let mut arena = arena_of(&[vec![0], vec![1]], 2);
+        arena.swap_nodes(Node::new(0), Node::new(1));
+        assert_eq!(rings_of(&arena), [[0], [1]]);
+
+        let mut arena = one_ring(2);
+        arena.swap_nodes(Node::new(0), Node::new(1));
+        assert_links_are_inverse(&arena);
+        assert_eq!(rings_of(&arena), [[0, 1]]);
+    }
+
+    #[test]
+    fn test_swap_segments_across_rings() {
+        let mut arena = three_rings();
+        arena.swap_segments(Node::new(1), Node::new(2), Node::new(5), Node::new(6));
+        assert_eq!(
+            rings_from(&arena, &[0, 4]),
+            [vec![0, 5, 6, 3], vec![4, 1, 2]]
+        );
+
+        let mut arena = three_rings();
+        arena.swap_segments(Node::new(1), Node::new(3), Node::new(5), Node::new(5));
+        assert_eq!(
+            rings_from(&arena, &[0, 4]),
+            [vec![0, 5], vec![4, 1, 2, 3, 6]]
         );
     }
 
     #[test]
-    fn test_ring_violation_finds_a_successor_outside() {
+    fn test_swap_segments_in_one_ring() {
+        let mut arena = three_rings();
+        arena.swap_segments(Node::new(0), Node::new(1), Node::new(2), Node::new(3));
+        assert_eq!(ring_of(&arena, 2), [2, 3, 0, 1]);
+
+        let mut arena = three_rings();
+        arena.swap_segments(Node::new(1), Node::new(2), Node::new(1), Node::new(2));
+        assert_eq!(ring_of(&arena, 0), [0, 1, 2, 3]);
+
+        let mut arena = one_ring(6);
+        arena.swap_segments(Node::new(1), Node::new(1), Node::new(3), Node::new(4));
+        assert_eq!(ring_of(&arena, 0), [0, 3, 4, 2, 1, 5]);
+    }
+
+    #[test]
+    fn test_swap_segments_with_a_whole_ring_moves_it_into_the_other_place() {
+        let mut arena = three_rings();
+        arena.swap_segments(Node::new(7), Node::new(7), Node::new(5), Node::new(5));
+        assert_eq!(rings_from(&arena, &[4, 5]), [vec![4, 7, 6], vec![5]]);
+
+        let mut arena = three_rings();
+        arena.swap_segments(Node::new(1), Node::new(2), Node::new(4), Node::new(6));
         assert_eq!(
-            ring_violation(&nodes(&[1, 0]), &nodes(&[1, 2])),
-            Some(RingViolation::LinkOutside {
-                node: Node::new(1),
-                link: Node::new(2),
-                len: 2
-            })
+            rings_from(&arena, &[0, 1]),
+            [vec![0, 4, 5, 6, 3], vec![1, 2]]
         );
     }
 
     #[test]
-    fn test_ring_violation_finds_links_that_are_not_inverse() {
-        // 0 -> 1 -> 1: node 1 is its own successor, but node 0 claims it too.
+    fn test_relocate_after() {
+        for ([node, anchor], expected) in [
+            ([1, 3], vec![vec![0, 2, 3, 1], vec![4, 5, 6]]),
+            ([1, 5], vec![vec![0, 2, 3], vec![4, 5, 1, 6]]),
+            ([1, 0], vec![vec![0, 1, 2, 3], vec![4, 5, 6]]),
+            ([1, 1], vec![vec![0, 1, 2, 3], vec![4, 5, 6]]),
+        ] {
+            let mut arena = three_rings();
+            arena.relocate_after(Node::new(node), Node::new(anchor));
+            assert_links_are_inverse(&arena);
+            assert_eq!(
+                rings_from(&arena, &[0, 4]),
+                expected,
+                "after moving {node} after {anchor}"
+            );
+        }
+
+        let mut arena = three_rings();
+        arena.relocate_after(Node::new(2), Node::new(7));
+        assert_eq!(rings_from(&arena, &[0, 7]), [vec![0, 1, 3], vec![7, 2]]);
+    }
+
+    #[test]
+    fn test_relocate_before() {
+        for ([node, anchor], expected) in [
+            ([3, 1], vec![vec![0, 3, 1, 2], vec![4, 5, 6]]),
+            ([1, 5], vec![vec![0, 2, 3], vec![4, 1, 5, 6]]),
+            ([1, 2], vec![vec![0, 1, 2, 3], vec![4, 5, 6]]),
+            ([2, 2], vec![vec![0, 1, 2, 3], vec![4, 5, 6]]),
+        ] {
+            let mut arena = three_rings();
+            arena.relocate_before(Node::new(node), Node::new(anchor));
+            assert_links_are_inverse(&arena);
+            assert_eq!(
+                rings_from(&arena, &[0, 4]),
+                expected,
+                "after moving {node} before {anchor}"
+            );
+        }
+
+        let mut arena = three_rings();
+        arena.relocate_before(Node::new(2), Node::new(7));
+        assert_eq!(rings_from(&arena, &[0, 7]), [vec![0, 1, 3], vec![7, 2]]);
+    }
+
+    #[test]
+    fn test_relocate_segment_after() {
+        for ([first, last, anchor], expected) in [
+            ([1, 2, 5], vec![vec![0, 3], vec![4, 5, 1, 2, 6], vec![7]]),
+            ([1, 2, 3], vec![vec![0, 3, 1, 2], vec![4, 5, 6], vec![7]]),
+            ([1, 2, 0], vec![vec![0, 1, 2, 3], vec![4, 5, 6], vec![7]]),
+            ([2, 2, 5], vec![vec![0, 1, 3], vec![4, 5, 2, 6], vec![7]]),
+            ([1, 2, 7], vec![vec![0, 3], vec![4, 5, 6], vec![7, 1, 2]]),
+        ] {
+            let mut arena = three_rings();
+            arena.relocate_segment_after(Node::new(first), Node::new(last), Node::new(anchor));
+            assert_links_are_inverse(&arena);
+            assert_eq!(
+                rings_from(&arena, &[0, 4, 7]),
+                expected,
+                "after moving {first} to {last} after {anchor}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_relocate_segment_before() {
+        for ([first, last, anchor], expected) in [
+            ([1, 2, 5], vec![vec![0, 3], vec![4, 1, 2, 5, 6]]),
+            ([2, 3, 1], vec![vec![0, 2, 3, 1], vec![4, 5, 6]]),
+            ([1, 2, 3], vec![vec![0, 1, 2, 3], vec![4, 5, 6]]),
+        ] {
+            let mut arena = three_rings();
+            // SAFETY: every node handed over lies in the arena under test.
+            unsafe {
+                arena.relocate_segment_before_unchecked(
+                    Node::new(first),
+                    Node::new(last),
+                    Node::new(anchor),
+                );
+            }
+            assert_links_are_inverse(&arena);
+            assert_eq!(
+                rings_from(&arena, &[0, 4]),
+                expected,
+                "after moving {first} to {last} before {anchor}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_relocate_segment_before_the_node_it_already_precedes_changes_nothing() {
+        // One ring 0 -> 1 -> 2 -> 3 -> 4; the segment [1, 2] already stands directly before 3.
+        let mut arena = one_ring(5);
+        // SAFETY: every node handed over lies in the arena under test.
+        unsafe {
+            arena.relocate_segment_before_unchecked(Node::new(1), Node::new(2), Node::new(3))
+        };
+        assert_links_are_inverse(&arena);
+        assert_eq!(ring_of(&arena, 0), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_reverse_segment() {
+        for ([first, last], expected) in [
+            ([1, 2], vec![0, 2, 1, 3]),
+            ([1, 3], vec![0, 3, 2, 1]),
+            ([2, 3], vec![0, 1, 3, 2]),
+            ([1, 1], vec![0, 1, 2, 3]),
+            ([0, 3], vec![0, 3, 2, 1]),
+            ([2, 1], vec![0, 3, 2, 1]),
+        ] {
+            let mut arena = three_rings();
+            arena.reverse_segment(Node::new(first), Node::new(last));
+            assert_links_are_inverse(&arena);
+            assert_eq!(
+                ring_of(&arena, 0),
+                expected,
+                "after reversing {first} to {last}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reverse_segment_of_all_but_one_node_of_a_ring() {
+        // Ring 4 -> 0 -> 1 -> 2 -> 3; reversing 0 to 3 leaves 4 in place.
+        let mut arena = arena_of(&[vec![4, 0, 1, 2, 3]], 5);
+        arena.reverse_segment(Node::new(0), Node::new(3));
+        assert_links_are_inverse(&arena);
+        assert_eq!(ring_of(&arena, 4), [4, 3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn test_steps_compose() {
+        let mut arena = three_rings();
+        arena.swap_nodes(Node::new(1), Node::new(2));
+        arena.reverse_segment(Node::new(2), Node::new(1));
+        assert_eq!(ring_of(&arena, 0), [0, 1, 2, 3]);
+
+        arena.relocate_after(Node::new(1), Node::new(3));
+        arena.swap_nodes(Node::new(0), Node::new(3));
+        assert_eq!(ring_of(&arena, 3), [3, 2, 0, 1]);
+
+        arena.relocate_after(Node::new(0), Node::new(5));
         assert_eq!(
-            ring_violation(&nodes(&[1, 0]), &nodes(&[1, 1])),
-            Some(RingViolation::NotInverse {
-                node: Node::new(1),
-                next: Node::new(1),
-                prev_of_next: Node::new(0)
-            })
+            rings_from(&arena, &[3, 4]),
+            [vec![3, 2, 1], vec![4, 5, 0, 6]]
         );
     }
 
     #[test]
-    #[should_panic(
-        expected = "called `RingArena::new` with Node 1 followed by Node 1, whose predecessor is Node 0"
-    )]
-    fn test_new_refuses_links_that_are_no_rings() {
-        let _ = RingArena::new(nodes(&[1, 0]), nodes(&[1, 1]));
+    fn test_clone_from_reuses_the_buffers_and_copies_the_rings() {
+        let source = three_rings();
+        let mut target = RingArena::default();
+        target.reset_to_self_loops(100);
+        let capacities = (target.prev.capacity(), target.next.capacity());
+        target.clone_from(&source);
+        assert_eq!(target, source);
+        assert_eq!((target.prev.capacity(), target.next.capacity()), capacities);
+    }
+
+    #[test]
+    fn test_a_step_makes_the_arena_differ_from_its_clone() {
+        let arena = three_rings();
+        let mut changed = arena.clone();
+        assert_eq!(changed, arena);
+        changed.swap_nodes(Node::new(0), Node::new(1));
+        assert_ne!(changed, arena);
     }
 
     #[test]
     fn test_slots_refuses_the_first_node_outside() {
-        let arena = complex_fixture();
+        let arena = three_rings();
+        assert_eq!(arena.slots(nodes([7, 8, 9])), Err(Node::new(8)));
         assert_eq!(
-            arena.slots([Node::new(7), Node::new(8), Node::new(9)]),
-            Err(NodeOutside {
-                node: Node::new(8),
-                len: 8
-            })
+            arena
+                .slots(nodes([7, 0]))
+                .map(|slots| slots.map(Slot::node)),
+            Ok(nodes([7, 0]))
         );
+    }
+
+    #[test]
+    fn test_node_outside_names_the_step_the_node_and_the_arena() {
+        let outside = three_rings().outside(Step::RelocateSegmentAfter, Node::new(9));
         assert_eq!(
-            arena.slots([Node::new(7), Node::new(0)]),
-            Ok([Slot(Node::new(7)), Slot(Node::new(0))])
+            outside.to_string(),
+            "called `RingArena::relocate_segment_after` with Node 9, outside an arena of 8 nodes"
         );
     }
 
     #[test]
     fn test_follows_walks_one_ring() {
-        let arena = complex_fixture();
-        let slot = |index| Slot(Node::new(index));
+        let arena = three_rings();
+        let slot = |index| arena.slots([Node::new(index)]).unwrap()[0];
         assert!(arena.follows(slot(1), slot(3)));
         assert!(arena.follows(slot(3), slot(1)));
         assert!(arena.follows(slot(2), slot(2)));
@@ -2200,8 +1324,8 @@ mod tests {
 
     #[test]
     fn test_segment_holds_only_the_nodes_between_its_ends() {
-        let arena = complex_fixture();
-        let slot = |index| Slot(Node::new(index));
+        let arena = three_rings();
+        let slot = |index| arena.slots([Node::new(index)]).unwrap()[0];
         assert!(arena.segment_holds(slot(1), slot(3), slot(2)));
         assert!(arena.segment_holds(slot(1), slot(3), slot(1)));
         assert!(arena.segment_holds(slot(1), slot(3), slot(3)));
@@ -2211,148 +1335,122 @@ mod tests {
     }
 
     #[test]
-    fn test_default_is_empty() {
-        assert!(RingArena::default().is_empty());
+    fn test_same_or_disjoint() {
+        let arena = three_rings();
+        let slot = |index| arena.slots([Node::new(index)]).unwrap()[0];
+        assert!(arena.same_or_disjoint(slot(1), slot(2), slot(1), slot(2)));
+        assert!(arena.same_or_disjoint(slot(0), slot(1), slot(2), slot(3)));
+        assert!(arena.same_or_disjoint(slot(0), slot(1), slot(4), slot(6)));
+        assert!(!arena.same_or_disjoint(slot(1), slot(2), slot(1), slot(3)));
+        assert!(!arena.same_or_disjoint(slot(0), slot(2), slot(1), slot(3)));
+        assert!(!arena.same_or_disjoint(slot(3), slot(1), slot(0), slot(0)));
     }
 
     #[test]
-    fn test_sequence_rev_iter_checked() {
-        let arena = complex_fixture();
-        let seq: Vec<Node> = arena
-            .sequence_rev_iter(Node::new(3), Node::new(0))
-            .collect();
-        assert_eq!(seq, nodes(&[3, 2, 1]));
+    #[should_panic(expected = "called `RingArena::next` with Node 8, outside an arena of 8 nodes")]
+    fn test_next_refuses_a_node_outside() {
+        let _ = three_rings().next(Node::new(8));
+    }
+
+    #[test]
+    #[should_panic(expected = "called `RingArena::prev` with Node 8, outside an arena of 8 nodes")]
+    fn test_prev_refuses_a_node_outside() {
+        let _ = three_rings().prev(Node::new(8));
     }
 
     #[test]
     #[should_panic(
         expected = "called `RingArena::swap_nodes` with Node 8, outside an arena of 8 nodes"
     )]
-    fn test_swap_nodes_panics_outside_the_arena() {
-        complex_fixture().swap_nodes(Node::new(0), Node::new(8));
-    }
-
-    #[test]
-    #[should_panic(expected = "called `RingArena::next` with Node 8, outside an arena of 8 nodes")]
-    fn test_next_panics_outside_the_arena() {
-        let _ = complex_fixture().next(Node::new(8));
+    fn test_swap_nodes_refuses_a_node_outside() {
+        three_rings().swap_nodes(Node::new(0), Node::new(8));
     }
 
     #[test]
     #[should_panic(
-        expected = "called `RingArena::reverse` with a last node that does not follow the first"
+        expected = "called `RingArena::swap_segments` with Node 9, outside an arena of 8 nodes"
+    )]
+    fn test_swap_segments_refuses_a_node_outside() {
+        three_rings().swap_segments(Node::new(0), Node::new(1), Node::new(9), Node::new(2));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "called `RingArena::relocate_after` with Node 8, outside an arena of 8 nodes"
+    )]
+    fn test_relocate_after_refuses_a_node_outside() {
+        three_rings().relocate_after(Node::new(8), Node::new(0));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "called `RingArena::relocate_before` with Node 8, outside an arena of 8 nodes"
+    )]
+    fn test_relocate_before_refuses_a_node_outside() {
+        three_rings().relocate_before(Node::new(0), Node::new(8));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "called `RingArena::relocate_segment_after` with Node 8, outside an arena of 8 nodes"
+    )]
+    fn test_relocate_segment_after_refuses_a_node_outside() {
+        three_rings().relocate_segment_after(Node::new(0), Node::new(1), Node::new(8));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "called `RingArena::reverse_segment` with Node 8, outside an arena of 8 nodes"
+    )]
+    fn test_reverse_segment_refuses_a_node_outside() {
+        three_rings().reverse_segment(Node::new(8), Node::new(1));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "called `RingArena::reverse_segment` with Node 5, which does not follow Node 1"
     )]
     fn test_reverse_segment_across_rings_fails_its_precondition() {
-        complex_fixture().reverse_segment(Node::new(1), Node::new(5));
+        three_rings().reverse_segment(Node::new(1), Node::new(5));
     }
 
     #[test]
     #[should_panic(
-        expected = "called `RingArena::move_range_after` with an anchor inside the segment"
+        expected = "called `RingArena::relocate_segment_after` with anchor Node 2 inside the segment Node 1 to Node 3"
     )]
     fn test_relocate_segment_onto_itself_fails_its_precondition() {
-        complex_fixture().relocate_segment_after(Node::new(1), Node::new(3), Node::new(2));
+        three_rings().relocate_segment_after(Node::new(1), Node::new(3), Node::new(2));
     }
 
     #[test]
-    #[should_panic(expected = "called `RingArena::swap_ranges` with overlapping segments")]
-    fn test_swap_segments_of_one_first_node_but_different_last_nodes_fails_its_precondition() {
-        complex_fixture().swap_segments(Node::new(1), Node::new(2), Node::new(1), Node::new(3));
+    #[should_panic(
+        expected = "called `RingArena::relocate_segment_before_unchecked` with anchor Node 2 inside the segment"
+    )]
+    fn test_relocate_segment_before_onto_itself_fails_its_precondition() {
+        // SAFETY: every node handed over lies in the arena under test.
+        unsafe {
+            three_rings().relocate_segment_before_unchecked(
+                Node::new(1),
+                Node::new(3),
+                Node::new(2),
+            )
+        };
     }
 
     #[test]
-    #[should_panic(expected = "called `RingArena::swap_ranges` with overlapping segments")]
+    #[should_panic(expected = "called `RingArena::swap_segments` with overlapping segments")]
     fn test_swap_overlapping_segments_fails_its_precondition() {
-        complex_fixture().swap_segments(Node::new(0), Node::new(2), Node::new(1), Node::new(3));
+        three_rings().swap_segments(Node::new(0), Node::new(2), Node::new(1), Node::new(3));
     }
 
-    // ----------------------------------------------------------------
-    // Against a model
-    // ----------------------------------------------------------------
-
-    // The rings as lists of node indices, each in successor order: the model the arena is checked against.
-    type Rings = Vec<Vec<usize>>;
-
-    fn arena_of(rings: &Rings, len: usize) -> RingArena {
-        let mut prev = vec![Node::new(0); len];
-        let mut next = vec![Node::new(0); len];
-        for ring in rings {
-            for (position, &node) in ring.iter().enumerate() {
-                let following = ring[(position + 1) % ring.len()];
-                next[node] = Node::new(following);
-                prev[following] = Node::new(node);
-            }
-        }
-        RingArena::new(prev, next)
-    }
-
-    // Each ring rotated to start at its least node, the rings in order: equal for equal cyclic orders.
-    fn canonical(rings: &Rings) -> Rings {
-        let mut rings: Rings = rings
-            .iter()
-            .filter(|ring| !ring.is_empty())
-            .map(|ring| {
-                let least = ring
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|&(_, &node)| node)
-                    .unwrap()
-                    .0;
-                ring[least..]
-                    .iter()
-                    .chain(&ring[..least])
-                    .copied()
-                    .collect()
-            })
-            .collect();
-        rings.sort();
-        rings
-    }
-
-    fn rings_of(arena: &RingArena) -> Rings {
-        let mut seen = vec![false; arena.len()];
-        let mut rings = Rings::new();
-        for start in 0..arena.len() {
-            if !seen[start] {
-                let ring = extract_ring(arena, start);
-                for node in &ring {
-                    seen[node.index()] = true;
-                }
-                rings.push(ring.iter().map(|node| node.index()).collect());
-            }
-        }
-        canonical(&rings)
-    }
-
-    // The ring holding `node` and the node's place in it.
-    fn locate(rings: &Rings, node: usize) -> (usize, usize) {
-        rings
-            .iter()
-            .enumerate()
-            .find_map(|(ring, nodes)| {
-                nodes
-                    .iter()
-                    .position(|&n| n == node)
-                    .map(|place| (ring, place))
-            })
-            .unwrap()
-    }
-
-    // The ring of `first` rotated to start at it, and the segment of `extra + 1` nodes it starts.
-    fn segment(rings: &Rings, first: usize, extra: usize) -> (usize, Vec<usize>, Vec<usize>) {
-        let (ring, place) = locate(rings, first);
-        let nodes = &rings[ring];
-        let rotated: Vec<usize> = nodes[place..]
-            .iter()
-            .chain(&nodes[..place])
-            .copied()
-            .collect();
-        let length = extra % rotated.len() + 1;
-        (ring, rotated[..length].to_vec(), rotated[length..].to_vec())
+    #[test]
+    #[should_panic(expected = "called `RingArena::swap_segments` with overlapping segments")]
+    fn test_swap_segments_of_one_first_node_but_different_last_nodes_fails_its_precondition() {
+        three_rings().swap_segments(Node::new(1), Node::new(2), Node::new(1), Node::new(3));
     }
 
     #[derive(Clone, Debug)]
-    enum Step {
+    enum Change {
         SwapNodes(usize, usize),
         RelocateAfter(usize, usize),
         RelocateBefore(usize, usize),
@@ -2362,189 +1460,218 @@ mod tests {
         SwapSegments(usize, usize, usize, usize),
     }
 
-    fn step() -> impl Strategy<Value = Step> {
+    fn change() -> impl Strategy<Value = Change> {
         let any = || 0usize..64;
         prop_oneof![
-            (any(), any()).prop_map(|(a, b)| Step::SwapNodes(a, b)),
-            (any(), any()).prop_map(|(a, b)| Step::RelocateAfter(a, b)),
-            (any(), any()).prop_map(|(a, b)| Step::RelocateBefore(a, b)),
-            (any(), any()).prop_map(|(a, b)| Step::Reverse(a, b)),
-            (any(), any(), any()).prop_map(|(a, b, c)| Step::RelocateSegmentAfter(a, b, c)),
-            (any(), any(), any()).prop_map(|(a, b, c)| Step::RelocateSegmentBefore(a, b, c)),
-            (any(), any(), any(), any()).prop_map(|(a, b, c, d)| Step::SwapSegments(a, b, c, d)),
+            (any(), any()).prop_map(|(a, b)| Change::SwapNodes(a, b)),
+            (any(), any()).prop_map(|(a, b)| Change::RelocateAfter(a, b)),
+            (any(), any()).prop_map(|(a, b)| Change::RelocateBefore(a, b)),
+            (any(), any()).prop_map(|(a, b)| Change::Reverse(a, b)),
+            (any(), any(), any()).prop_map(|(a, b, c)| Change::RelocateSegmentAfter(a, b, c)),
+            (any(), any(), any()).prop_map(|(a, b, c)| Change::RelocateSegmentBefore(a, b, c)),
+            (any(), any(), any(), any()).prop_map(|(a, b, c, d)| Change::SwapSegments(a, b, c, d)),
         ]
     }
 
-    fn start() -> impl Strategy<Value = (usize, Rings)> {
-        (1usize..10).prop_flat_map(|len| {
-            (
-                Just((0..len).collect::<Vec<_>>()).prop_shuffle(),
-                proptest::collection::vec(any::<bool>(), len),
-            )
-                .prop_map(move |(order, cuts)| {
-                    let mut rings = vec![Vec::new()];
-                    for (node, cut) in order.into_iter().zip(cuts) {
-                        if cut && !rings.last().unwrap().is_empty() {
-                            rings.push(Vec::new());
-                        }
-                        rings.last_mut().unwrap().push(node);
-                    }
-                    (len, rings)
-                })
-        })
+    /// The model and two arenas kept in step: the checked steps change `checked`, their unchecked twins change
+    /// `unchecked`, and both must keep the rings of the model.
+    struct Harness {
+        len: usize,
+        rings: Rings,
+        checked: RingArena,
+        unchecked: RingArena,
     }
 
-    // Applies `step` to the model and to both arenas, the checked steps on `checked` and the unchecked twins on
-    // `unchecked`, unless the step's nodes break its preconditions, which leaves all three as they were.
-    fn apply(
-        step: &Step,
-        len: usize,
-        rings: &mut Rings,
-        checked: &mut RingArena,
-        unchecked: &mut RingArena,
-    ) {
-        let node = |index: usize| Node::new(index % len);
-        match *step {
-            Step::SwapNodes(a, b) => {
-                let ((ring_a, place_a), (ring_b, place_b)) =
-                    (locate(rings, a % len), locate(rings, b % len));
-                let held = rings[ring_a][place_a];
-                rings[ring_a][place_a] = rings[ring_b][place_b];
-                rings[ring_b][place_b] = held;
-                checked.swap_nodes(node(a), node(b));
+    impl Harness {
+        fn new(len: usize, rings: Rings) -> Self {
+            let checked = arena_of(&rings, len);
+            let unchecked = checked.clone();
+            Self {
+                len,
+                rings,
+                checked,
+                unchecked,
+            }
+        }
+
+        fn node(&self, index: usize) -> Node {
+            Node::new(index % self.len)
+        }
+
+        /// Applies `change` to the model and to both arenas, unless its nodes break the step's preconditions,
+        /// which leaves all three as they were.
+        fn apply(&mut self, change: &Change) {
+            match *change {
+                Change::SwapNodes(a, b) => self.swap_nodes(a % self.len, b % self.len),
+                Change::RelocateAfter(a, b) => self.relocate(a % self.len, b % self.len, true),
+                Change::RelocateBefore(a, b) => self.relocate(a % self.len, b % self.len, false),
+                Change::Reverse(a, extra) => self.reverse(a % self.len, extra),
+                Change::RelocateSegmentAfter(a, extra, c) => {
+                    self.relocate_segment(a % self.len, extra, c, true)
+                }
+                Change::RelocateSegmentBefore(a, extra, c) => {
+                    self.relocate_segment(a % self.len, extra, c, false)
+                }
+                Change::SwapSegments(a, a_extra, b, b_extra) => {
+                    self.swap_segments(a % self.len, a_extra, b % self.len, b_extra);
+                }
+            }
+        }
+
+        fn swap_nodes(&mut self, a: usize, b: usize) {
+            let ((ring_a, place_a), (ring_b, place_b)) =
+                (locate(&self.rings, a), locate(&self.rings, b));
+            self.rings[ring_a][place_a] = b;
+            self.rings[ring_b][place_b] = a;
+            let [a, b] = nodes([a, b]);
+            self.checked.swap_nodes(a, b);
+            // SAFETY: every node handed over lies in the arena under test.
+            unsafe { self.unchecked.swap_nodes_unchecked(a, b) };
+        }
+
+        fn relocate(&mut self, moved: usize, anchor: usize, after: bool) {
+            if moved != anchor {
+                let (ring, place) = locate(&self.rings, moved);
+                self.rings[ring].remove(place);
+                let (ring, place) = locate(&self.rings, anchor);
+                self.rings[ring].insert(if after { place + 1 } else { place }, moved);
+                self.rings.retain(|ring| !ring.is_empty());
+            }
+            let [moved, anchor] = nodes([moved, anchor]);
+            if after {
+                self.checked.relocate_after(moved, anchor);
                 // SAFETY: every node handed over lies in the arena under test.
-                unsafe { unchecked.swap_nodes_unchecked(node(a), node(b)) };
-            }
-            Step::RelocateAfter(a, b) | Step::RelocateBefore(a, b) => {
-                let (moved, anchor) = (a % len, b % len);
-                if moved == anchor {
-                    return;
-                }
-                let (ring, place) = locate(rings, moved);
-                rings[ring].remove(place);
-                let (ring, place) = locate(rings, anchor);
-                let after = matches!(step, Step::RelocateAfter(..));
-                rings[ring].insert(if after { place + 1 } else { place }, moved);
-                if after {
-                    checked.relocate_after(node(a), node(b));
-                    // SAFETY: every node handed over lies in the arena under test.
-                    unsafe { unchecked.relocate_after_unchecked(node(a), node(b)) };
-                } else {
-                    checked.relocate_before(node(a), node(b));
-                    // SAFETY: every node handed over lies in the arena under test.
-                    unsafe { unchecked.relocate_before_unchecked(node(a), node(b)) };
-                }
-            }
-            Step::Reverse(a, extra) => {
-                let (ring, mut nodes, rest) = segment(rings, a % len, extra);
-                let last = *nodes.last().unwrap();
-                nodes.reverse();
-                rings[ring] = nodes.into_iter().chain(rest).collect();
-                checked.reverse_segment(node(a), Node::new(last));
+                unsafe { self.unchecked.relocate_after_unchecked(moved, anchor) };
+            } else {
+                self.checked.relocate_before(moved, anchor);
                 // SAFETY: every node handed over lies in the arena under test.
-                unsafe { unchecked.reverse_segment_unchecked(node(a), Node::new(last)) };
+                unsafe { self.unchecked.relocate_before_unchecked(moved, anchor) };
             }
-            Step::RelocateSegmentAfter(a, extra, c) | Step::RelocateSegmentBefore(a, extra, c) => {
-                let (ring, nodes, rest) = segment(rings, a % len, extra);
-                let anchor = c % len;
-                if nodes.contains(&anchor) {
-                    return;
-                }
-                let (first, last) = (Node::new(nodes[0]), Node::new(*nodes.last().unwrap()));
-                rings[ring] = rest;
-                let (anchor_ring, place) = locate(rings, anchor);
-                let after = matches!(step, Step::RelocateSegmentAfter(..));
-                let at = if after { place + 1 } else { place };
-                rings[anchor_ring].splice(at..at, nodes);
-                rings.retain(|ring| !ring.is_empty());
-                if after {
-                    checked.relocate_segment_after(first, last, node(c));
-                    // SAFETY: every node handed over lies in the arena under test.
-                    unsafe { unchecked.relocate_segment_after_unchecked(first, last, node(c)) };
-                } else {
-                    checked.relocate_segment_before(first, last, node(c));
-                    // SAFETY: every node handed over lies in the arena under test.
-                    unsafe { unchecked.relocate_segment_before_unchecked(first, last, node(c)) };
-                }
+        }
+
+        fn reverse(&mut self, first: usize, extra: usize) {
+            let (ring, mut nodes, rest) = segment(&self.rings, first, extra);
+            let last = Node::new(*nodes.last().unwrap());
+            nodes.reverse();
+            self.rings[ring] = nodes.into_iter().chain(rest).collect();
+            let first = Node::new(first);
+            self.checked.reverse_segment(first, last);
+            // SAFETY: every node handed over lies in the arena under test.
+            unsafe { self.unchecked.reverse_segment_unchecked(first, last) };
+        }
+
+        fn relocate_segment(&mut self, first: usize, extra: usize, anchor: usize, after: bool) {
+            let (ring, nodes, rest) = segment(&self.rings, first, extra);
+            let anchor = self.node(anchor);
+            if nodes.contains(&anchor.index()) {
+                return;
             }
-            Step::SwapSegments(a, a_extra, b, b_extra) => {
-                let (ring_a, nodes_a, rest_a) = segment(rings, a % len, a_extra);
-                let (ring_b, nodes_b, rest_b) = segment(rings, b % len, b_extra);
-                let same = nodes_a == nodes_b;
-                if !same && (nodes_a.contains(&nodes_b[0]) || nodes_b.contains(&nodes_a[0])) {
-                    return;
-                }
-                let (a_first, a_last) = (nodes_a[0], *nodes_a.last().unwrap());
-                let (b_first, b_last) = (nodes_b[0], *nodes_b.last().unwrap());
-                if same {
-                } else if ring_a == ring_b {
-                    // The ring is A, X, B, Y with A first; it becomes B, X, A, Y.
-                    let split = rest_a.iter().position(|&n| n == b_first).unwrap();
-                    let (between, after_b) = (&rest_a[..split], &rest_a[split + nodes_b.len()..]);
-                    rings[ring_a] = nodes_b
-                        .iter()
-                        .chain(between)
-                        .chain(&nodes_a)
-                        .chain(after_b)
-                        .copied()
-                        .collect();
-                } else {
-                    rings[ring_a] = nodes_b.iter().chain(&rest_a).copied().collect();
-                    rings[ring_b] = nodes_a.iter().chain(&rest_b).copied().collect();
-                }
-                let ends = [a_first, a_last, b_first, b_last].map(Node::new);
-                checked.swap_segments(ends[0], ends[1], ends[2], ends[3]);
+            let (first, last) = (Node::new(nodes[0]), Node::new(*nodes.last().unwrap()));
+            self.rings[ring] = rest;
+            let (anchor_ring, place) = locate(&self.rings, anchor.index());
+            let at = if after { place + 1 } else { place };
+            self.rings[anchor_ring].splice(at..at, nodes);
+            self.rings.retain(|ring| !ring.is_empty());
+            if after {
+                self.checked.relocate_segment_after(first, last, anchor);
                 // SAFETY: every node handed over lies in the arena under test.
-                unsafe { unchecked.swap_segments_unchecked(ends[0], ends[1], ends[2], ends[3]) };
+                unsafe {
+                    self.unchecked
+                        .relocate_segment_after_unchecked(first, last, anchor)
+                };
+            } else {
+                // The checked arena has no checked twin of this step; both arenas take the unchecked one.
+                // SAFETY: every node handed over lies in the arena under test.
+                unsafe {
+                    self.checked
+                        .relocate_segment_before_unchecked(first, last, anchor);
+                    self.unchecked
+                        .relocate_segment_before_unchecked(first, last, anchor);
+                }
             }
+        }
+
+        fn swap_segments(&mut self, a: usize, a_extra: usize, b: usize, b_extra: usize) {
+            let (ring_a, nodes_a, rest_a) = segment(&self.rings, a, a_extra);
+            let (ring_b, nodes_b, rest_b) = segment(&self.rings, b, b_extra);
+            let same = nodes_a == nodes_b;
+            if !same && (nodes_a.contains(&nodes_b[0]) || nodes_b.contains(&nodes_a[0])) {
+                return;
+            }
+            if same {
+                // A segment swapped with itself stays.
+            } else if ring_a == ring_b {
+                // The ring is A, X, B, Y with A first; it becomes B, X, A, Y.
+                let split = rest_a.iter().position(|&n| n == nodes_b[0]).unwrap();
+                let (between, after_b) = (&rest_a[..split], &rest_a[split + nodes_b.len()..]);
+                self.rings[ring_a] = nodes_b
+                    .iter()
+                    .chain(between)
+                    .chain(&nodes_a)
+                    .chain(after_b)
+                    .copied()
+                    .collect();
+            } else {
+                self.rings[ring_a] = nodes_b.iter().chain(&rest_a).copied().collect();
+                self.rings[ring_b] = nodes_a.iter().chain(&rest_b).copied().collect();
+            }
+            let [a_first, a_last, b_first, b_last] = nodes([
+                nodes_a[0],
+                *nodes_a.last().unwrap(),
+                nodes_b[0],
+                *nodes_b.last().unwrap(),
+            ]);
+            self.checked.swap_segments(a_first, a_last, b_first, b_last);
+            // SAFETY: every node handed over lies in the arena under test.
+            unsafe {
+                self.unchecked
+                    .swap_segments_unchecked(a_first, a_last, b_first, b_last)
+            };
         }
     }
 
     proptest! {
         #[test]
         fn test_steps_match_the_model_of_rings_as_lists(
-            (len, rings) in start(),
-            steps in proptest::collection::vec(step(), 0..24),
+            (len, rings) in some_rings(),
+            changes in proptest::collection::vec(change(), 0..24),
         ) {
-            let mut rings = rings;
-            let mut checked = arena_of(&rings, len);
-            let mut unchecked = checked.clone();
-            prop_assert_eq!(rings_of(&checked), canonical(&rings));
-            for step in &steps {
-                apply(step, len, &mut rings, &mut checked, &mut unchecked);
-                verify_integrity(&checked);
-                prop_assert_eq!(rings_of(&checked), canonical(&rings), "after {:?}", step);
-                prop_assert_eq!(&unchecked, &checked, "after {:?}", step);
+            let mut harness = Harness::new(len, rings);
+            prop_assert_eq!(rings_of(&harness.checked), canonical(&harness.rings));
+            for change in &changes {
+                harness.apply(change);
+                assert_links_are_inverse(&harness.checked);
+                prop_assert_eq!(rings_of(&harness.checked), canonical(&harness.rings), "after {:?}", change);
+                prop_assert_eq!(&harness.unchecked, &harness.checked, "after {:?}", change);
             }
         }
 
         #[test]
-        fn test_sequence_iter_walks_the_model_ring(
-            (len, rings) in start(),
-            start_at in 0usize..64,
-            stop_at in 0usize..64,
+        fn test_next_and_prev_equal_their_unchecked_twins((len, rings) in some_rings()) {
+            let arena = arena_of(&rings, len);
+            for node in (0..len).map(Node::new) {
+                // SAFETY: every node below the length lies in the arena.
+                let (next, prev) = unsafe { (arena.next_unchecked(node), arena.prev_unchecked(node)) };
+                prop_assert_eq!(arena.next(node), next);
+                prop_assert_eq!(arena.prev(node), prev);
+                let ring = &rings[locate(&rings, node.index()).0];
+                let place = ring.iter().position(|&n| n == node.index()).unwrap();
+                prop_assert_eq!(next.index(), ring[(place + 1) % ring.len()]);
+                prop_assert_eq!(prev.index(), ring[(place + ring.len() - 1) % ring.len()]);
+            }
+        }
+
+        #[test]
+        fn test_slots_refuse_every_node_outside_and_take_every_node_inside(
+            (len, rings) in some_rings(),
+            inside in 0usize..64,
+            beyond in prop_oneof![0usize..64, Just(usize::try_from(u32::MAX).unwrap())],
         ) {
             let arena = arena_of(&rings, len);
-            let start = start_at % len;
-            let (ring, place) = locate(&rings, start);
-            let nodes = &rings[ring];
-            let stop = nodes[stop_at % nodes.len()];
-            let expected: Vec<usize> = nodes[place..]
-                .iter()
-                .chain(&nodes[..place])
-                .copied()
-                .take_while(|&n| n != stop)
-                .collect();
-            let walked: Vec<usize> = arena.sequence_iter(Node::new(start), Node::new(stop)).map(Node::index).collect();
-            // SAFETY: every node handed over lies in the arena under test.
-            let unchecked: Vec<usize> = unsafe { arena.sequence_iter_unchecked(Node::new(start), Node::new(stop)) }
-                .map(Node::index)
-                .collect();
-            prop_assert_eq!(&walked, &expected);
-            prop_assert_eq!(&unchecked, &expected);
-            let edges: Vec<(usize, usize)> =
-                arena.edge_iter(Node::new(start), Node::new(stop)).map(|(a, b)| (a.index(), b.index())).collect();
-            prop_assert_eq!(edges, expected.windows(2).map(|pair| (pair[0], pair[1])).collect::<Vec<_>>());
+            let (inside, outside) = (Node::new(inside % len), Node::new(len.max(beyond)));
+            prop_assert_eq!(arena.slots([inside]).map(|[slot]| slot.node()), Ok(inside));
+            prop_assert_eq!(arena.slots([inside, outside]).map(|slots| slots.map(Slot::node)), Err(outside));
+            prop_assert_eq!(arena.slots([outside, inside]).map(|slots| slots.map(Slot::node)), Err(outside));
         }
     }
 }

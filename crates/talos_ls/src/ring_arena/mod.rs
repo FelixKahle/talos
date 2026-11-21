@@ -5,7 +5,7 @@
 //!
 //! - [`Node`] names a node of an arena.
 //! - `Slot` is a node its arena knows to lie inside it, the proof behind every unchecked access.
-//! - [`RingSequenceIter`], [`RingSequenceRevIter`] and [`RingEdgeIter`] walk along a ring.
+//! - [`RingSequenceIter`] walks along a ring in either direction, and [`RingLinkIter`] yields the links it passes.
 //! - [`RingArena`] holds the rings and the steps that rearrange them.
 
 mod node;
@@ -15,6 +15,9 @@ mod iter;
 
 mod arena;
 
-pub use arena::RingArena;
-pub use iter::{RingEdgeIter, RingSequenceIter, RingSequenceRevIter};
-pub use node::Node;
+#[cfg(test)]
+mod ring_lists;
+
+pub(super) use arena::RingArena;
+pub(super) use iter::{RingLinkIter, RingSequenceIter};
+pub(super) use node::Node;
