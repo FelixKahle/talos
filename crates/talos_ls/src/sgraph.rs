@@ -28,8 +28,8 @@
 //!              |__Real Vessels__|___Berth Sentinels__|
 //! ```
 
-use std::iter::FusedIterator;
 use crate::ring_arena::{Node, RingArena, RingEdgeIter, RingSequenceIter, RingSequenceRevIter};
+use std::iter::FusedIterator;
 use talos_model::{
     index::{BerthIndex, VesselIndex},
     model::{BerthIndexIter, VesselIndexIter},

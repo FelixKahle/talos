@@ -10,13 +10,13 @@
 //! increments its penalty counter. The augmented objective pushes the search
 //! into unexplored regions of the solution space.
 
+use crate::ring_arena::Node;
 use crate::{
     exec::SearchCommand,
     meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
     sgraph::{ScheduleGraph, ScheduleGraphDiff},
 };
 use num_traits::ToPrimitive;
-use crate::ring_arena::Node;
 use talos_core::SolverNumeric;
 use talos_model::{
     index::{BerthIndex, VesselIndex},

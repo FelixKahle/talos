@@ -3,9 +3,9 @@
 
 //! A fixed set of nodes arranged in closed rings, spliced in constant time.
 
-use talos_core::{TypedIndex, TypedIndexTag};
 use std::fmt;
 use std::iter::FusedIterator;
+use talos_core::{TypedIndex, TypedIndexTag};
 
 /// The tag of [`Node`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

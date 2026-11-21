@@ -31,12 +31,12 @@
 //! micro-tracker that snapshots up to four nodes' next pointers before a
 //! mutation and emits the net edge changes into the diff afterward.
 
+use crate::ring_arena::Node;
 use crate::{
     sgraph::{ScheduleGraph, ScheduleGraphDiffTracker},
     sgraphundo::ScheduleGraphUndoTracker,
     tberth::TouchedBerthsTracker,
 };
-use crate::ring_arena::Node;
 use talos_model::index::{BerthIndex, VesselIndex};
 
 // ----------------------------------------------------------------
