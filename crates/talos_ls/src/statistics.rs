@@ -1,6 +1,8 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! The work a run counts, by kind of step.
+
 /// The work a run has done, counted by kind of step.
 ///
 /// Every candidate is an iteration; a feasible one is also a solution, and is then accepted, kept aside or
@@ -20,11 +22,10 @@ pub struct LocalSearchStatistics {
 }
 
 impl LocalSearchStatistics {
-    /// The feasible candidates that did not become the accepted schedule.
-    ///
-    /// Every accepted solution was first a feasible candidate, so the difference is never negative.
+    /// The feasible candidates that did not become the accepted schedule: the total solutions less the accepted
+    /// ones, or zero where the counts, set by hand, have more accepted than total solutions.
     pub fn rejected_solutions(&self) -> u64 {
-        self.total_solutions - self.accepted_solutions
+        self.total_solutions.saturating_sub(self.accepted_solutions)
     }
 }
 
@@ -51,5 +52,17 @@ mod tests {
             ..LocalSearchStatistics::default()
         };
         assert_eq!(statistics.rejected_solutions(), 7);
+    }
+
+    // The fields are public, so a caller may write more accepted than total solutions; the difference must not
+    // underflow.
+    #[test]
+    fn test_rejected_solutions_of_counts_set_by_hand_are_never_below_zero() {
+        let statistics = LocalSearchStatistics {
+            total_solutions: 1,
+            accepted_solutions: 3,
+            ..LocalSearchStatistics::default()
+        };
+        assert_eq!(statistics.rejected_solutions(), 0);
     }
 }
