@@ -1081,9 +1081,8 @@ impl<'a> Mutator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::schedule::{ScheduleGraphDiff, ScheduleGraphUndoLog, TouchedBerths};
-
     use super::*;
+    use proptest::prelude::*;
 
     fn b(i: usize) -> BerthIndex {
         BerthIndex::new(i)
@@ -1345,5 +1344,342 @@ mod tests {
 
         assert_eq!(graph, original);
         assert!(undo.is_empty());
+    }
+
+    /// A move of the reference test, its vessels and berths named by numbers that `Harness::apply` reads modulo
+    /// the counts, and its segments by a first vessel and how many vessels after it they reach.
+    #[derive(Clone, Copy, Debug)]
+    enum Change {
+        SwapVessels(usize, usize),
+        SwapSegments(usize, usize, usize, usize),
+        Reverse(usize, usize),
+        After(usize, usize),
+        Before(usize, usize),
+        ToHead(usize, usize),
+        ToTail(usize, usize),
+        SegmentAfter(usize, usize, usize),
+        SegmentBefore(usize, usize, usize),
+        SegmentToHead(usize, usize, usize),
+        SegmentToTail(usize, usize, usize),
+    }
+
+    fn change() -> impl Strategy<Value = Change> {
+        let id = || 0_usize..16;
+        let extra = || 0_usize..4;
+        prop_oneof![
+            (id(), id()).prop_map(|(a, b)| Change::SwapVessels(a, b)),
+            (id(), extra(), id(), extra())
+                .prop_map(|(a, x, b, y)| Change::SwapSegments(a, x, b, y)),
+            (id(), extra()).prop_map(|(a, x)| Change::Reverse(a, x)),
+            (id(), id()).prop_map(|(a, b)| Change::After(a, b)),
+            (id(), id()).prop_map(|(a, b)| Change::Before(a, b)),
+            (id(), id()).prop_map(|(a, b)| Change::ToHead(a, b)),
+            (id(), id()).prop_map(|(a, b)| Change::ToTail(a, b)),
+            (id(), extra(), id()).prop_map(|(a, x, b)| Change::SegmentAfter(a, x, b)),
+            (id(), extra(), id()).prop_map(|(a, x, b)| Change::SegmentBefore(a, x, b)),
+            (id(), extra(), id()).prop_map(|(a, x, b)| Change::SegmentToHead(a, x, b)),
+            (id(), extra(), id()).prop_map(|(a, x, b)| Change::SegmentToTail(a, x, b)),
+        ]
+    }
+
+    /// The berth and the place of `vessel` in the reference.
+    fn locate(berths: &[Vec<usize>], vessel: usize) -> (usize, usize) {
+        berths
+            .iter()
+            .enumerate()
+            .find_map(|(berth, vessels)| {
+                vessels
+                    .iter()
+                    .position(|&v| v == vessel)
+                    .map(|place| (berth, place))
+            })
+            .expect("every vessel should stand on one berth of the reference")
+    }
+
+    /// The vessels from `first` along its berth, `extra` more at most.
+    fn segment_of(berths: &[Vec<usize>], first: usize, extra: usize) -> Vec<usize> {
+        let (berth, place) = locate(berths, first);
+        let end = (place + 1 + extra).min(berths[berth].len());
+        berths[berth][place..end].to_vec()
+    }
+
+    /// The reference with `segment` taken out, and where it stood.
+    fn take(berths: &mut [Vec<usize>], segment: &[usize]) -> (usize, usize) {
+        let (berth, place) = locate(berths, segment[0]);
+        berths[berth].drain(place..place + segment.len());
+        (berth, place)
+    }
+
+    /// A graph moved by a mutator through checked moves, a second by unchecked ones, and the reference: the
+    /// vessels of each berth in order, as a plain list.
+    struct Harness {
+        checked: ScheduleGraph,
+        unchecked: ScheduleGraph,
+        reference: Vec<Vec<usize>>,
+        undo: ScheduleGraphUndoLog,
+        diff: ScheduleGraphDiff,
+        touched: TouchedBerths,
+        unchecked_undo: ScheduleGraphUndoLog,
+        unchecked_diff: ScheduleGraphDiff,
+        unchecked_touched: TouchedBerths,
+    }
+
+    impl Harness {
+        fn new(berths: &[usize], num_berths: usize) -> Self {
+            let ids: Vec<_> = berths.iter().map(|&berth| b(berth)).collect();
+            let starts: Vec<usize> = (0..berths.len()).collect();
+            let graph = ScheduleGraph::from_slices(&ids, &starts, num_berths);
+            let mut reference = vec![Vec::new(); num_berths];
+            for (vessel, &berth) in berths.iter().enumerate() {
+                reference[berth].push(vessel);
+            }
+            Self {
+                checked: graph.clone(),
+                unchecked: graph,
+                reference,
+                undo: ScheduleGraphUndoLog::new(0),
+                diff: ScheduleGraphDiff::new(),
+                touched: TouchedBerths::new(num_berths),
+                unchecked_undo: ScheduleGraphUndoLog::new(0),
+                unchecked_diff: ScheduleGraphDiff::new(),
+                unchecked_touched: TouchedBerths::new(num_berths),
+            }
+        }
+
+        /// Applies `change` to the reference and to both graphs, unless it breaks a precondition of the move.
+        fn apply(&mut self, change: Change) {
+            let n = self.checked.num_vessels();
+            let berths = self.checked.num_berths();
+            let mut checked = Mutator::new(
+                &mut self.checked,
+                &mut self.undo,
+                &mut self.diff,
+                &mut self.touched,
+            );
+            let mut unchecked = Mutator::new(
+                &mut self.unchecked,
+                &mut self.unchecked_undo,
+                &mut self.unchecked_diff,
+                &mut self.unchecked_touched,
+            );
+            let reference = &mut self.reference;
+            match change {
+                Change::SwapVessels(a, c) => {
+                    let (a, c) = (a % n, c % n);
+                    let ((berth_a, place_a), (berth_c, place_c)) =
+                        (locate(reference, a), locate(reference, c));
+                    reference[berth_a][place_a] = c;
+                    reference[berth_c][place_c] = a;
+                    checked.swap_vessels(v(a), v(c));
+                    // SAFETY: both vessels are below the count.
+                    unsafe { unchecked.swap_vessels_unchecked(v(a), v(c)) };
+                }
+                Change::SwapSegments(a, x, c, y) => {
+                    let (one, two) = (
+                        segment_of(reference, a % n, x),
+                        segment_of(reference, c % n, y),
+                    );
+                    if one[0] == two[0] {
+                        return;
+                    }
+                    if one.iter().any(|vessel| two.contains(vessel)) {
+                        return;
+                    }
+                    // Each segment is written where the first vessel of the other stood.
+                    let mut rebuilt = Vec::new();
+                    for vessels in reference.iter() {
+                        let mut out = Vec::new();
+                        for &vessel in vessels {
+                            if vessel == one[0] {
+                                out.extend(&two);
+                            } else if vessel == two[0] {
+                                out.extend(&one);
+                            } else if !one.contains(&vessel) && !two.contains(&vessel) {
+                                out.push(vessel);
+                            }
+                        }
+                        rebuilt.push(out);
+                    }
+                    *reference = rebuilt;
+                    let (a0, a1, b0, b1) =
+                        (one[0], *one.last().unwrap(), two[0], *two.last().unwrap());
+                    checked.swap_segments(v(a0), v(a1), v(b0), v(b1));
+                    // SAFETY: the four vessels are below the count.
+                    unsafe { unchecked.swap_segments_unchecked(v(a0), v(a1), v(b0), v(b1)) };
+                }
+                Change::Reverse(a, x) => {
+                    let segment = segment_of(reference, a % n, x);
+                    let (berth, place) = locate(reference, segment[0]);
+                    reference[berth][place..place + segment.len()].reverse();
+                    let (first, last) = (segment[0], *segment.last().unwrap());
+                    checked.reverse_segment(v(first), v(last));
+                    // SAFETY: both vessels are below the count.
+                    unsafe { unchecked.reverse_segment_unchecked(v(first), v(last)) };
+                }
+                Change::After(a, c) | Change::Before(a, c) => {
+                    let after = matches!(change, Change::After(..));
+                    let (a, c) = (a % n, c % n);
+                    if a != c {
+                        take(reference, &[a]);
+                        let (berth, place) = locate(reference, c);
+                        reference[berth].insert(if after { place + 1 } else { place }, a);
+                    }
+                    if after {
+                        checked.relocate_after(v(a), v(c));
+                        // SAFETY: both vessels are below the count.
+                        unsafe { unchecked.relocate_after_unchecked(v(a), v(c)) };
+                    } else {
+                        checked.relocate_before(v(a), v(c));
+                        // SAFETY: both vessels are below the count.
+                        unsafe { unchecked.relocate_before_unchecked(v(a), v(c)) };
+                    }
+                }
+                Change::ToHead(a, c) | Change::ToTail(a, c) => {
+                    let head = matches!(change, Change::ToHead(..));
+                    let (a, berth) = (a % n, c % berths);
+                    take(reference, &[a]);
+                    if head {
+                        reference[berth].insert(0, a);
+                        checked.relocate_to_head(v(a), b(berth));
+                        // SAFETY: the vessel and the berth are below the counts.
+                        unsafe { unchecked.relocate_to_head_unchecked(v(a), b(berth)) };
+                    } else {
+                        reference[berth].push(a);
+                        checked.relocate_to_tail(v(a), b(berth));
+                        // SAFETY: the vessel and the berth are below the counts.
+                        unsafe { unchecked.relocate_to_tail_unchecked(v(a), b(berth)) };
+                    }
+                }
+                Change::SegmentAfter(a, x, c) | Change::SegmentBefore(a, x, c) => {
+                    let after = matches!(change, Change::SegmentAfter(..));
+                    let segment = segment_of(reference, a % n, x);
+                    let anchor = c % n;
+                    if segment.contains(&anchor) {
+                        return;
+                    }
+                    take(reference, &segment);
+                    let (berth, place) = locate(reference, anchor);
+                    let at = if after { place + 1 } else { place };
+                    reference[berth].splice(at..at, segment.iter().copied());
+                    let (first, last) = (v(segment[0]), v(*segment.last().unwrap()));
+                    if after {
+                        checked.relocate_segment_after(first, last, v(anchor));
+                        // SAFETY: the three vessels are below the count.
+                        unsafe {
+                            unchecked.relocate_segment_after_unchecked(first, last, v(anchor))
+                        };
+                    } else {
+                        checked.relocate_segment_before(first, last, v(anchor));
+                        // SAFETY: the three vessels are below the count.
+                        unsafe {
+                            unchecked.relocate_segment_before_unchecked(first, last, v(anchor))
+                        };
+                    }
+                }
+                Change::SegmentToHead(a, x, c) | Change::SegmentToTail(a, x, c) => {
+                    let head = matches!(change, Change::SegmentToHead(..));
+                    let segment = segment_of(reference, a % n, x);
+                    let berth = c % berths;
+                    take(reference, &segment);
+                    let at = if head { 0 } else { reference[berth].len() };
+                    reference[berth].splice(at..at, segment.iter().copied());
+                    let (first, last) = (v(segment[0]), v(*segment.last().unwrap()));
+                    if head {
+                        checked.relocate_segment_to_head(first, last, b(berth));
+                        // SAFETY: the vessels and the berth are below the counts.
+                        unsafe {
+                            unchecked.relocate_segment_to_head_unchecked(first, last, b(berth))
+                        };
+                    } else {
+                        checked.relocate_segment_to_tail(first, last, b(berth));
+                        // SAFETY: the vessels and the berth are below the counts.
+                        unsafe {
+                            unchecked.relocate_segment_to_tail_unchecked(first, last, b(berth))
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    /// The vessels of each berth of `graph` in order, and its berth and count records agree with them.
+    fn order_of(graph: &ScheduleGraph) -> Vec<Vec<usize>> {
+        graph
+            .berths()
+            .map(|berth| {
+                let vessels: Vec<usize> = graph
+                    .vessel_sequence_iter(berth)
+                    .map(VesselIndex::index)
+                    .collect();
+                let reversed: Vec<usize> = graph
+                    .vessel_sequence_rev_iter(berth)
+                    .map(VesselIndex::index)
+                    .collect();
+                assert!(
+                    vessels.iter().rev().eq(reversed.iter()),
+                    "the walks of {berth} should mirror each other"
+                );
+                assert_eq!(
+                    graph.vessel_count(berth),
+                    vessels.len(),
+                    "the count of {berth}"
+                );
+                for &vessel in &vessels {
+                    assert_eq!(
+                        graph.vessel_berth(v(vessel)),
+                        berth,
+                        "the berth of vessel {vessel}"
+                    );
+                }
+                vessels
+            })
+            .collect()
+    }
+
+    fn some_schedule() -> impl Strategy<Value = (Vec<usize>, usize)> {
+        (1_usize..4).prop_flat_map(|num_berths| {
+            (
+                proptest::collection::vec(0..num_berths, 1..9),
+                Just(num_berths),
+            )
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn test_moves_match_the_model_of_berths_as_lists_and_undo_restores_the_start(
+            (berths, num_berths) in some_schedule(),
+            changes in proptest::collection::vec(change(), 0..16),
+        ) {
+            let mut harness = Harness::new(&berths, num_berths);
+            let start = harness.checked.clone();
+            let start_order = order_of(&start);
+            for &change in &changes {
+                let before = order_of(&harness.checked);
+                harness.diff.clear();
+                harness.touched.reset();
+                harness.apply(change);
+                let after = order_of(&harness.checked);
+                prop_assert_eq!(&after, &harness.reference, "after {:?}", change);
+                prop_assert_eq!(&order_of(&harness.unchecked), &after, "unchecked, after {:?}", change);
+                for berth in 0..num_berths {
+                    if before[berth] != after[berth] {
+                        prop_assert!(harness.touched.is_touched(b(berth)), "{:?} changed berth {}", change, berth);
+                    }
+                }
+                let moved: Vec<_> = harness.diff.reallocations().collect();
+                for vessel in 0..berths.len() {
+                    let (from, to) = (locate(&before, vessel).0, locate(&after, vessel).0);
+                    let recorded = moved.iter().filter(|&&(recorded, _, _)| recorded == v(vessel)).count();
+                    prop_assert_eq!(recorded, usize::from(from != to), "{:?} and vessel {}", change, vessel);
+                }
+            }
+            harness.undo.apply_rollback(&mut harness.checked);
+            // SAFETY: the log holds only moves a mutator over this graph recorded.
+            unsafe { harness.unchecked_undo.apply_rollback_unchecked(&mut harness.unchecked) };
+            prop_assert_eq!(&harness.checked, &start);
+            prop_assert_eq!(&order_of(&harness.checked), &start_order);
+            prop_assert_eq!(&order_of(&harness.unchecked), &start_order);
+        }
     }
 }
