@@ -512,10 +512,11 @@ mod tests {
             prop_assert_eq!(&checked, &unchecked);
             for index in 0..num_vessels {
                 // SAFETY: `index` is below the vessel count.
-                unsafe {
-                    prop_assert_eq!(checked.vessel_start(vessel(index)), unchecked.vessel_start_unchecked(vessel(index)));
-                    prop_assert_eq!(checked.vessel_berth(vessel(index)), unchecked.vessel_berth_unchecked(vessel(index)));
-                }
+                let (start, berth) = unsafe {
+                    (unchecked.vessel_start_unchecked(vessel(index)), unchecked.vessel_berth_unchecked(vessel(index)))
+                };
+                prop_assert_eq!(checked.vessel_start(vessel(index)), start);
+                prop_assert_eq!(checked.vessel_berth(vessel(index)), berth);
             }
             // SAFETY: `chosen_berth` is below the berth count of 3.
             prop_assert_eq!(checked.berth_cost(chosen_berth), unsafe { unchecked.berth_cost_unchecked(chosen_berth) });

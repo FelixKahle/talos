@@ -346,7 +346,8 @@ impl Mutator {
     ///
     /// # Safety
     ///
-    /// `a_first`, `a_last`, `b_first` and `b_last` must be the graph's, the condition [`swap_segments`](Self::swap_segments) checks.
+    /// `a_first`, `a_last`, `b_first` and `b_last` must be the graph's, the condition
+    /// [`swap_segments`](Self::swap_segments) checks.
     #[inline]
     pub unsafe fn swap_segments_unchecked(
         &mut self,
@@ -360,7 +361,8 @@ impl Mutator {
                 && a_last.index() < self.graph.num_vessels()
                 && b_first.index() < self.graph.num_vessels()
                 && b_last.index() < self.graph.num_vessels(),
-            "called `Mutator::swap_segments_unchecked` with {a_first} or {a_last} or {b_first} or {b_last}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::swap_segments_unchecked` with {a_first} or {a_last} or {b_first} or {b_last}, outside a \
+             graph of {} vessels and {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -451,7 +453,8 @@ impl Mutator {
     pub unsafe fn reverse_segment_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
         debug_assert!(
             first.index() < self.graph.num_vessels() && last.index() < self.graph.num_vessels(),
-            "called `Mutator::reverse_segment_unchecked` with {first} or {last}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::reverse_segment_unchecked` with {first} or {last}, outside a graph of {} vessels and {} \
+             berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -516,7 +519,8 @@ impl Mutator {
     pub unsafe fn relocate_after_unchecked(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
         debug_assert!(
             vessel.index() < self.graph.num_vessels() && anchor.index() < self.graph.num_vessels(),
-            "called `Mutator::relocate_after_unchecked` with {vessel} or {anchor}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::relocate_after_unchecked` with {vessel} or {anchor}, outside a graph of {} vessels and \
+             {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -586,7 +590,8 @@ impl Mutator {
         debug_assert!(
             vessel.index() < self.graph.num_vessels()
                 && reference.index() < self.graph.num_vessels(),
-            "called `Mutator::relocate_before_unchecked` with {vessel} or {reference}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::relocate_before_unchecked` with {vessel} or {reference}, outside a graph of {} vessels \
+             and {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -655,7 +660,8 @@ impl Mutator {
     pub unsafe fn relocate_to_head_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         debug_assert!(
             vessel.index() < self.graph.num_vessels() && berth.index() < self.graph.num_berths(),
-            "called `Mutator::relocate_to_head_unchecked` with {vessel} or {berth}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::relocate_to_head_unchecked` with {vessel} or {berth}, outside a graph of {} vessels and \
+             {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -711,7 +717,8 @@ impl Mutator {
     pub unsafe fn relocate_to_tail_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         debug_assert!(
             vessel.index() < self.graph.num_vessels() && berth.index() < self.graph.num_berths(),
-            "called `Mutator::relocate_to_tail_unchecked` with {vessel} or {berth}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::relocate_to_tail_unchecked` with {vessel} or {berth}, outside a graph of {} vessels and \
+             {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -754,8 +761,8 @@ impl Mutator {
     ///
     /// # Preconditions
     ///
-    /// `last` follows `first` on its berth, and `anchor` is not a vessel of the segment. Otherwise the order breaks, though no access leaves the
-    /// graph; a debug build checks it.
+    /// `last` follows `first` on its berth, and `anchor` is not a vessel of the segment. Otherwise the order breaks,
+    /// though no access leaves the graph; a debug build checks it.
     ///
     /// # Panics
     ///
@@ -773,7 +780,8 @@ impl Mutator {
         unsafe { self.relocate_segment_after_unchecked(first, last, anchor) }
     }
 
-    /// The move [`relocate_segment_after`](Self::relocate_segment_after) makes, for ids the caller knows to be the graph's.
+    /// The move [`relocate_segment_after`](Self::relocate_segment_after) makes, for ids the caller knows to be the
+    /// graph's.
     ///
     /// # Preconditions
     ///
@@ -781,7 +789,8 @@ impl Mutator {
     ///
     /// # Safety
     ///
-    /// `first`, `last` and `anchor` must be the graph's, the condition [`relocate_segment_after`](Self::relocate_segment_after) checks.
+    /// `first`, `last` and `anchor` must be the graph's, the condition
+    /// [`relocate_segment_after`](Self::relocate_segment_after) checks.
     #[inline]
     pub unsafe fn relocate_segment_after_unchecked(
         &mut self,
@@ -793,7 +802,8 @@ impl Mutator {
             first.index() < self.graph.num_vessels()
                 && last.index() < self.graph.num_vessels()
                 && anchor.index() < self.graph.num_vessels(),
-            "called `Mutator::relocate_segment_after_unchecked` with {first} or {last} or {anchor}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::relocate_segment_after_unchecked` with {first} or {last} or {anchor}, outside a graph \
+             of {} vessels and {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -838,8 +848,8 @@ impl Mutator {
     ///
     /// # Preconditions
     ///
-    /// `last` follows `first` on its berth, and `reference` is not a vessel of the segment. Otherwise the order breaks, though no access leaves the
-    /// graph; a debug build checks it.
+    /// `last` follows `first` on its berth, and `reference` is not a vessel of the segment. Otherwise the order breaks,
+    /// though no access leaves the graph; a debug build checks it.
     ///
     /// # Panics
     ///
@@ -857,7 +867,8 @@ impl Mutator {
         unsafe { self.relocate_segment_before_unchecked(first, last, reference) }
     }
 
-    /// The move [`relocate_segment_before`](Self::relocate_segment_before) makes, for ids the caller knows to be the graph's.
+    /// The move [`relocate_segment_before`](Self::relocate_segment_before) makes, for ids the caller knows to be the
+    /// graph's.
     ///
     /// # Preconditions
     ///
@@ -865,7 +876,8 @@ impl Mutator {
     ///
     /// # Safety
     ///
-    /// `first`, `last` and `reference` must be the graph's, the condition [`relocate_segment_before`](Self::relocate_segment_before) checks.
+    /// `first`, `last` and `reference` must be the graph's, the condition
+    /// [`relocate_segment_before`](Self::relocate_segment_before) checks.
     #[inline]
     pub unsafe fn relocate_segment_before_unchecked(
         &mut self,
@@ -877,7 +889,8 @@ impl Mutator {
             first.index() < self.graph.num_vessels()
                 && last.index() < self.graph.num_vessels()
                 && reference.index() < self.graph.num_vessels(),
-            "called `Mutator::relocate_segment_before_unchecked` with {first} or {last} or {reference}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::relocate_segment_before_unchecked` with {first} or {last} or {reference}, outside a \
+             graph of {} vessels and {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -946,7 +959,8 @@ impl Mutator {
         unsafe { self.relocate_segment_to_head_unchecked(first, last, berth) }
     }
 
-    /// The move [`relocate_segment_to_head`](Self::relocate_segment_to_head) makes, for ids the caller knows to be the graph's.
+    /// The move [`relocate_segment_to_head`](Self::relocate_segment_to_head) makes, for ids the caller knows to be the
+    /// graph's.
     ///
     /// # Preconditions
     ///
@@ -954,7 +968,8 @@ impl Mutator {
     ///
     /// # Safety
     ///
-    /// `first`, `last` and `berth` must be the graph's, the condition [`relocate_segment_to_head`](Self::relocate_segment_to_head) checks.
+    /// `first`, `last` and `berth` must be the graph's, the condition
+    /// [`relocate_segment_to_head`](Self::relocate_segment_to_head) checks.
     #[inline]
     pub unsafe fn relocate_segment_to_head_unchecked(
         &mut self,
@@ -966,7 +981,8 @@ impl Mutator {
             first.index() < self.graph.num_vessels()
                 && last.index() < self.graph.num_vessels()
                 && berth.index() < self.graph.num_berths(),
-            "called `Mutator::relocate_segment_to_head_unchecked` with {first} or {last} or {berth}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::relocate_segment_to_head_unchecked` with {first} or {last} or {berth}, outside a graph \
+             of {} vessels and {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -982,8 +998,8 @@ impl Mutator {
         let links =
             unsafe { LinkSnapshot::new_unchecked(&self.graph, [first_prev, last_node, sentinel]) };
         let step = |graph: &mut ScheduleGraph| {
-            // SAFETY: the vessels and the berth are the graph's, the precondition of this function, and the step is made
-            // on the graph.
+            // SAFETY: the vessels and the berth are the graph's, the precondition of this function, and the step is
+            // made on the graph.
             unsafe { graph.relocate_segment_to_head_unchecked(first, last, berth) }
         };
         // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
@@ -1021,7 +1037,8 @@ impl Mutator {
         unsafe { self.relocate_segment_to_tail_unchecked(first, last, berth) }
     }
 
-    /// The move [`relocate_segment_to_tail`](Self::relocate_segment_to_tail) makes, for ids the caller knows to be the graph's.
+    /// The move [`relocate_segment_to_tail`](Self::relocate_segment_to_tail) makes, for ids the caller knows to be the
+    /// graph's.
     ///
     /// # Preconditions
     ///
@@ -1029,7 +1046,8 @@ impl Mutator {
     ///
     /// # Safety
     ///
-    /// `first`, `last` and `berth` must be the graph's, the condition [`relocate_segment_to_tail`](Self::relocate_segment_to_tail) checks.
+    /// `first`, `last` and `berth` must be the graph's, the condition
+    /// [`relocate_segment_to_tail`](Self::relocate_segment_to_tail) checks.
     #[inline]
     pub unsafe fn relocate_segment_to_tail_unchecked(
         &mut self,
@@ -1041,7 +1059,8 @@ impl Mutator {
             first.index() < self.graph.num_vessels()
                 && last.index() < self.graph.num_vessels()
                 && berth.index() < self.graph.num_berths(),
-            "called `Mutator::relocate_segment_to_tail_unchecked` with {first} or {last} or {berth}, outside a graph of {} vessels and {} berths",
+            "called `Mutator::relocate_segment_to_tail_unchecked` with {first} or {last} or {berth}, outside a graph \
+             of {} vessels and {} berths",
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
@@ -1062,8 +1081,8 @@ impl Mutator {
         let links =
             unsafe { LinkSnapshot::new_unchecked(&self.graph, [first_prev, last_node, tail]) };
         let step = |graph: &mut ScheduleGraph| {
-            // SAFETY: the vessels and the berth are the graph's, the precondition of this function, and the step is made
-            // on the graph.
+            // SAFETY: the vessels and the berth are the graph's, the precondition of this function, and the step is
+            // made on the graph.
             unsafe { graph.relocate_segment_to_tail_unchecked(first, last, berth) }
         };
         // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
@@ -1807,7 +1826,8 @@ mod tests {
                 prop_assert_eq!(&order_of(harness.unchecked.graph()), &after, "unchecked, after {:?}", change);
                 for berth in 0..num_berths {
                     if before[berth] != after[berth] {
-                        prop_assert!(harness.checked.touched().is_touched(b(berth)), "{:?} changed berth {}", change, berth);
+                        let touched = harness.checked.touched().is_touched(b(berth));
+                        prop_assert!(touched, "{:?} changed berth {}", change, berth);
                     }
                 }
                 let moved: Vec<_> = harness.checked.diff().reallocations().collect();

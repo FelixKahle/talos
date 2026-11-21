@@ -383,7 +383,8 @@ impl BanditStats {
     unsafe fn update_improvement_unchecked(&mut self, index: usize, delta: f64, alpha: f64) {
         debug_assert!(
             index < self.avg_improvements.len(),
-            "called `BanditStats::update_improvement_unchecked` with index out of bounds: the len is {} but the index is {}",
+            "called `BanditStats::update_improvement_unchecked` with index out of bounds: the len is {} but the index \
+             is {}",
             self.avg_improvements.len(),
             index,
         );

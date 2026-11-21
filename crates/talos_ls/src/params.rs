@@ -91,7 +91,8 @@ impl std::fmt::Display for BerthStartTimeMismatchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "length mismatch between initial solution arrays: berths array has {} elements, but start_times array has {}",
+            "length mismatch between initial solution arrays: berths array has {} elements, but start_times array has \
+             {}",
             self.berths_count, self.start_times_count
         )
     }
@@ -114,7 +115,8 @@ impl std::fmt::Display for SolutionIncompatibleBerthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "initial solution assigns vessel {} to berth {}, but the model does not allow this assignment (processing time is None)",
+            "initial solution assigns vessel {} to berth {}, but the model does not allow this assignment (processing \
+             time is None)",
             self.vessel_index, self.incompatible_berth
         )
     }

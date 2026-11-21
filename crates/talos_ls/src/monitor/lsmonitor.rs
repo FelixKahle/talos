@@ -48,7 +48,8 @@ where
         best_solution: SolutionView<'_, T>,
         accepted_solution: SolutionView<'_, T>,
         buffered_solution: Option<SolutionView<'_, T>>,
-        candidate_objective: T, // The candidate solution is only ever partially constructed, so we only pass the objective value here.
+        // The candidate solution is only ever partially constructed, so only its objective value is passed.
+        candidate_objective: T,
         statistics: &LocalSearchStatistics,
     );
 
