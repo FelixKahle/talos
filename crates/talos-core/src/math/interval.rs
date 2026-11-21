@@ -1,66 +1,37 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! # Closed-Open Intervals `[start, end)`
-//!
-//! This module provides a generic, type-safe implementation of closed-open
-//! intervals (`ClosedOpenInterval<T>`) with rich set operations and iteration
-//! utilities tailored for scheduling and time-window reasoning.
-//!
-//! ## Motivation
-//!
-//! In combinatorial scheduling and constraint programming, intervals are
-//! ubiquitous: availability windows, maintenance gaps, and processing spans.
-//! Using `[start, end)` avoids off-by-one errors and composes cleanly with
-//! Rust's standard `Range` semantics and iterator patterns.
-//!
-//! ## Highlights
-//!
-//! - Construction and validation: `new`, `try_new`, and `new_unchecked`.
-//! - Predicates: `intersects`, `adjacent`, `disjoint`, `contains_point`,
-//!   `contains_interval`, `intersects_or_adjacent`, `is_empty`.
-//! - Set operations: `intersection`, `union`, `difference`, `gap`, `split_at`.
-//! - Measurements: `len`, `midpoint`.
-//! - Iteration: `iter()` yields a `ClosedOpenIntervalIterator<T>` supporting
-//!   `Iterator`, `DoubleEndedIterator` and `FusedIterator`.
-//! - Conversions & Traits: `BitAnd`/`BitOr` sugar for intersection/union,
-//!   `RangeBounds`, `IntoIterator` (by value and by reference), and conversions
-//!   to/from `std::ops::Range<T>`.
-//!
-//! ## Usage
-//!
-//! ```rust
-//! use talos_core::ClosedOpenInterval;
-//!
-//! // Define intervals
-//! let a = ClosedOpenInterval::new(10i64, 20i64);
-//! let b = ClosedOpenInterval::new(15i64, 25i64);
-//!
-//! // Set operations
-//! let i = a.intersection(b); // [15, 20)
-//! let u = a.union(b);        // [10, 25)
-//!
-//! // Iteration over [start, end)
-//! let values: Vec<i64> = a.iter().collect(); // 10..20
-//! assert_eq!(values, (10..20).collect::<Vec<_>>());
-//! ```
+//! Closed-open intervals `[start, end)` of integers.
 
 use num_traits::PrimInt;
-use std::{
-    cmp::{max, min},
-    iter::FusedIterator,
-    ops::{BitAnd, BitOr},
-};
+use std::cmp::{max, min};
+use std::fmt;
+use std::iter::FusedIterator;
+use std::ops::{Bound, Range, RangeBounds};
 
-/// A half-open interval `[start, end)` defined by a start (inclusive) and end (exclusive).
+/// The integers from `start` up to but not including `end`: the interval `[start, end)`.
 ///
-/// This struct represents a contiguous set of integers. It supports standard
-/// set-theoretic operations such as intersection, union, and difference, as well as
-/// geometric queries like overlap and adjacency checks.
+/// Availability windows, maintenance gaps and processing spans are intervals of this kind. The closed-open form
+/// composes without off-by-one corrections: `[a, b)` and `[b, c)` meet without overlap, and the length is
+/// `end - start`.
 ///
-/// # Invariants
-/// `start_inclusive` must always be less than or equal to `end_exclusive`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// An interval always has `start <= end`; every way of making one establishes it. An empty interval
+/// (`start == end`) keeps its position, and the predicates and operations below work on the bounds, so an empty
+/// interval at 20 is adjacent to `[10, 20)` but has no union with `[0, 10)`.
+///
+/// # Examples
+///
+/// ```rust
+/// use talos_core::ClosedOpenInterval;
+///
+/// let morning = ClosedOpenInterval::new(8i64, 12);
+/// let shift = ClosedOpenInterval::new(10i64, 18);
+///
+/// assert_eq!(morning.intersection(shift), Some(ClosedOpenInterval::new(10, 12)));
+/// assert_eq!(morning.union(shift), Some(ClosedOpenInterval::new(8, 18)));
+/// assert_eq!(morning.iter().collect::<Vec<_>>(), [8, 9, 10, 11]);
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ClosedOpenInterval<T>
 where
     T: PrimInt,
@@ -69,143 +40,59 @@ where
     end_exclusive: T,
 }
 
-/// An iterator over the integer points contained within a `ClosedOpenInterval`.
-///
-/// # Examples
-///
-/// ```rust
-/// # use talos_core::ClosedOpenInterval;
-///
-/// let iv = ClosedOpenInterval::new(1, 5);
-/// let points: Vec<_> = iv.iter().collect();
-/// assert_eq!(points, vec![1, 2, 3, 4]);
-/// ```
-pub struct ClosedOpenIntervalIterator<T>
-where
-    T: PrimInt,
-{
-    end_exclusive: T,
-    current: T,
-}
-
-impl<T> Iterator for ClosedOpenIntervalIterator<T>
-where
-    T: PrimInt,
-{
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current < self.end_exclusive {
-            let result = self.current;
-            self.current = self.current + T::one();
-            Some(result)
-        } else {
-            None
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        // A count that `T` or `usize` cannot hold is only bounded below, as for std's ranges.
-        match self
-            .end_exclusive
-            .checked_sub(&self.current)
-            .and_then(|count| count.to_usize())
-        {
-            Some(count) => (count, Some(count)),
-            None => (usize::MAX, None),
-        }
-    }
-}
-
-impl<T> DoubleEndedIterator for ClosedOpenIntervalIterator<T>
-where
-    T: PrimInt,
-{
-    fn next_back(&mut self) -> Option<Self::Item> {
-        if self.current < self.end_exclusive {
-            self.end_exclusive = self.end_exclusive - T::one();
-            Some(self.end_exclusive)
-        } else {
-            None
-        }
-    }
-}
-
-impl<T> FusedIterator for ClosedOpenIntervalIterator<T> where T: PrimInt {}
-
 impl<T> ClosedOpenInterval<T>
 where
     T: PrimInt,
 {
-    /// Creates a new `ClosedOpenInterval`.
+    /// The interval `[start_inclusive, end_exclusive)`.
     ///
     /// # Panics
     ///
-    /// Panics if `start_inclusive > end_exclusive`.
+    /// Panics if `start_inclusive` is greater than `end_exclusive`.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
-    /// let iv = ClosedOpenInterval::new(0, 10);
-    /// assert_eq!(iv.len(), 10);
+    /// let interval = ClosedOpenInterval::new(0, 10);
+    /// assert_eq!(interval.len(), 10);
     /// ```
     #[inline]
-    pub fn new(start_inclusive: T, end_exclusive: T) -> Self {
-        assert!(
-            start_inclusive <= end_exclusive,
-            "Invalid interval: start_inclusive must be less than or equal to end_exclusive"
-        );
-        Self {
-            start_inclusive,
-            end_exclusive,
+    #[track_caller]
+    pub fn new(start_inclusive: T, end_exclusive: T) -> Self
+    where
+        T: fmt::Debug,
+    {
+        match Self::try_new(start_inclusive, end_exclusive) {
+            Some(interval) => interval,
+            None => panic_start_after_end(start_inclusive, end_exclusive),
         }
     }
 
-    /// Creates a new `ClosedOpenInterval` if the inputs are valid.
-    ///
-    /// Returns `None` if `start_inclusive > end_exclusive`.
+    /// The interval `[start_inclusive, end_exclusive)`, or `None` if `start_inclusive` is greater than
+    /// `end_exclusive`.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// assert!(ClosedOpenInterval::try_new(0, 10).is_some());
     /// assert!(ClosedOpenInterval::try_new(10, 0).is_none());
     /// ```
     #[inline]
     pub fn try_new(start_inclusive: T, end_exclusive: T) -> Option<Self> {
-        if start_inclusive <= end_exclusive {
-            Some(Self {
-                start_inclusive,
-                end_exclusive,
-            })
-        } else {
-            None
-        }
+        (start_inclusive <= end_exclusive)
+            .then(|| Self::from_ordered(start_inclusive, end_exclusive))
     }
 
-    /// Creates a new `ClosedOpenInterval` without checking invariants in release builds.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure `start_inclusive <= end_exclusive`.
-    /// This function contains a `debug_assert!` to catch errors during development.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
-    ///
-    /// let iv = ClosedOpenInterval::new_unchecked(0, 10);
-    /// ```
+    /// The interval `[start_inclusive, end_exclusive)` from bounds the caller has already ordered.
     #[inline]
-    pub fn new_unchecked(start_inclusive: T, end_exclusive: T) -> Self {
+    fn from_ordered(start_inclusive: T, end_exclusive: T) -> Self {
         debug_assert!(
             start_inclusive <= end_exclusive,
-            "Invalid interval: start_inclusive must be less than or equal to end_exclusive"
+            "called `ClosedOpenInterval::from_ordered` with a start after the end"
         );
         Self {
             start_inclusive,
@@ -213,162 +100,146 @@ where
         }
     }
 
-    /// Returns the inclusive start bound of the interval.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
-    ///
-    /// let iv = ClosedOpenInterval::new(5, 10);
-    /// assert_eq!(iv.start(), 5);
-    /// ```
+    /// The least integer of the interval, or its position if it is empty.
     #[inline]
     pub const fn start(&self) -> T {
         self.start_inclusive
     }
 
-    /// Returns the exclusive end bound of the interval.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
-    ///
-    /// let iv = ClosedOpenInterval::new(5, 10);
-    /// assert_eq!(iv.end(), 10);
-    /// ```
+    /// The first integer after the interval.
     #[inline]
     pub const fn end(&self) -> T {
         self.end_exclusive
     }
 
-    /// Returns `true` if this interval overlaps with `other`.
+    /// Whether the two intervals share an integer.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
-    /// let b = ClosedOpenInterval::new(5, 15);
-    /// assert!(a.intersects(b));
-    ///
-    /// let c = ClosedOpenInterval::new(10, 20); // Adjacent
-    /// assert!(!a.intersects(c));
+    /// assert!(a.intersects(ClosedOpenInterval::new(5, 15)));
+    /// assert!(!a.intersects(ClosedOpenInterval::new(10, 20)));
     /// ```
     #[inline]
     pub fn intersects(&self, other: Self) -> bool {
         // Both bounds must be compared together: an empty interval inside another starts before the other ends
         // and ends after it starts, yet shares no integer with it.
-        max(self.start_inclusive, other.start_inclusive) < min(self.end_exclusive, other.end_exclusive)
+        max(self.start_inclusive, other.start_inclusive)
+            < min(self.end_exclusive, other.end_exclusive)
     }
 
-    /// Returns `true` if the intervals share a boundary but do not overlap.
+    /// Whether one interval ends where the other starts.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
-    /// let b = ClosedOpenInterval::new(10, 20);
-    /// assert!(a.adjacent(b));
+    /// assert!(a.adjacent(ClosedOpenInterval::new(10, 20)));
+    /// assert!(!a.adjacent(ClosedOpenInterval::new(9, 20)));
     /// ```
     #[inline]
     pub fn adjacent(&self, other: Self) -> bool {
         self.end_exclusive == other.start_inclusive || other.end_exclusive == self.start_inclusive
     }
 
-    /// Returns `true` if the intervals are disjoint (neither intersecting nor adjacent).
+    /// Whether a gap of at least one integer separates the two intervals: they neither intersect nor touch.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
-    /// assert!(a.disjoint(ClosedOpenInterval::new(15, 20))); // Disjoint
-    /// assert!(!a.disjoint(ClosedOpenInterval::new(5, 15))); // Intersects
-    /// assert!(!a.disjoint(ClosedOpenInterval::new(10, 15))); // Adjacent
+    /// assert!(a.disjoint(ClosedOpenInterval::new(15, 20)));
+    /// assert!(!a.disjoint(ClosedOpenInterval::new(10, 15)));
     /// ```
     #[inline]
     pub fn disjoint(&self, other: Self) -> bool {
         !self.intersects_or_adjacent(other)
     }
 
-    /// Returns `true` if the intervals either intersect or are adjacent.
-    ///
-    /// This is useful for determining if two intervals can be merged into a single contiguous interval.
+    /// Whether the two intervals intersect or touch, so that together they cover one interval.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
-    /// assert!(a.intersects_or_adjacent(ClosedOpenInterval::new(10, 20))); // Adjacent
-    /// assert!(a.intersects_or_adjacent(ClosedOpenInterval::new(5, 15)));  // Intersects
-    /// assert!(!a.intersects_or_adjacent(ClosedOpenInterval::new(12, 20))); // Gap
+    /// assert!(a.intersects_or_adjacent(ClosedOpenInterval::new(10, 20)));
+    /// assert!(!a.intersects_or_adjacent(ClosedOpenInterval::new(12, 20)));
     /// ```
     #[inline]
     pub fn intersects_or_adjacent(&self, other: Self) -> bool {
         self.start_inclusive <= other.end_exclusive && other.start_inclusive <= self.end_exclusive
     }
 
-    /// Returns `true` if `value` is contained in the interval `[start, end)`.
+    /// Whether `value` lies in the interval.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
-    /// let iv = ClosedOpenInterval::new(0, 10);
-    /// assert!(iv.contains_point(0));
-    /// assert!(iv.contains_point(9));
-    /// assert!(!iv.contains_point(10));
+    /// let interval = ClosedOpenInterval::new(0, 10);
+    /// assert!(interval.contains_point(0));
+    /// assert!(!interval.contains_point(10));
     /// ```
     #[inline]
     pub fn contains_point(&self, value: T) -> bool {
         self.start_inclusive <= value && value < self.end_exclusive
     }
 
-    /// Returns `true` if `other` is strictly contained within `self`.
+    /// Whether the bounds of `other` lie within those of `self`; an interval contains itself.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
-    /// let b = ClosedOpenInterval::new(2, 8);
-    /// assert!(a.contains_interval(b));
+    /// assert!(a.contains_interval(ClosedOpenInterval::new(2, 8)));
+    /// assert!(a.contains_interval(a));
     /// ```
     #[inline]
     pub fn contains_interval(&self, other: Self) -> bool {
         self.start_inclusive <= other.start_inclusive && other.end_exclusive <= self.end_exclusive
     }
 
-    /// Returns the length of the interval (`end - start`).
+    /// The number of integers in the interval, `end - start`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the length exceeds the greatest value of `T`, which only an interval of a signed type wider
+    /// than half its range has.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// assert_eq!(ClosedOpenInterval::new(10, 20).len(), 10);
     /// ```
     #[inline]
+    #[track_caller]
     pub fn len(&self) -> T {
-        self.end_exclusive - self.start_inclusive
+        match self.end_exclusive.checked_sub(&self.start_inclusive) {
+            Some(length) => length,
+            None => panic_length_overflow(),
+        }
     }
 
-    /// Returns `true` if the interval is empty (`start == end`).
+    /// Whether the interval holds no integer (`start == end`).
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// assert!(ClosedOpenInterval::new(10, 10).is_empty());
     /// assert!(!ClosedOpenInterval::new(10, 11).is_empty());
@@ -378,69 +249,54 @@ where
         self.start_inclusive == self.end_exclusive
     }
 
-    /// Calculates the intersection of two intervals.
-    ///
-    /// Returns `None` if the intervals are disjoint or adjacent (resulting in an empty set,
-    /// though empty intersection of overlapping boundaries is handled gracefully).
+    /// The integers both intervals hold, or `None` if they share none.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
-    /// let b = ClosedOpenInterval::new(5, 15);
-    /// assert_eq!(a.intersection(b), Some(ClosedOpenInterval::new(5, 10)));
+    /// assert_eq!(a.intersection(ClosedOpenInterval::new(5, 15)), Some(ClosedOpenInterval::new(5, 10)));
+    /// assert_eq!(a.intersection(ClosedOpenInterval::new(10, 15)), None);
     /// ```
     #[inline]
     pub fn intersection(&self, other: Self) -> Option<Self> {
-        let new_start = max(self.start_inclusive, other.start_inclusive);
-        let new_end = min(self.end_exclusive, other.end_exclusive);
-
-        if new_start < new_end {
-            Some(Self::new_unchecked(new_start, new_end))
-        } else {
-            None
-        }
+        let start = max(self.start_inclusive, other.start_inclusive);
+        let end = min(self.end_exclusive, other.end_exclusive);
+        (start < end).then(|| Self::from_ordered(start, end))
     }
 
-    /// Calculates the union of two intervals.
-    ///
-    /// Returns `Some(union)` if the intervals overlap or are adjacent.
-    /// Returns `None` if the intervals are disjoint (separated by a gap).
+    /// The interval from the lesser start to the greater end, or `None` if a gap separates the two.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 10);
-    /// let b = ClosedOpenInterval::new(10, 20);
-    /// assert_eq!(a.union(b), Some(ClosedOpenInterval::new(0, 20)));
+    /// assert_eq!(a.union(ClosedOpenInterval::new(10, 20)), Some(ClosedOpenInterval::new(0, 20)));
+    /// assert_eq!(a.union(ClosedOpenInterval::new(11, 20)), None);
     /// ```
     #[inline]
     pub fn union(&self, other: Self) -> Option<Self> {
-        if self.intersects_or_adjacent(other) {
-            Some(Self {
-                start_inclusive: min(self.start_inclusive, other.start_inclusive),
-                end_exclusive: max(self.end_exclusive, other.end_exclusive),
-            })
-        } else {
-            None
-        }
+        self.intersects_or_adjacent(other).then(|| {
+            Self::from_ordered(
+                min(self.start_inclusive, other.start_inclusive),
+                max(self.end_exclusive, other.end_exclusive),
+            )
+        })
     }
 
-    /// Calculates the midpoint of the interval.
-    ///
-    /// The calculation is robust against integer overflow.
+    /// The mean of the bounds, rounded down: `floor((start + end) / 2)`, for every interval of `T`.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
-    /// let iv = ClosedOpenInterval::new(0, 10);
-    /// assert_eq!(iv.midpoint(), 5);
+    /// assert_eq!(ClosedOpenInterval::new(0, 10).midpoint(), 5);
+    /// assert_eq!(ClosedOpenInterval::new(-3, 0).midpoint(), -2);
     /// ```
     #[inline]
     pub fn midpoint(&self) -> T {
@@ -450,28 +306,27 @@ where
         (start & end) + ((start ^ end) >> 1)
     }
 
-    /// Returns the gap between two strictly disjoint intervals.
-    ///
-    /// Returns `None` if the intervals intersect or are adjacent.
+    /// The integers strictly between the two intervals, or `None` if they intersect or touch.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
     /// let a = ClosedOpenInterval::new(0, 5);
     /// let b = ClosedOpenInterval::new(10, 15);
     /// assert_eq!(a.gap(b), Some(ClosedOpenInterval::new(5, 10)));
+    /// assert_eq!(b.gap(a), Some(ClosedOpenInterval::new(5, 10)));
     /// ```
     #[inline]
     pub fn gap(&self, other: Self) -> Option<Self> {
         if self.end_exclusive < other.start_inclusive {
-            Some(Self::new_unchecked(
+            Some(Self::from_ordered(
                 self.end_exclusive,
                 other.start_inclusive,
             ))
         } else if other.end_exclusive < self.start_inclusive {
-            Some(Self::new_unchecked(
+            Some(Self::from_ordered(
                 other.end_exclusive,
                 self.start_inclusive,
             ))
@@ -480,121 +335,100 @@ where
         }
     }
 
-    /// Splits the interval into two at the given `value`.
-    ///
-    /// Returns `Some((left, right))` if `value` is strictly inside the interval (`start < value < end`).
-    /// Returns `None` if `value` is outside or at the boundaries.
+    /// The interval cut at `value` into `[start, value)` and `[value, end)`, or `None` unless
+    /// `start < value < end`, so that both parts hold an integer.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
-    /// let iv = ClosedOpenInterval::new(0, 10);
-    /// let (left, right) = iv.split_at(5).unwrap();
-    /// assert_eq!(left, ClosedOpenInterval::new(0, 5));
-    /// assert_eq!(right, ClosedOpenInterval::new(5, 10));
+    /// let interval = ClosedOpenInterval::new(0, 10);
+    /// assert_eq!(
+    ///     interval.split_at(4),
+    ///     Some((ClosedOpenInterval::new(0, 4), ClosedOpenInterval::new(4, 10)))
+    /// );
+    /// assert_eq!(interval.split_at(0), None);
     /// ```
     #[inline]
     pub fn split_at(&self, value: T) -> Option<(Self, Self)> {
-        if self.start_inclusive < value && value < self.end_exclusive {
-            Some((
-                Self::new_unchecked(self.start_inclusive, value),
-                Self::new_unchecked(value, self.end_exclusive),
-            ))
-        } else {
-            None
-        }
+        (self.start_inclusive < value && value < self.end_exclusive).then(|| {
+            (
+                Self::from_ordered(self.start_inclusive, value),
+                Self::from_ordered(value, self.end_exclusive),
+            )
+        })
     }
 
-    /// Creates an iterator over the points in the interval.
+    /// The integers of the interval, in increasing order.
     ///
     /// # Examples
     ///
     /// ```rust
-    /// # use talos_core::ClosedOpenInterval;
+    /// use talos_core::ClosedOpenInterval;
     ///
-    /// let iv = ClosedOpenInterval::new(1, 4);
-    /// let points: Vec<_> = iv.iter().collect();
-    /// assert_eq!(points, vec![1, 2, 3]);
+    /// let points: Vec<_> = ClosedOpenInterval::new(1, 4).iter().collect();
+    /// assert_eq!(points, [1, 2, 3]);
     /// ```
     #[inline]
-    pub fn iter(&self) -> ClosedOpenIntervalIterator<T> {
-        ClosedOpenIntervalIterator {
-            end_exclusive: self.end_exclusive,
-            current: self.start_inclusive,
+    pub fn iter(&self) -> ClosedOpenIntervalIter<T> {
+        ClosedOpenIntervalIter {
+            front: self.start_inclusive,
+            back: self.end_exclusive,
         }
     }
 }
 
-impl<T> BitAnd for ClosedOpenInterval<T>
-where
-    T: PrimInt,
-{
-    type Output = Option<Self>;
-
-    #[inline]
-    fn bitand(self, rhs: Self) -> Self::Output {
-        self.intersection(rhs)
-    }
+/// Panics with the message of [`ClosedOpenInterval::new`] for a start after the end.
+// Kept out of line so that the check in `new` stays a compare and a branch on the caller's path.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn panic_start_after_end<T: fmt::Debug>(start_inclusive: T, end_exclusive: T) -> ! {
+    panic!(
+        "called `ClosedOpenInterval::new` with start {start_inclusive:?} after end {end_exclusive:?}"
+    )
 }
 
-impl<T> BitOr for ClosedOpenInterval<T>
-where
-    T: PrimInt,
-{
-    type Output = Option<Self>;
-
-    #[inline]
-    fn bitor(self, rhs: Self) -> Self::Output {
-        self.union(rhs)
-    }
+/// Panics with the message of [`ClosedOpenInterval::len`] for a length `T` cannot hold.
+// Kept out of line so that the check in `len` stays a compare and a branch on the caller's path.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn panic_length_overflow() -> ! {
+    panic!("called `ClosedOpenInterval::len` on an interval longer than its type can count")
 }
 
 impl<T> Default for ClosedOpenInterval<T>
 where
     T: PrimInt,
 {
+    /// The empty interval at zero, `[0, 0)`.
     #[inline]
     fn default() -> Self {
-        Self {
-            start_inclusive: T::zero(),
-            end_exclusive: T::zero(),
-        }
+        Self::from_ordered(T::zero(), T::zero())
     }
 }
 
-impl<T> std::fmt::Debug for ClosedOpenInterval<T>
+impl<T> fmt::Display for ClosedOpenInterval<T>
 where
-    T: PrimInt + std::fmt::Debug,
+    T: PrimInt + fmt::Display,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClosedOpenInterval")
-            .field("start_inclusive", &self.start_inclusive)
-            .field("end_exclusive", &self.end_exclusive)
-            .finish()
-    }
-}
-
-impl<T> std::fmt::Display for ClosedOpenInterval<T>
-where
-    T: PrimInt + std::fmt::Display,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}, {})", self.start_inclusive, self.end_exclusive)
     }
 }
 
-impl<T> std::ops::RangeBounds<T> for ClosedOpenInterval<T>
+impl<T> RangeBounds<T> for ClosedOpenInterval<T>
 where
     T: PrimInt,
 {
-    fn start_bound(&self) -> std::ops::Bound<&T> {
-        std::ops::Bound::Included(&self.start_inclusive)
+    fn start_bound(&self) -> Bound<&T> {
+        Bound::Included(&self.start_inclusive)
     }
 
-    fn end_bound(&self) -> std::ops::Bound<&T> {
-        std::ops::Bound::Excluded(&self.end_exclusive)
+    fn end_bound(&self) -> Bound<&T> {
+        Bound::Excluded(&self.end_exclusive)
     }
 }
 
@@ -603,7 +437,7 @@ where
     T: PrimInt,
 {
     type Item = T;
-    type IntoIter = ClosedOpenIntervalIterator<T>;
+    type IntoIter = ClosedOpenIntervalIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
@@ -615,359 +449,369 @@ where
     T: PrimInt,
 {
     type Item = T;
-    type IntoIter = ClosedOpenIntervalIterator<T>;
+    type IntoIter = ClosedOpenIntervalIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-impl<T> From<std::ops::Range<T>> for ClosedOpenInterval<T>
+impl<T> From<Range<T>> for ClosedOpenInterval<T>
 where
-    T: PrimInt,
+    T: PrimInt + fmt::Debug,
 {
+    /// The interval of the same integers as `range`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range starts after its end, as [`ClosedOpenInterval::new`].
     #[inline]
-    fn from(range: std::ops::Range<T>) -> Self {
+    #[track_caller]
+    fn from(range: Range<T>) -> Self {
         Self::new(range.start, range.end)
     }
 }
 
-impl<T> From<ClosedOpenInterval<T>> for std::ops::Range<T>
+impl<T> From<ClosedOpenInterval<T>> for Range<T>
 where
     T: PrimInt,
 {
     #[inline]
-    fn from(iv: ClosedOpenInterval<T>) -> Self {
-        std::ops::Range {
-            start: iv.start_inclusive,
-            end: iv.end_exclusive,
+    fn from(interval: ClosedOpenInterval<T>) -> Self {
+        interval.start_inclusive..interval.end_exclusive
+    }
+}
+
+/// The integers of a [`ClosedOpenInterval`], from either end.
+///
+/// The integers not yet yielded are always `[front, back)`.
+#[derive(Clone, Debug)]
+pub struct ClosedOpenIntervalIter<T>
+where
+    T: PrimInt,
+{
+    front: T,
+    back: T,
+}
+
+impl<T> Iterator for ClosedOpenIntervalIter<T>
+where
+    T: PrimInt,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        // `front < back` keeps `front + 1` within `T`.
+        (self.front < self.back).then(|| {
+            let point = self.front;
+            self.front = point + T::one();
+            point
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // A count that `T` or `usize` cannot hold is only bounded below, as for std's ranges.
+        match self
+            .back
+            .checked_sub(&self.front)
+            .and_then(|count| count.to_usize())
+        {
+            Some(count) => (count, Some(count)),
+            None => (usize::MAX, None),
         }
     }
 }
 
+impl<T> DoubleEndedIterator for ClosedOpenIntervalIter<T>
+where
+    T: PrimInt,
+{
+    fn next_back(&mut self) -> Option<T> {
+        // `front < back` keeps `back - 1` within `T`.
+        (self.front < self.back).then(|| {
+            self.back = self.back - T::one();
+            self.back
+        })
+    }
+}
+
+impl<T> FusedIterator for ClosedOpenIntervalIter<T> where T: PrimInt {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ops::{Bound, RangeBounds};
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
 
-    #[test]
-    fn test_construction_valid() {
-        let iv = ClosedOpenInterval::new(10, 20);
-        assert_eq!(iv.start(), 10);
-        assert_eq!(iv.end(), 20);
-        assert_eq!(iv.len(), 10);
-        assert!(!iv.is_empty());
+    fn interval(start: i64, end: i64) -> ClosedOpenInterval<i64> {
+        ClosedOpenInterval::new(start, end)
     }
 
     #[test]
-    fn test_construction_empty() {
-        let iv = ClosedOpenInterval::new(10, 10);
-        assert_eq!(iv.start(), 10);
-        assert_eq!(iv.end(), 10);
-        assert_eq!(iv.len(), 0);
-        assert!(iv.is_empty());
+    fn test_new_keeps_its_bounds() {
+        let a = interval(10, 20);
+        assert_eq!((a.start(), a.end(), a.len()), (10, 20, 10));
+        assert!(!a.is_empty());
+        assert!(interval(10, 10).is_empty());
     }
 
     #[test]
-    fn test_try_new() {
-        assert!(ClosedOpenInterval::try_new(5, 10).is_some());
-        assert!(ClosedOpenInterval::try_new(5, 5).is_some());
-        // Invalid: start > end
-        assert!(ClosedOpenInterval::try_new(10, 5).is_none());
+    fn test_try_new_refuses_a_start_after_the_end() {
+        assert_eq!(ClosedOpenInterval::try_new(5, 10), Some(interval(5, 10)));
+        assert_eq!(ClosedOpenInterval::try_new(5, 5), Some(interval(5, 5)));
+        assert_eq!(ClosedOpenInterval::try_new(10, 5), None);
     }
 
     #[test]
-    #[should_panic(expected = "Invalid interval")]
-    fn test_new_panic() {
-        ClosedOpenInterval::new(10, 5);
+    #[should_panic(expected = "called `ClosedOpenInterval::new` with start 10 after end 5")]
+    fn test_new_panics_on_a_start_after_the_end() {
+        let _ = interval(10, 5);
     }
 
     #[test]
-    fn test_default() {
-        let iv: ClosedOpenInterval<i32> = Default::default();
-        assert!(iv.is_empty());
-        assert_eq!(iv.start(), 0);
-        assert_eq!(iv.end(), 0);
+    #[should_panic(
+        expected = "called `ClosedOpenInterval::len` on an interval longer than its type can count"
+    )]
+    fn test_len_panics_when_the_type_cannot_count_it() {
+        let _ = interval(i64::MIN, 1).len();
+    }
+
+    #[test]
+    fn test_default_is_empty_at_zero() {
+        assert_eq!(
+            ClosedOpenInterval::<i32>::default(),
+            ClosedOpenInterval::new(0, 0)
+        );
     }
 
     #[test]
     fn test_intersects() {
-        let a = ClosedOpenInterval::new(0, 10);
-
-        // Disjoint left
-        assert!(!a.intersects(ClosedOpenInterval::new(-5, 0)));
-        // Adjacent left (touching) - strictly NO intersection
-        assert!(!a.intersects(ClosedOpenInterval::new(-5, 0)));
-        // Overlap left
-        assert!(a.intersects(ClosedOpenInterval::new(-5, 5)));
-        // Contained
-        assert!(a.intersects(ClosedOpenInterval::new(2, 8)));
-        // Identity
+        let a = interval(0, 10);
+        assert!(!a.intersects(interval(-10, -5)));
+        assert!(!a.intersects(interval(-5, 0)));
+        assert!(a.intersects(interval(-5, 5)));
+        assert!(a.intersects(interval(2, 8)));
         assert!(a.intersects(a));
-        // Overlap right
-        assert!(a.intersects(ClosedOpenInterval::new(5, 15)));
-        // Adjacent right
-        assert!(!a.intersects(ClosedOpenInterval::new(10, 15)));
-        // Disjoint right
-        assert!(!a.intersects(ClosedOpenInterval::new(11, 15)));
+        assert!(a.intersects(interval(5, 15)));
+        assert!(!a.intersects(interval(10, 15)));
+        assert!(!a.intersects(interval(11, 15)));
+    }
+
+    #[test]
+    fn test_an_empty_interval_intersects_nothing() {
+        let (empty, around) = (interval(0, 0), interval(-1, 1));
+        assert!(!empty.intersects(around));
+        assert!(!around.intersects(empty));
+        assert_eq!(empty.intersection(around), None);
     }
 
     #[test]
     fn test_adjacent() {
-        let a = ClosedOpenInterval::new(0, 10);
-
-        // Touching start
-        assert!(a.adjacent(ClosedOpenInterval::new(-5, 0)));
-        // Touching end
-        assert!(a.adjacent(ClosedOpenInterval::new(10, 15)));
-        // Overlapping (not adjacent)
-        assert!(!a.adjacent(ClosedOpenInterval::new(9, 11)));
-        // Disjoint (not adjacent)
-        assert!(!a.adjacent(ClosedOpenInterval::new(12, 15)));
+        let a = interval(0, 10);
+        assert!(a.adjacent(interval(-5, 0)));
+        assert!(a.adjacent(interval(10, 15)));
+        assert!(!a.adjacent(interval(9, 11)));
+        assert!(!a.adjacent(interval(12, 15)));
     }
 
     #[test]
-    fn test_intersects_or_adjacent() {
-        let a = ClosedOpenInterval::new(0, 10);
-        // Intersection
-        assert!(a.intersects_or_adjacent(ClosedOpenInterval::new(5, 15)));
-        // Adjacency
-        assert!(a.intersects_or_adjacent(ClosedOpenInterval::new(10, 20)));
-        // Gap
-        assert!(!a.intersects_or_adjacent(ClosedOpenInterval::new(11, 20)));
+    fn test_disjoint_and_intersects_or_adjacent_are_opposites() {
+        let a = interval(0, 10);
+        for other in [interval(5, 15), interval(10, 20), interval(11, 20)] {
+            assert_eq!(a.disjoint(other), !a.intersects_or_adjacent(other));
+        }
+        assert!(a.disjoint(interval(11, 20)));
+        assert!(!a.disjoint(interval(10, 20)));
     }
 
     #[test]
     fn test_contains_point() {
-        let a = ClosedOpenInterval::new(0, 10);
-        assert!(a.contains_point(0)); // Inclusive start
-        assert!(a.contains_point(5));
+        let a = interval(0, 10);
+        assert!(a.contains_point(0));
         assert!(a.contains_point(9));
-        assert!(!a.contains_point(10)); // Exclusive end
+        assert!(!a.contains_point(10));
         assert!(!a.contains_point(-1));
     }
 
     #[test]
     fn test_contains_interval() {
-        let main = ClosedOpenInterval::new(0, 10);
-
-        // Exact match
-        assert!(main.contains_interval(ClosedOpenInterval::new(0, 10)));
-        // Strict subset
-        assert!(main.contains_interval(ClosedOpenInterval::new(2, 8)));
-        // Touching bounds
-        assert!(main.contains_interval(ClosedOpenInterval::new(0, 5)));
-        assert!(main.contains_interval(ClosedOpenInterval::new(5, 10)));
-
-        // Overflow bounds
-        assert!(!main.contains_interval(ClosedOpenInterval::new(-1, 5)));
-        assert!(!main.contains_interval(ClosedOpenInterval::new(5, 11)));
-
-        // Disjoint
-        assert!(!main.contains_interval(ClosedOpenInterval::new(20, 30)));
+        let a = interval(0, 10);
+        assert!(a.contains_interval(interval(0, 10)));
+        assert!(a.contains_interval(interval(2, 8)));
+        assert!(!a.contains_interval(interval(-1, 5)));
+        assert!(!a.contains_interval(interval(5, 11)));
+        assert!(!a.contains_interval(interval(20, 30)));
     }
 
     #[test]
     fn test_intersection() {
-        let a = ClosedOpenInterval::new(0, 10);
-        let b = ClosedOpenInterval::new(5, 15);
-
-        // Standard overlap
-        assert_eq!(a.intersection(b), Some(ClosedOpenInterval::new(5, 10)));
-
-        // Subset
-        let c = ClosedOpenInterval::new(2, 8);
-        assert_eq!(a.intersection(c), Some(c));
-
-        let d = ClosedOpenInterval::new(10, 20);
-        assert_eq!(a.intersection(d), None);
-
-        // Disjoint
-        let e = ClosedOpenInterval::new(12, 20);
-        assert_eq!(a.intersection(e), None);
+        let a = interval(0, 10);
+        assert_eq!(a.intersection(interval(5, 15)), Some(interval(5, 10)));
+        assert_eq!(a.intersection(interval(2, 8)), Some(interval(2, 8)));
+        assert_eq!(a.intersection(interval(10, 20)), None);
+        assert_eq!(a.intersection(interval(12, 20)), None);
     }
 
     #[test]
     fn test_union() {
-        let a = ClosedOpenInterval::new(0, 10);
-
-        // Overlapping
-        let b = ClosedOpenInterval::new(5, 15);
-        assert_eq!(a.union(b), Some(ClosedOpenInterval::new(0, 15)));
-
-        // Adjacent
-        let c = ClosedOpenInterval::new(10, 20);
-        assert_eq!(a.union(c), Some(ClosedOpenInterval::new(0, 20)));
-
-        // Contained
-        let d = ClosedOpenInterval::new(2, 8);
-        assert_eq!(a.union(d), Some(a));
-
-        // Disjoint (cannot union into single interval)
-        let e = ClosedOpenInterval::new(12, 20);
-        assert_eq!(a.union(e), None);
+        let a = interval(0, 10);
+        assert_eq!(a.union(interval(5, 15)), Some(interval(0, 15)));
+        assert_eq!(a.union(interval(10, 20)), Some(interval(0, 20)));
+        assert_eq!(a.union(interval(2, 8)), Some(a));
+        assert_eq!(a.union(interval(12, 20)), None);
     }
 
     #[test]
     fn test_gap() {
-        let a = ClosedOpenInterval::new(0, 5);
-        let b = ClosedOpenInterval::new(10, 15);
-
-        // A ... B
-        let g = a.gap(b).unwrap();
-        assert_eq!(g, ClosedOpenInterval::new(5, 10));
-
-        // B ... A (Commutative check)
-        let g = b.gap(a).unwrap();
-        assert_eq!(g, ClosedOpenInterval::new(5, 10));
-
-        // Adjacent (No gap)
-        let c = ClosedOpenInterval::new(5, 10);
-        assert!(a.gap(c).is_none());
-
-        // Intersecting
-        let d = ClosedOpenInterval::new(4, 6);
-        assert!(a.gap(d).is_none());
+        let (a, b) = (interval(0, 5), interval(10, 15));
+        assert_eq!(a.gap(b), Some(interval(5, 10)));
+        assert_eq!(b.gap(a), Some(interval(5, 10)));
+        assert_eq!(a.gap(interval(5, 10)), None);
+        assert_eq!(a.gap(interval(4, 6)), None);
     }
 
     #[test]
     fn test_midpoint() {
-        // Even length
-        let a = ClosedOpenInterval::new(0, 10);
-        assert_eq!(a.midpoint(), 5);
-
-        // Odd length (truncation)
-        let b = ClosedOpenInterval::new(0, 3);
-        // len 3, 3>>1 = 1. start+1 = 1.
-        assert_eq!(b.midpoint(), 1);
-
-        // Negative numbers
-        let c = ClosedOpenInterval::new(-10, -4);
-        // len 6. half 3. -10 + 3 = -7.
-        assert_eq!(c.midpoint(), -7);
-
-        // Overflow safety (u8)
-        let d: ClosedOpenInterval<u8> = ClosedOpenInterval::new(250, 254);
-        // (250+254)/2 = 252. Naive add would panic.
-        assert_eq!(d.midpoint(), 252);
-    }
-
-    #[test]
-    fn test_split_at() {
-        let a = ClosedOpenInterval::new(0, 10);
-        assert!(a.split_at(0).is_none());
-    }
-
-    #[test]
-    fn test_iterator() {
-        let a = ClosedOpenInterval::new(1, 4);
-        let collected: Vec<i32> = a.iter().collect();
-        assert_eq!(collected, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn test_iterator_empty() {
-        let a = ClosedOpenInterval::new(5, 5);
-        let mut iter = a.iter();
-        assert_eq!(iter.next(), None);
-    }
-
-    #[test]
-    fn test_double_ended_iterator() {
-        let a = ClosedOpenInterval::new(1, 4);
-        let mut iter = a.iter();
-
-        assert_eq!(iter.next(), Some(1));
-        assert_eq!(iter.next_back(), Some(3));
-        assert_eq!(iter.next(), Some(2));
-        assert_eq!(iter.next(), None);
-    }
-
-    #[test]
-    fn test_into_iterator_trait() {
-        let a = ClosedOpenInterval::new(0, 3);
-        let mut count = 0;
-        for i in a {
-            // Consumes a
-            assert_eq!(i, count);
-            count += 1;
-        }
-        assert_eq!(count, 3);
-    }
-
-    #[test]
-    fn test_into_iterator_ref_trait() {
-        let a = ClosedOpenInterval::new(0, 3);
-        for (count, i) in (&a).into_iter().enumerate() {
-            // Borrows a
-            assert_eq!(i, count);
-        }
-        // a is still valid here
-        assert_eq!(a.len(), 3);
-    }
-
-    #[test]
-    fn test_fused_iterator() {
-        let a = ClosedOpenInterval::new(0, 1);
-        let mut iter = a.iter();
-        assert_eq!(iter.next(), Some(0));
-        assert_eq!(iter.next(), None);
-        assert_eq!(iter.next(), None); // Should continue returning None
-    }
-
-    #[test]
-    fn test_traits_display_debug() {
-        let a = ClosedOpenInterval::new(10, 20);
-        assert_eq!(format!("{}", a), "[10, 20)");
-        assert_eq!(
-            format!("{:?}", a),
-            "ClosedOpenInterval { start_inclusive: 10, end_exclusive: 20 }"
-        );
-    }
-
-    #[test]
-    fn test_from_range() {
-        let range = 0..10;
-        let iv = ClosedOpenInterval::from(range);
-        assert_eq!(iv.start(), 0);
-        assert_eq!(iv.end(), 10);
-    }
-
-    #[test]
-    fn test_range_bounds() {
-        let iv = ClosedOpenInterval::new(5, 10);
-
-        match iv.start_bound() {
-            Bound::Included(&x) => assert_eq!(x, 5),
-            _ => panic!("Wrong start bound"),
-        }
-
-        match iv.end_bound() {
-            Bound::Excluded(&x) => assert_eq!(x, 10),
-            _ => panic!("Wrong end bound"),
-        }
+        assert_eq!(interval(0, 10).midpoint(), 5);
+        assert_eq!(interval(0, 3).midpoint(), 1);
+        assert_eq!(interval(-10, -4).midpoint(), -7);
+        assert_eq!(interval(-3, 0).midpoint(), -2);
+        assert_eq!(ClosedOpenInterval::<u8>::new(250, 254).midpoint(), 252);
     }
 
     #[test]
     fn test_midpoint_of_the_widest_interval_does_not_overflow() {
-        let widest = ClosedOpenInterval::new(i64::MIN, i64::MAX);
-        assert_eq!(widest.midpoint(), -1);
+        assert_eq!(interval(i64::MIN, i64::MAX).midpoint(), -1);
+    }
+
+    #[test]
+    fn test_split_at() {
+        let a = interval(0, 10);
+        assert_eq!(a.split_at(4), Some((interval(0, 4), interval(4, 10))));
+        assert_eq!(a.split_at(0), None);
+        assert_eq!(a.split_at(10), None);
+    }
+
+    #[test]
+    fn test_iterator_yields_from_both_ends() {
+        let mut points = interval(1, 4).iter();
+        assert_eq!(points.next(), Some(1));
+        assert_eq!(points.next_back(), Some(3));
+        assert_eq!(points.next(), Some(2));
+        assert_eq!(points.next(), None);
+        assert_eq!(points.next_back(), None);
+    }
+
+    #[test]
+    fn test_iterator_of_an_empty_interval_is_empty() {
+        assert_eq!(interval(5, 5).iter().next(), None);
     }
 
     #[test]
     fn test_iterator_size_hint_counts_the_points_left() {
-        let mut points = ClosedOpenInterval::new(1, 4).iter();
+        let mut points = interval(1, 4).iter();
         assert_eq!(points.size_hint(), (3, Some(3)));
         points.next_back();
         assert_eq!(points.size_hint(), (2, Some(2)));
     }
 
     #[test]
-    fn test_an_empty_interval_intersects_nothing() {
-        let empty = ClosedOpenInterval::new(0, 0);
-        let around = ClosedOpenInterval::new(-1, 1);
-        assert!(!empty.intersects(around));
-        assert!(!around.intersects(empty));
-        assert_eq!(empty.intersection(around), None);
+    fn test_iterator_size_hint_of_an_uncountable_interval_is_unbounded() {
+        assert_eq!(
+            interval(i64::MIN, i64::MAX).iter().size_hint(),
+            (usize::MAX, None)
+        );
+    }
+
+    #[test]
+    fn test_into_iterator_by_value_and_by_reference() {
+        let a = interval(0, 3);
+        assert_eq!((&a).into_iter().collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(a.into_iter().collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn test_display_and_debug() {
+        let a = interval(10, 20);
+        assert_eq!(format!("{a}"), "[10, 20)");
+        assert_eq!(
+            format!("{a:?}"),
+            "ClosedOpenInterval { start_inclusive: 10, end_exclusive: 20 }"
+        );
+    }
+
+    #[test]
+    fn test_conversions_with_range() {
+        assert_eq!(ClosedOpenInterval::from(0..10), interval(0, 10));
+        assert_eq!(Range::from(interval(0, 10)), 0..10);
+    }
+
+    #[test]
+    fn test_range_bounds() {
+        let a = interval(5, 10);
+        assert_eq!(a.start_bound(), Bound::Included(&5));
+        assert_eq!(a.end_bound(), Bound::Excluded(&10));
+    }
+
+    // The integers of `[start, end)` as a set: the model the interval's set operations are checked against.
+    fn points(interval: ClosedOpenInterval<i64>) -> BTreeSet<i64> {
+        (interval.start()..interval.end()).collect()
+    }
+
+    fn small_interval() -> impl Strategy<Value = ClosedOpenInterval<i64>> {
+        (-20i64..20, 0i64..20).prop_map(|(start, length)| interval(start, start + length))
+    }
+
+    proptest! {
+        #[test]
+        fn test_try_new_is_some_exactly_for_ordered_bounds(start in -50i64..50, end in -50i64..50) {
+            prop_assert_eq!(ClosedOpenInterval::try_new(start, end).is_some(), start <= end);
+        }
+
+        #[test]
+        fn test_intersects_and_intersection_match_the_point_sets(
+            a in small_interval(),
+            b in small_interval(),
+        ) {
+            let shared: BTreeSet<i64> = points(a).intersection(&points(b)).copied().collect();
+            prop_assert_eq!(a.intersects(b), !shared.is_empty());
+            prop_assert_eq!(a.intersection(b).map(points).unwrap_or_default(), shared);
+        }
+
+        #[test]
+        fn test_union_of_overlapping_or_touching_intervals_covers_both(
+            a in small_interval(),
+            b in small_interval(),
+        ) {
+            match a.union(b) {
+                Some(union) => {
+                    let both: BTreeSet<i64> = points(a).union(&points(b)).copied().collect();
+                    prop_assert!(both.is_subset(&points(union)));
+                    prop_assert_eq!(union.start(), a.start().min(b.start()));
+                    prop_assert_eq!(union.end(), a.end().max(b.end()));
+                }
+                None => prop_assert!(a.end() < b.start() || b.end() < a.start()),
+            }
+        }
+
+        #[test]
+        fn test_contains_point_matches_the_point_set(a in small_interval(), value in -50i64..50) {
+            prop_assert_eq!(a.contains_point(value), points(a).contains(&value));
+        }
+
+        #[test]
+        fn test_iterator_yields_the_point_set_in_order(a in small_interval()) {
+            prop_assert_eq!(a.iter().collect::<Vec<_>>(), points(a).into_iter().collect::<Vec<_>>());
+            prop_assert_eq!(a.iter().rev().collect::<Vec<_>>(), points(a).into_iter().rev().collect::<Vec<_>>());
+            prop_assert_eq!(a.iter().size_hint().1, Some(points(a).len()));
+        }
+
+        #[test]
+        fn test_midpoint_is_the_floor_of_the_mean(a in any::<i32>(), b in any::<i32>()) {
+            // In `i64` the sum of two `i32` cannot overflow, so the plain mean is the reference.
+            let narrow = ClosedOpenInterval::new(a.min(b), a.max(b));
+            let mean = (i64::from(a) + i64::from(b)).div_euclid(2);
+            prop_assert_eq!(i64::from(narrow.midpoint()), mean);
+        }
     }
 }

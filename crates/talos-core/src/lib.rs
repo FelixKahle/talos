@@ -13,7 +13,7 @@ mod math;
 mod ring_arena;
 
 pub use index::{TypedIndex, TypedIndexTag};
-pub use math::{ClosedOpenInterval, ClosedOpenIntervalIterator, SolverNumeric};
+pub use math::{ClosedOpenInterval, ClosedOpenIntervalIter, SolverNumeric};
 pub use ring_arena::{
     Node, NodeIndexTag, RingArena, RingEdgeIter, RingSequenceIter, RingSequenceRevIter,
 };
