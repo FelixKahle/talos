@@ -15,7 +15,7 @@ use typed_index_collections::TiVec;
 // Invariant: `touched` holds every berth whose mark is set, once each, in the order they were first marked, and its
 // capacity is at least the count of berths, the length of `marked`. Every entry of `touched` is below that count,
 // which is what the decoder's unchecked reads through the walk rest on.
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Debug)]
 pub struct TouchedBerths {
     /// Whether each berth is marked, per berth.
     marked: TiVec<BerthIndex, bool>,
@@ -93,6 +93,11 @@ impl TouchedBerths {
     #[inline]
     #[track_caller]
     pub fn is_touched(&self, berth: BerthIndex) -> bool {
+        assert!(
+            berth.index() < self.num_berths(),
+            "called `TouchedBerths::is_touched` with {berth}, outside a set of {} berths",
+            self.num_berths()
+        );
         self.marked[berth]
     }
 
@@ -118,6 +123,15 @@ impl TouchedBerths {
         }
     }
 }
+
+// Written out so that two sets of the same berths are equal, whatever order their berths were first marked in.
+impl PartialEq for TouchedBerths {
+    fn eq(&self, other: &Self) -> bool {
+        self.marked == other.marked
+    }
+}
+
+impl Eq for TouchedBerths {}
 
 // Written out so that the copy, too, holds room for every berth.
 impl Clone for TouchedBerths {
@@ -226,6 +240,27 @@ mod tests {
     }
 
     #[test]
+    fn test_sets_of_the_same_berths_are_equal_whatever_order_they_were_touched_in() {
+        let (mut one, mut other) = (TouchedBerths::new(4), TouchedBerths::new(4));
+        one.touch(berth(1));
+        one.touch(berth(3));
+        other.touch(berth(3));
+        other.touch(berth(1));
+        assert_eq!(one, other);
+        other.touch(berth(0));
+        assert_ne!(one, other);
+        assert_ne!(TouchedBerths::new(3), TouchedBerths::new(4));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "called `TouchedBerths::is_touched` with Berth 3, outside a set of 3 berths"
+    )]
+    fn test_is_touched_refuses_a_berth_outside() {
+        let _ = TouchedBerths::new(3).is_touched(berth(3));
+    }
+
+    #[test]
     #[should_panic(
         expected = "called `TouchedBerths::touch` with Berth 3, outside a set of 3 berths"
     )]
@@ -234,6 +269,20 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_touch_and_is_touched_refuse_every_berth_outside(
+            num_berths in 0_usize..8,
+            beyond in 0_usize..64,
+        ) {
+            let outside = berth(num_berths + beyond);
+            let mut touched = TouchedBerths::new(num_berths);
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| touched.touch(outside)));
+            prop_assert!(refused.is_err());
+            prop_assert_eq!(touched.iter_touched_berths().len(), 0);
+            let refused = std::panic::catch_unwind(|| TouchedBerths::new(num_berths).is_touched(outside));
+            prop_assert!(refused.is_err());
+        }
+
         #[test]
         fn test_marks_match_a_set_and_touch_matches_its_unchecked_twin(
             num_berths in 1_usize..8,
