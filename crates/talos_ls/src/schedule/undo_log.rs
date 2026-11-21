@@ -23,35 +23,6 @@ enum UndoInstruction {
         vessel_b: VesselIndex,
     },
 
-    /// Reverts a swap between two segments by swapping them back.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
-        )
-    )]
-    SwapSegments {
-        a_first: VesselIndex,
-        a_last: VesselIndex,
-        b_first: VesselIndex,
-        b_last: VesselIndex,
-    },
-
-    /// Reverts a segment reversal by reversing again.
-    /// Boundaries are the *original* first and last, which are inverted after the forward pass.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
-        )
-    )]
-    ReverseSegment {
-        original_first: VesselIndex,
-        original_last: VesselIndex,
-    },
-
     /// Reverts a relocation where the vessel was originally after another vessel.
     RelocateAfterVessel {
         vessel: VesselIndex,
@@ -61,20 +32,6 @@ enum UndoInstruction {
     /// Reverts a relocation where the vessel was originally at the head of a berth.
     RelocateToHead {
         vessel: VesselIndex,
-        berth: BerthIndex,
-    },
-
-    /// Reverts a segment relocation where the segment was originally after another vessel.
-    RelocateSegmentAfterVessel {
-        segment_first: VesselIndex,
-        segment_last: VesselIndex,
-        predecessor: VesselIndex,
-    },
-
-    /// Reverts a segment relocation where the segment was originally at the head of a berth.
-    RelocateSegmentToHead {
-        segment_first: VesselIndex,
-        segment_last: VesselIndex,
         berth: BerthIndex,
     },
 }
@@ -87,18 +44,6 @@ impl UndoInstruction {
             Self::SwapVessels { vessel_a, vessel_b } => {
                 [vessel_a, vessel_b].into_iter().find_map(vessel)
             }
-            Self::SwapSegments {
-                a_first,
-                a_last,
-                b_first,
-                b_last,
-            } => [a_first, a_last, b_first, b_last]
-                .into_iter()
-                .find_map(vessel),
-            Self::ReverseSegment {
-                original_first,
-                original_last,
-            } => [original_first, original_last].into_iter().find_map(vessel),
             Self::RelocateAfterVessel {
                 vessel: moved,
                 predecessor,
@@ -107,21 +52,6 @@ impl UndoInstruction {
                 vessel: moved,
                 berth,
             } => vessel(moved).or_else(|| graph.berth_outside(berth)),
-            Self::RelocateSegmentAfterVessel {
-                segment_first,
-                segment_last,
-                predecessor,
-            } => [segment_first, segment_last, predecessor]
-                .into_iter()
-                .find_map(vessel),
-            Self::RelocateSegmentToHead {
-                segment_first,
-                segment_last,
-                berth,
-            } => [segment_first, segment_last]
-                .into_iter()
-                .find_map(vessel)
-                .or_else(|| graph.berth_outside(berth)),
         }
     }
 
@@ -141,28 +71,6 @@ impl UndoInstruction {
             Self::SwapVessels { vessel_a, vessel_b } => unsafe {
                 graph.swap_vessels_unchecked(vessel_a, vessel_b);
             },
-            // The segments trade places again: `b` now stands where `a` stood.
-            Self::SwapSegments {
-                a_first,
-                a_last,
-                b_first,
-                b_last,
-            } => {
-                // SAFETY: the four vessels are the graph's, the precondition of this function.
-                unsafe {
-                    graph.swap_segments_unchecked(b_first, b_last, a_first, a_last);
-                }
-            }
-            // The reversal left the original last vessel first; reversing that segment restores the order.
-            Self::ReverseSegment {
-                original_first,
-                original_last,
-            } => {
-                // SAFETY: both vessels are the graph's, the precondition of this function.
-                unsafe {
-                    graph.reverse_segment_unchecked(original_last, original_first);
-                }
-            }
             Self::RelocateAfterVessel {
                 vessel,
                 predecessor,
@@ -176,30 +84,6 @@ impl UndoInstruction {
             Self::RelocateToHead { vessel, berth } => unsafe {
                 graph.relocate_to_head_unchecked(vessel, berth);
             },
-            Self::RelocateSegmentAfterVessel {
-                segment_first,
-                segment_last,
-                predecessor,
-            } => {
-                // SAFETY: the three vessels are the graph's, the precondition of this function.
-                unsafe {
-                    graph.relocate_segment_after_unchecked(
-                        segment_first,
-                        segment_last,
-                        predecessor,
-                    );
-                }
-            }
-            Self::RelocateSegmentToHead {
-                segment_first,
-                segment_last,
-                berth,
-            } => {
-                // SAFETY: both vessels and the berth are the graph's, the precondition of this function.
-                unsafe {
-                    graph.relocate_segment_to_head_unchecked(segment_first, segment_last, berth);
-                }
-            }
         }
     }
 }
@@ -210,22 +94,6 @@ impl std::fmt::Display for UndoInstruction {
             Self::SwapVessels { vessel_a, vessel_b } => {
                 write!(f, "swap {vessel_a} and {vessel_b} back")
             }
-            Self::SwapSegments {
-                a_first,
-                a_last,
-                b_first,
-                b_last,
-            } => write!(
-                f,
-                "swap the segments {a_first} to {a_last} and {b_first} to {b_last} back"
-            ),
-            Self::ReverseSegment {
-                original_first,
-                original_last,
-            } => write!(
-                f,
-                "reverse the segment {original_last} to {original_first} back"
-            ),
             Self::RelocateAfterVessel {
                 vessel,
                 predecessor,
@@ -235,22 +103,6 @@ impl std::fmt::Display for UndoInstruction {
             Self::RelocateToHead { vessel, berth } => {
                 write!(f, "move {vessel} back to the head of {berth}")
             }
-            Self::RelocateSegmentAfterVessel {
-                segment_first,
-                segment_last,
-                predecessor,
-            } => write!(
-                f,
-                "move the segment {segment_first} to {segment_last} back after {predecessor}"
-            ),
-            Self::RelocateSegmentToHead {
-                segment_first,
-                segment_last,
-                berth,
-            } => write!(
-                f,
-                "move the segment {segment_first} to {segment_last} back to the head of {berth}"
-            ),
         }
     }
 }
@@ -302,47 +154,6 @@ impl ScheduleGraphUndoLog {
         });
     }
 
-    /// Records that the segments `a_first ..= a_last` and `b_first ..= b_last` were swapped; swapping them back
-    /// is the inverse.
-    #[inline(always)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
-        )
-    )]
-    pub(super) fn push_swap_segments(
-        &mut self,
-        a_first: VesselIndex,
-        a_last: VesselIndex,
-        b_first: VesselIndex,
-        b_last: VesselIndex,
-    ) {
-        self.stack.push(UndoInstruction::SwapSegments {
-            a_first,
-            a_last,
-            b_first,
-            b_last,
-        });
-    }
-
-    /// Records that the segment `first ..= last` was reversed; reversing `last ..= first` is the inverse.
-    #[inline(always)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
-        )
-    )]
-    pub(super) fn push_reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
-        self.stack.push(UndoInstruction::ReverseSegment {
-            original_first: first,
-            original_last: last,
-        });
-    }
-
     /// Records that `vessel`, which stood directly after `predecessor`, was moved.
     #[inline(always)]
     pub(super) fn push_relocate_after_vessel(
@@ -361,37 +172,6 @@ impl ScheduleGraphUndoLog {
     pub(super) fn push_relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         self.stack
             .push(UndoInstruction::RelocateToHead { vessel, berth });
-    }
-
-    /// Records that the segment `first ..= last`, which stood directly after `predecessor`, was moved.
-    #[inline(always)]
-    pub(super) fn push_relocate_segment_after_vessel(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        predecessor: VesselIndex,
-    ) {
-        self.stack
-            .push(UndoInstruction::RelocateSegmentAfterVessel {
-                segment_first: first,
-                segment_last: last,
-                predecessor,
-            });
-    }
-
-    /// Records that the segment `first ..= last`, which headed `berth`, was moved.
-    #[inline(always)]
-    pub(super) fn push_relocate_segment_to_head(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        berth: BerthIndex,
-    ) {
-        self.stack.push(UndoInstruction::RelocateSegmentToHead {
-            segment_first: first,
-            segment_last: last,
-            berth,
-        });
     }
 
     // ----------------------------------------------------------------
@@ -477,42 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rollback_swap_segments() {
-        let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::default();
-
-        log.push_swap_segments(v(0), v(1), v(3), v(4));
-        graph.swap_segments(v(0), v(1), v(3), v(4));
-
-        let seq: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        assert_eq!(seq, vec![v(3), v(4), v(2)]);
-
-        // SAFETY: the log names only vessels and berths of the graph.
-        unsafe { log.apply_rollback_unchecked(&mut graph) };
-
-        let restored: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        assert_eq!(restored, vec![v(0), v(1), v(2)]);
-    }
-
-    #[test]
-    fn test_rollback_reverse_segment() {
-        let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::default();
-
-        log.push_reverse_segment(v(0), v(2));
-        graph.reverse_segment(v(0), v(2));
-
-        let seq: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        assert_eq!(seq, vec![v(2), v(1), v(0)]);
-
-        // SAFETY: the log names only vessels and berths of the graph.
-        unsafe { log.apply_rollback_unchecked(&mut graph) };
-
-        let restored: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        assert_eq!(restored, vec![v(0), v(1), v(2)]);
-    }
-
-    #[test]
     fn test_rollback_relocate_after_vessel() {
         let mut graph = setup_graph();
         let mut log = ScheduleGraphUndoLog::default();
@@ -556,52 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rollback_relocate_segment_after_vessel() {
-        let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::default();
-
-        // Move [V1, V2] (predecessor V0) to after V3 in B1.
-        log.push_relocate_segment_after_vessel(v(1), v(2), v(0));
-        graph.relocate_segment_after(v(1), v(2), v(3));
-
-        let seq_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        let seq_b1: Vec<_> = graph.vessel_sequence_iter(b(1)).collect();
-        assert_eq!(seq_b0, vec![v(0)]);
-        assert_eq!(seq_b1, vec![v(3), v(1), v(2), v(4)]);
-
-        // SAFETY: the log names only vessels and berths of the graph.
-        unsafe { log.apply_rollback_unchecked(&mut graph) };
-
-        let restored_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        let restored_b1: Vec<_> = graph.vessel_sequence_iter(b(1)).collect();
-        assert_eq!(restored_b0, vec![v(0), v(1), v(2)]);
-        assert_eq!(restored_b1, vec![v(3), v(4)]);
-    }
-
-    #[test]
-    fn test_rollback_relocate_segment_to_head() {
-        let mut graph = setup_graph();
-        let mut log = ScheduleGraphUndoLog::default();
-
-        // Move [V0, V1] (at head of B0) to head of B2.
-        log.push_relocate_segment_to_head(v(0), v(1), b(0));
-        graph.relocate_segment_to_head(v(0), v(1), b(2));
-
-        let seq_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        let seq_b2: Vec<_> = graph.vessel_sequence_iter(b(2)).collect();
-        assert_eq!(seq_b0, vec![v(2)]);
-        assert_eq!(seq_b2, vec![v(0), v(1)]);
-
-        // SAFETY: the log names only vessels and berths of the graph.
-        unsafe { log.apply_rollback_unchecked(&mut graph) };
-
-        let restored_b0: Vec<_> = graph.vessel_sequence_iter(b(0)).collect();
-        let restored_b2: Vec<_> = graph.vessel_sequence_iter(b(2)).collect();
-        assert_eq!(restored_b0, vec![v(0), v(1), v(2)]);
-        assert!(restored_b2.is_empty());
-    }
-
-    #[test]
     fn test_lifo_execution_order() {
         let mut graph = setup_graph();
         let original = graph.clone();
@@ -611,9 +309,9 @@ mod tests {
         log.push_relocate_after_vessel(v(2), v(1));
         graph.relocate_to_head(v(2), b(2));
 
-        // Op 2: Reverse [V3, V4] in B1
-        log.push_reverse_segment(v(3), v(4));
-        graph.reverse_segment(v(3), v(4));
+        // Op 2: Move V3 (head of B1) after V4
+        log.push_relocate_to_head(v(3), b(1));
+        graph.relocate_after(v(3), v(4));
 
         // Op 3: Swap V0 and V3
         log.push_swap_vessels(v(0), v(3));
@@ -632,7 +330,7 @@ mod tests {
     fn test_clear_keeps_the_memory() {
         let mut log = ScheduleGraphUndoLog::default();
         log.push_swap_vessels(v(0), v(1));
-        log.push_reverse_segment(v(2), v(3));
+        log.push_relocate_after_vessel(v(2), v(3));
         assert_eq!(log.len(), 2);
         let capacity = log.stack.capacity();
         log.clear();

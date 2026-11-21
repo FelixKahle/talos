@@ -8,17 +8,16 @@ use super::slot::Slot;
 use std::iter::FusedIterator;
 use typed_index_collections::TiSlice;
 
-/// The nodes of a ring from a start along one direction, up to but not including a stop node.
+/// The nodes of a ring from a start along the successors, up to but not including a stop node.
 ///
-/// The direction is the column the walk follows: the successors walk the ring forwards, the predecessors walk it
-/// backwards. The walk yields at most as many nodes as the arena holds, so it ends even if the stop node is not on
-/// the ring of the start: it then goes round that ring until it has yielded that many.
+/// The walk yields at most as many nodes as the arena holds, so it ends even if the stop node is not on the ring of
+/// the start: it then goes round that ring until it has yielded that many.
 // Invariant: `column` is one column of the arena whose slots `current` and `stop` are, borrowed for as long as the
 // walk lives, so its length is the arena's and every entry names one of its nodes (`RingArena`); `current` is so
 // always a slot of that arena, and reading `column[current]` is in bounds.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RingSequenceIter<'a> {
-    /// The link of each node of the arena in the direction of the walk.
+    /// The successor of each node of the arena.
     column: &'a TiSlice<Node, Node>,
     /// The node to yield next.
     current: Slot,
@@ -89,10 +88,7 @@ impl FusedIterator for RingSequenceIter<'_> {}
 
 #[cfg(test)]
 mod tests {
-    use super::super::arena::RingArena;
-    use super::super::ring_lists::{
-        InArena, arena_of, locate, rotated_to, some_rings, three_rings,
-    };
+    use super::super::ring_lists::{InArena, arena_of, locate, some_rings, three_rings};
     use super::*;
     use proptest::prelude::*;
 
@@ -151,23 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sequence_rev_walks_back_to_the_stop() {
-        let arena = three_rings();
-        assert_eq!(
-            indices(arena.sequence_rev(Node::new(3), Node::new(0))),
-            [3, 2, 1]
-        );
-        assert_eq!(
-            indices(arena.sequence_rev(Node::new(6), Node::new(4))),
-            [6, 5]
-        );
-        assert_eq!(
-            indices(arena.sequence_rev(Node::new(5), Node::new(5))),
-            Vec::<usize>::new()
-        );
-    }
-
-    #[test]
     fn test_sequence_past_a_stop_on_another_ring_goes_round_until_every_node_is_counted() {
         let arena = three_rings();
         assert_eq!(
@@ -185,14 +164,6 @@ mod tests {
         assert_eq!(walk.size_hint(), (0, Some(0)));
     }
 
-    /// The walks of `arena` from `start` to `stop`, forwards and backwards.
-    fn walks(arena: &RingArena, start: Node, stop: Node) -> [Vec<usize>; 2] {
-        [
-            indices(arena.sequence(start, stop)),
-            indices(arena.sequence_rev(start, stop)),
-        ]
-    }
-
     proptest! {
         #[test]
         fn test_walks_follow_the_model_ring(
@@ -205,16 +176,11 @@ mod tests {
             let start = start_at % len;
             let ring = &rings[locate(&rings, start).0];
             let stop = if stop_elsewhere { stop_at % len } else { ring[stop_at % ring.len()] };
-            let backwards: Vec<usize> = rotated_to(&rings, start)[1..].iter().rev().copied().collect();
-            let backwards: Vec<usize> = std::iter::once(start).chain(backwards).collect();
 
-            let [forwards, backwards_walked] = walks(&arena, Node::new(start), Node::new(stop));
+            let (start_node, stop_node) = (Node::new(start), Node::new(stop));
+            let forwards = indices(arena.sequence(start_node, stop_node));
             prop_assert_eq!(&forwards, &expected_walk(ring, start, stop, len));
-            prop_assert_eq!(&backwards_walked, &expected_walk(&backwards, start, stop, len));
-
-            let (start, stop) = (Node::new(start), Node::new(stop));
-            assert_hints_bound_what_is_left(arena.sequence(start, stop), len);
-            assert_hints_bound_what_is_left(arena.sequence_rev(start, stop), len);
+            assert_hints_bound_what_is_left(arena.sequence(start_node, stop_node), len);
         }
     }
 }

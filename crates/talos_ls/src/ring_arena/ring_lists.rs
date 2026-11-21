@@ -25,20 +25,12 @@ fn assert_in(arena: &RingArena, nodes: &[Node]) {
 pub(super) trait InArena {
     /// The walk of `sequence_unchecked`.
     fn sequence(&self, start: Node, stop: Node) -> RingSequenceIter<'_>;
-    /// The walk of `sequence_rev_unchecked`.
-    fn sequence_rev(&self, start: Node, stop: Node) -> RingSequenceIter<'_>;
     /// The step `swap_nodes_unchecked`.
     fn swap_nodes(&mut self, first: Node, second: Node);
-    /// The step `swap_segments_unchecked`.
-    fn swap_segments(&mut self, a_first: Node, a_last: Node, b_first: Node, b_last: Node);
     /// The step `relocate_after_unchecked`.
     fn relocate_after(&mut self, node: Node, anchor: Node);
     /// The step `relocate_before_unchecked`.
     fn relocate_before(&mut self, node: Node, anchor: Node);
-    /// The step `relocate_segment_after_unchecked`.
-    fn relocate_segment_after(&mut self, first: Node, last: Node, anchor: Node);
-    /// The step `reverse_segment_unchecked`.
-    fn reverse_segment(&mut self, first: Node, last: Node);
 }
 
 impl InArena for RingArena {
@@ -50,24 +42,10 @@ impl InArena for RingArena {
     }
 
     #[track_caller]
-    fn sequence_rev(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
-        assert_in(self, &[start, stop]);
-        // SAFETY: both nodes lie in the arena, as the assertion above found.
-        unsafe { self.sequence_rev_unchecked(start, stop) }
-    }
-
-    #[track_caller]
     fn swap_nodes(&mut self, first: Node, second: Node) {
         assert_in(self, &[first, second]);
         // SAFETY: both nodes lie in the arena, as the assertion above found.
         unsafe { self.swap_nodes_unchecked(first, second) }
-    }
-
-    #[track_caller]
-    fn swap_segments(&mut self, a_first: Node, a_last: Node, b_first: Node, b_last: Node) {
-        assert_in(self, &[a_first, a_last, b_first, b_last]);
-        // SAFETY: the four nodes lie in the arena, as the assertion above found.
-        unsafe { self.swap_segments_unchecked(a_first, a_last, b_first, b_last) }
     }
 
     #[track_caller]
@@ -82,20 +60,6 @@ impl InArena for RingArena {
         assert_in(self, &[node, anchor]);
         // SAFETY: both nodes lie in the arena, as the assertion above found.
         unsafe { self.relocate_before_unchecked(node, anchor) }
-    }
-
-    #[track_caller]
-    fn relocate_segment_after(&mut self, first: Node, last: Node, anchor: Node) {
-        assert_in(self, &[first, last, anchor]);
-        // SAFETY: the three nodes lie in the arena, as the assertion above found.
-        unsafe { self.relocate_segment_after_unchecked(first, last, anchor) }
-    }
-
-    #[track_caller]
-    fn reverse_segment(&mut self, first: Node, last: Node) {
-        assert_in(self, &[first, last]);
-        // SAFETY: both nodes lie in the arena, as the assertion above found.
-        unsafe { self.reverse_segment_unchecked(first, last) }
     }
 }
 
@@ -221,30 +185,6 @@ pub(super) fn locate(rings: &[Vec<usize>], node: usize) -> (usize, usize) {
                 .map(|place| (ring, place))
         })
         .expect("every node should stand on one ring")
-}
-
-/// The ring of `node` rotated to start at it.
-pub(super) fn rotated_to(rings: &[Vec<usize>], node: usize) -> Vec<usize> {
-    let (ring, place) = locate(rings, node);
-    let nodes = &rings[ring];
-    nodes[place..]
-        .iter()
-        .chain(&nodes[..place])
-        .copied()
-        .collect()
-}
-
-/// A segment of `rings`: the ring of `first`, the `extra % ring length + 1` nodes from `first`, and the rest of the
-/// ring after them.
-pub(super) fn segment(
-    rings: &[Vec<usize>],
-    first: usize,
-    extra: usize,
-) -> (usize, Vec<usize>, Vec<usize>) {
-    let (ring, _) = locate(rings, first);
-    let rotated = rotated_to(rings, first);
-    let length = extra % rotated.len() + 1;
-    (ring, rotated[..length].to_vec(), rotated[length..].to_vec())
 }
 
 /// An arena of one to nine nodes, split into rings at random: its length and its rings.

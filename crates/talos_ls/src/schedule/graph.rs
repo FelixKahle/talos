@@ -51,49 +51,20 @@ impl fmt::Display for LinkEnd {
 // VesselSequenceIter
 // ----------------------------------------------------------------
 
-/// The vessels of a berth, or of a segment of one, in their order along it or against it.
+/// The vessels of a berth, from its head to its tail.
 ///
 /// The walk yields only vessels of its graph, in every build: it ends at the first node that is not a vessel's,
-/// as well as at the end of the berth or the segment. A graph whose order a move against its preconditions has
-/// broken so gives a wrong or a short order, never an id outside the graph, and a caller may index its columns of
-/// vessels by every vessel the walk yields without a check.
+/// as well as at the end of the berth. A ring that held two sentinels so gives a wrong or a short order, never an
+/// id outside the graph, and a caller may index its columns of vessels by every vessel the walk yields without a
+/// check.
 // Invariant: every node `inner` yields lies in the arena of a graph of `num_vessels` vessels, and the walk yields
 // a node only if it is below `num_vessels`, so only the node of one of the graph's vessels.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct VesselSequenceIter<'a> {
-    /// The walk over the nodes, which stops before the berth's sentinel or after the segment.
+    /// The walk over the nodes, which stops before the berth's sentinel.
     inner: RingSequenceIter<'a>,
     /// The graph's count of vessels; the walk ends at the first node at or beyond it, a sentinel.
     num_vessels: usize,
-}
-
-impl<'a> VesselSequenceIter<'a> {
-    /// The vessels of the segment `first ..= last` of the rings of `arena`, a graph's arena of `num_vessels`
-    /// vessels, from `first` along its ring.
-    ///
-    /// # Safety
-    ///
-    /// `first` and `last` must be below `num_vessels`, and so nodes of `arena`.
-    #[inline(always)]
-    unsafe fn segment_unchecked(
-        arena: &'a RingArena,
-        num_vessels: usize,
-        first: VesselIndex,
-        last: VesselIndex,
-    ) -> Self {
-        debug_assert!(
-            first.index() < num_vessels && last.index() < num_vessels && num_vessels <= arena.len(),
-            "called `VesselSequenceIter::segment_unchecked` with {first} or {last}, outside a graph of \
-             {num_vessels} vessels"
-        );
-        // SAFETY: `first` and `last` are below the count of vessels, the precondition of this function, so their
-        // nodes lie in the arena by the invariant of `ScheduleGraph`, and so does the node read after `last`.
-        let inner = unsafe {
-            let after_last = arena.next_unchecked(node_of(last));
-            arena.sequence_unchecked(node_of(first), after_last)
-        };
-        Self { inner, num_vessels }
-    }
 }
 
 impl Iterator for VesselSequenceIter<'_> {
@@ -215,21 +186,14 @@ enum Step {
     VesselBerth,
     VesselCount,
     VesselPredecessor,
-    VesselSuccessor,
     VesselSequenceIter,
-    VesselSequenceRevIter,
     BerthTopologyIter,
+    #[cfg(test)]
     SwapVessels,
-    SwapSegments,
-    ReverseSegment,
+    #[cfg(test)]
     RelocateAfter,
-    RelocateBefore,
+    #[cfg(test)]
     RelocateToHead,
-    RelocateToTail,
-    RelocateSegmentAfter,
-    RelocateSegmentBefore,
-    RelocateSegmentToHead,
-    RelocateSegmentToTail,
 }
 
 impl fmt::Display for Step {
@@ -238,21 +202,14 @@ impl fmt::Display for Step {
             Self::VesselBerth => "vessel_berth",
             Self::VesselCount => "vessel_count",
             Self::VesselPredecessor => "vessel_predecessor",
-            Self::VesselSuccessor => "vessel_successor",
             Self::VesselSequenceIter => "vessel_sequence_iter",
-            Self::VesselSequenceRevIter => "vessel_sequence_rev_iter",
             Self::BerthTopologyIter => "berth_topology_iter",
+            #[cfg(test)]
             Self::SwapVessels => "swap_vessels",
-            Self::SwapSegments => "swap_segments",
-            Self::ReverseSegment => "reverse_segment",
+            #[cfg(test)]
             Self::RelocateAfter => "relocate_after",
-            Self::RelocateBefore => "relocate_before",
+            #[cfg(test)]
             Self::RelocateToHead => "relocate_to_head",
-            Self::RelocateToTail => "relocate_to_tail",
-            Self::RelocateSegmentAfter => "relocate_segment_after",
-            Self::RelocateSegmentBefore => "relocate_segment_before",
-            Self::RelocateSegmentToHead => "relocate_segment_to_head",
-            Self::RelocateSegmentToTail => "relocate_segment_to_tail",
         };
         write!(f, "`ScheduleGraph::{name}`")
     }
@@ -297,12 +254,12 @@ where
 /// The order of the vessels on each berth: the genotype the local search changes, one move at a time.
 ///
 /// Each berth is a ring of a ring arena that holds the berth's sentinel and its vessels in order, so that a move
-/// (a swap, a relocation, a reversal) relinks a constant number of nodes, or as many as a segment it reverses. The
-/// graph also keeps each vessel's berth and each berth's count of vessels, which every move keeps up to date.
+/// (a swap of two vessels, a relocation of one) relinks a constant number of nodes. The graph also keeps each
+/// vessel's berth and each berth's count of vessels, which every move keeps up to date.
 ///
-/// Every step comes as a safe form, which checks in every build that the vessels and berths it is handed are the
-/// graph's, and an `_unchecked` twin for the caller whose own invariant proves that they are. The steps on
-/// segments also take conditions on the order no constant-time check confirms, stated in their `# Preconditions`.
+/// Every read comes as a safe form, which checks in every build that the vessels and berths it is handed are the
+/// graph's, and an `_unchecked` twin for the caller whose own invariant proves that they are. The moves are made
+/// through their `_unchecked` forms; their safe forms are the references the tests check them against.
 // Invariant: the arena has `num_vessels + num_berths` nodes, where `num_vessels` is the length of `vessel_berth`
 // and `num_berths` that of `berth_vessel_count`; node `v` below `num_vessels` stands for vessel `v`, and node
 // `num_vessels + b` is the sentinel of berth `b`. Every entry of `vessel_berth` is below `num_berths`. These are
@@ -310,10 +267,10 @@ where
 // read from `vessel_berth` indexes `berth_vessel_count`. The counts never change but through `overwrite_*`, which
 // takes `&mut self`, so no id proven against the graph outlives a change of them.
 // Further, each ring holds exactly one sentinel, `vessel_berth[v]` is the berth whose sentinel shares the ring of
-// `v`, and `berth_vessel_count[b]` counts the vessels on the ring of `b`'s sentinel. The moves keep these under
-// their preconditions; breaking those gives a wrong order and wrong counts, never an access out of bounds: every
-// column stays in range whatever the rings hold, and every walk over vessels ends at the first node that is not a
-// vessel's (`VesselSequenceIter`), so it yields only the graph's vessels even from rings that hold two sentinels.
+// `v`, and `berth_vessel_count[b]` counts the vessels on the ring of `b`'s sentinel. The moves keep these; were
+// they broken, the order and the counts would go wrong but no access would leave the graph: every column stays in
+// range whatever the rings hold, and every walk over vessels ends at the first node that is not a vessel's
+// (`VesselSequenceIter`), so it yields only the graph's vessels even from a ring that held two sentinels.
 pub struct ScheduleGraph {
     /// The rings: one per berth, through the berth's sentinel and its vessels in order.
     arena: RingArena,
@@ -724,37 +681,6 @@ impl ScheduleGraph {
         self.node_vessel(node)
     }
 
-    /// The vessel directly after `vessel` on its berth, or `None` if `vessel` ends it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `vessel` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn vessel_successor(&self, vessel: VesselIndex) -> Option<VesselIndex> {
-        self.check(Step::VesselSuccessor, [vessel], []);
-        // SAFETY: `vessel` is the graph's, as the check above found.
-        unsafe { self.vessel_successor_unchecked(vessel) }
-    }
-
-    /// The vessel directly after `vessel` on its berth, for a vessel the caller knows to be the graph's.
-    ///
-    /// # Safety
-    ///
-    /// `vessel` must be one of the graph's, the condition [`vessel_successor`](Self::vessel_successor) checks.
-    #[inline(always)]
-    pub unsafe fn vessel_successor_unchecked(&self, vessel: VesselIndex) -> Option<VesselIndex> {
-        debug_assert!(
-            vessel.index() < self.num_vessels(),
-            "called `ScheduleGraph::vessel_successor_unchecked` with {vessel}, outside a graph of {} vessels",
-            self.num_vessels()
-        );
-        // SAFETY: `vessel` is the graph's, the precondition of this function, so its node lies in the arena by the
-        // invariant of `ScheduleGraph`.
-        let node = unsafe { self.arena.next_unchecked(node_of(vessel)) };
-        self.node_vessel(node)
-    }
-
     /// The vessels of `berth`, from its head to its tail.
     ///
     /// # Panics
@@ -797,96 +723,6 @@ impl ScheduleGraph {
         }
     }
 
-    /// The vessels of `berth`, from its tail to its head.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `berth` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn vessel_sequence_rev_iter(&self, berth: BerthIndex) -> VesselSequenceIter<'_> {
-        self.check(Step::VesselSequenceRevIter, [], [berth]);
-        // SAFETY: `berth` is the graph's, as the check above found.
-        unsafe { self.vessel_sequence_rev_iter_unchecked(berth) }
-    }
-
-    /// The vessels of `berth`, from its tail to its head, for a berth the caller knows to be the graph's.
-    ///
-    /// # Safety
-    ///
-    /// `berth` must be one of the graph's, the condition
-    /// [`vessel_sequence_rev_iter`](Self::vessel_sequence_rev_iter) checks.
-    #[inline(always)]
-    pub unsafe fn vessel_sequence_rev_iter_unchecked(
-        &self,
-        berth: BerthIndex,
-    ) -> VesselSequenceIter<'_> {
-        debug_assert!(
-            berth.index() < self.num_berths(),
-            "called `ScheduleGraph::vessel_sequence_rev_iter_unchecked` with {berth}, outside a graph of {} \
-             berths",
-            self.num_berths()
-        );
-        let sentinel = self.sentinel_of(berth);
-        // SAFETY: `berth` is the graph's, the precondition of this function, so its sentinel lies in the arena by
-        // the invariant of `ScheduleGraph`, and so does the node read before it.
-        let inner = unsafe {
-            let tail = self.arena.prev_unchecked(sentinel);
-            self.arena.sequence_rev_unchecked(tail, sentinel)
-        };
-        VesselSequenceIter {
-            inner,
-            num_vessels: self.num_vessels(),
-        }
-    }
-
-    /// The vessels of the segment `first ..= last`, from `first` along its berth.
-    ///
-    /// # Preconditions
-    ///
-    /// `last` follows `first` on its berth. Otherwise the walk yields the wrong vessels, though only vessels of the
-    /// graph: it ends at the first sentinel it meets, and after at most the graph's count of nodes.
-    ///
-    /// # Safety
-    ///
-    /// `first` and `last` must be vessels of the graph.
-    #[inline(always)]
-    pub(super) unsafe fn segment_unchecked(
-        &self,
-        first: VesselIndex,
-        last: VesselIndex,
-    ) -> VesselSequenceIter<'_> {
-        debug_assert!(
-            first.index() < self.num_vessels() && last.index() < self.num_vessels(),
-            "called `ScheduleGraph::segment_unchecked` with {first} or {last}, outside a graph of {} vessels",
-            self.num_vessels()
-        );
-        // SAFETY: `first` and `last` are the graph's, the precondition of this function.
-        unsafe {
-            VesselSequenceIter::segment_unchecked(&self.arena, self.num_vessels(), first, last)
-        }
-    }
-
-    /// Whether `first ..= last` is a segment of one berth: both are vessels of the graph, and `last` is `first` or
-    /// follows it on its berth.
-    ///
-    /// The cost is the segment's length, or the rest of the berth if `last` does not follow `first`; the steps on
-    /// segments check their precondition by it in a debug build.
-    pub(super) fn is_segment(&self, first: VesselIndex, last: VesselIndex) -> bool {
-        if self
-            .vessel_outside(first)
-            .or(self.vessel_outside(last))
-            .is_some()
-        {
-            return false;
-        }
-        // SAFETY: `first` and `last` are the graph's, as the check above found.
-        let segment = unsafe { self.segment_unchecked(first, last) };
-        // The walk ends at `last`'s successor or at the first sentinel; it yields `last` last exactly when it
-        // reached the successor, since the node it yields before that is `last`.
-        segment.last() == Some(last)
-    }
-
     /// The places of `berth` as link ends: its head, its vessels from head to tail, and its tail.
     ///
     /// # Panics
@@ -927,7 +763,7 @@ impl ScheduleGraph {
     /// # Panics
     ///
     /// Panics if `a` or `b` is not one of the graph's.
-    #[inline]
+    #[cfg(test)]
     #[track_caller]
     pub fn swap_vessels(&mut self, a: VesselIndex, b: VesselIndex) {
         self.check(Step::SwapVessels, [a, b], []);
@@ -962,147 +798,13 @@ impl ScheduleGraph {
         }
     }
 
-    /// Exchanges the places of the segments `a_first ..= a_last` and `b_first ..= b_last`, on one berth or across
-    /// two; nothing changes if both start at one vessel.
-    ///
-    /// # Preconditions
-    ///
-    /// `a_last` follows `a_first` on its berth, `b_last` follows `b_first`, and the segments share no vessel unless
-    /// they are one segment. Otherwise the order breaks, though no access leaves the graph; a debug build checks
-    /// it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any of the four vessels is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn swap_segments(
-        &mut self,
-        a_first: VesselIndex,
-        a_last: VesselIndex,
-        b_first: VesselIndex,
-        b_last: VesselIndex,
-    ) {
-        self.check(Step::SwapSegments, [a_first, a_last, b_first, b_last], []);
-        // SAFETY: the four vessels are the graph's, as the check above found.
-        unsafe { self.swap_segments_unchecked(a_first, a_last, b_first, b_last) }
-    }
-
-    /// Exchanges the places of two segments, for vessels the caller knows to be the graph's.
-    ///
-    /// # Preconditions
-    ///
-    /// Those of [`swap_segments`](Self::swap_segments).
-    ///
-    /// # Safety
-    ///
-    /// The four vessels must be the graph's, the condition [`swap_segments`](Self::swap_segments) checks.
-    #[inline]
-    pub unsafe fn swap_segments_unchecked(
-        &mut self,
-        a_first: VesselIndex,
-        a_last: VesselIndex,
-        b_first: VesselIndex,
-        b_last: VesselIndex,
-    ) {
-        debug_assert!(
-            [a_first, a_last, b_first, b_last]
-                .iter()
-                .all(|vessel| vessel.index() < self.num_vessels()),
-            "called `ScheduleGraph::swap_segments_unchecked` with {a_first}, {a_last}, {b_first} or {b_last}, \
-             outside a graph of {} vessels",
-            self.num_vessels()
-        );
-        if a_first == b_first {
-            return;
-        }
-        debug_assert!(
-            self.is_segment(a_first, a_last) && self.is_segment(b_first, b_last),
-            "called `ScheduleGraph::swap_segments_unchecked` with {a_first} ..= {a_last} or {b_first} ..= {b_last}, \
-             which is no segment of one berth"
-        );
-        // SAFETY: both first vessels are the graph's, the precondition of this function.
-        let (berth_a, berth_b) = unsafe {
-            (
-                self.vessel_berth_unchecked(a_first),
-                self.vessel_berth_unchecked(b_first),
-            )
-        };
-        // SAFETY: the four vessels are the graph's, the precondition of this function, so their nodes lie in the
-        // arena by the invariant of `ScheduleGraph`.
-        unsafe {
-            self.arena.swap_segments_unchecked(
-                node_of(a_first),
-                node_of(a_last),
-                node_of(b_first),
-                node_of(b_last),
-            );
-        }
-        if berth_a != berth_b {
-            // SAFETY: the vessels are the graph's, the precondition of this function, and `berth_a` and `berth_b`
-            // were read from `vessel_berth`, so they are the graph's by the invariant of `ScheduleGraph`.
-            unsafe {
-                self.move_segment_berth_unchecked(a_first, a_last, berth_a, berth_b);
-                self.move_segment_berth_unchecked(b_first, b_last, berth_b, berth_a);
-            }
-        }
-    }
-
-    /// Reverses the order of the segment `first ..= last` on its berth, at a cost of its length.
-    ///
-    /// # Preconditions
-    ///
-    /// `last` follows `first` on its berth. Otherwise the order breaks, though no access leaves the graph; a debug
-    /// build checks it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `first` or `last` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
-        self.check(Step::ReverseSegment, [first, last], []);
-        // SAFETY: both vessels are the graph's, as the check above found.
-        unsafe { self.reverse_segment_unchecked(first, last) }
-    }
-
-    /// Reverses the order of the segment `first ..= last`, for vessels the caller knows to be the graph's.
-    ///
-    /// # Preconditions
-    ///
-    /// Those of [`reverse_segment`](Self::reverse_segment).
-    ///
-    /// # Safety
-    ///
-    /// `first` and `last` must be the graph's, the condition [`reverse_segment`](Self::reverse_segment) checks.
-    #[inline]
-    pub unsafe fn reverse_segment_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
-        debug_assert!(
-            first.index() < self.num_vessels() && last.index() < self.num_vessels(),
-            "called `ScheduleGraph::reverse_segment_unchecked` with {first} or {last}, outside a graph of {} \
-             vessels",
-            self.num_vessels()
-        );
-        debug_assert!(
-            self.is_segment(first, last),
-            "called `ScheduleGraph::reverse_segment_unchecked` with {first} ..= {last}, which is no \
-             segment of one berth"
-        );
-        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes lie in the arena
-        // by the invariant of `ScheduleGraph`.
-        unsafe {
-            self.arena
-                .reverse_segment_unchecked(node_of(first), node_of(last))
-        };
-    }
-
     /// Moves `vessel` to directly after `anchor`, on its berth or another; nothing changes if `vessel` is `anchor`
     /// or already follows it.
     ///
     /// # Panics
     ///
     /// Panics if `vessel` or `anchor` is not one of the graph's.
-    #[inline]
+    #[cfg(test)]
     #[track_caller]
     pub fn relocate_after(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
         self.check(Step::RelocateAfter, [vessel, anchor], []);
@@ -1133,54 +835,12 @@ impl ScheduleGraph {
         }
     }
 
-    /// Moves `vessel` to directly before `reference`, on its berth or another; nothing changes if `vessel` is
-    /// `reference` or already precedes it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `vessel` or `reference` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_before(&mut self, vessel: VesselIndex, reference: VesselIndex) {
-        self.check(Step::RelocateBefore, [vessel, reference], []);
-        // SAFETY: both vessels are the graph's, as the check above found.
-        unsafe { self.relocate_before_unchecked(vessel, reference) }
-    }
-
-    /// Moves `vessel` to directly before `reference`, for vessels the caller knows to be the graph's.
-    ///
-    /// # Safety
-    ///
-    /// `vessel` and `reference` must be the graph's, the condition [`relocate_before`](Self::relocate_before)
-    /// checks.
-    #[inline]
-    pub unsafe fn relocate_before_unchecked(
-        &mut self,
-        vessel: VesselIndex,
-        reference: VesselIndex,
-    ) {
-        debug_assert!(
-            vessel.index() < self.num_vessels() && reference.index() < self.num_vessels(),
-            "called `ScheduleGraph::relocate_before_unchecked` with {vessel} or {reference}, outside a graph of {} \
-             vessels",
-            self.num_vessels()
-        );
-        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes lie in the arena
-        // by the invariant of `ScheduleGraph`.
-        unsafe {
-            let berth = self.vessel_berth_unchecked(reference);
-            self.arena
-                .relocate_before_unchecked(node_of(vessel), node_of(reference));
-            self.move_vessel_berth_unchecked(vessel, berth);
-        }
-    }
-
     /// Moves `vessel` to the head of `berth`.
     ///
     /// # Panics
     ///
     /// Panics if `vessel` or `berth` is not one of the graph's.
-    #[inline]
+    #[cfg(test)]
     #[track_caller]
     pub fn relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         self.check(Step::RelocateToHead, [vessel], [berth]);
@@ -1213,319 +873,6 @@ impl ScheduleGraph {
         }
     }
 
-    /// Moves `vessel` to the tail of `berth`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `vessel` or `berth` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_to_tail(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        self.check(Step::RelocateToTail, [vessel], [berth]);
-        // SAFETY: the vessel and the berth are the graph's, as the check above found.
-        unsafe { self.relocate_to_tail_unchecked(vessel, berth) }
-    }
-
-    /// Moves `vessel` to the tail of `berth`, for a vessel and a berth the caller knows to be the graph's.
-    ///
-    /// # Safety
-    ///
-    /// `vessel` and `berth` must be the graph's, the condition [`relocate_to_tail`](Self::relocate_to_tail)
-    /// checks.
-    #[inline]
-    pub unsafe fn relocate_to_tail_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        debug_assert!(
-            vessel.index() < self.num_vessels() && berth.index() < self.num_berths(),
-            "called `ScheduleGraph::relocate_to_tail_unchecked` with {vessel} or {berth}, outside a graph of {} \
-             vessels and {} berths",
-            self.num_vessels(),
-            self.num_berths()
-        );
-        let sentinel = self.sentinel_of(berth);
-        // SAFETY: the vessel and the berth are the graph's, the precondition of this function, so the vessel's node
-        // and the berth's sentinel lie in the arena by the invariant of `ScheduleGraph`.
-        unsafe {
-            self.arena
-                .relocate_before_unchecked(node_of(vessel), sentinel);
-            self.move_vessel_berth_unchecked(vessel, berth);
-        }
-    }
-
-    /// Moves the segment `first ..= last` to directly after `anchor`, on its berth or another; nothing changes if
-    /// it already follows `anchor`.
-    ///
-    /// # Preconditions
-    ///
-    /// `last` follows `first` on its berth, and `anchor` is not a vessel of the segment. Otherwise the order
-    /// breaks, though no access leaves the graph; a debug build checks it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `first`, `last` or `anchor` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_segment_after(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        anchor: VesselIndex,
-    ) {
-        self.check(Step::RelocateSegmentAfter, [first, last, anchor], []);
-        // SAFETY: the three vessels are the graph's, as the check above found.
-        unsafe { self.relocate_segment_after_unchecked(first, last, anchor) }
-    }
-
-    /// Moves the segment `first ..= last` to directly after `anchor`, for vessels the caller knows to be the
-    /// graph's.
-    ///
-    /// # Preconditions
-    ///
-    /// Those of [`relocate_segment_after`](Self::relocate_segment_after).
-    ///
-    /// # Safety
-    ///
-    /// The three vessels must be the graph's, the condition
-    /// [`relocate_segment_after`](Self::relocate_segment_after) checks.
-    #[inline]
-    pub unsafe fn relocate_segment_after_unchecked(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        anchor: VesselIndex,
-    ) {
-        debug_assert!(
-            [first, last, anchor]
-                .iter()
-                .all(|vessel| vessel.index() < self.num_vessels()),
-            "called `ScheduleGraph::relocate_segment_after_unchecked` with {first}, {last} or {anchor}, outside a \
-             graph of {} vessels",
-            self.num_vessels()
-        );
-        debug_assert!(
-            self.is_segment(first, last),
-            "called `ScheduleGraph::relocate_segment_after_unchecked` with {first} ..= {last}, which is no \
-             segment of one berth"
-        );
-        // SAFETY: the three vessels are the graph's, the precondition of this function, so their nodes lie in the
-        // arena by the invariant of `ScheduleGraph`.
-        unsafe {
-            let (from, to) = (
-                self.vessel_berth_unchecked(first),
-                self.vessel_berth_unchecked(anchor),
-            );
-            self.arena.relocate_segment_after_unchecked(
-                node_of(first),
-                node_of(last),
-                node_of(anchor),
-            );
-            self.move_segment_berth_unchecked(first, last, from, to);
-        }
-    }
-
-    /// Moves the segment `first ..= last` to directly before `reference`, on its berth or another; nothing
-    /// changes if it already precedes `reference`.
-    ///
-    /// # Preconditions
-    ///
-    /// `last` follows `first` on its berth, and `reference` is not a vessel of the segment. Otherwise the order
-    /// breaks, though no access leaves the graph; a debug build checks it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `first`, `last` or `reference` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_segment_before(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        reference: VesselIndex,
-    ) {
-        self.check(Step::RelocateSegmentBefore, [first, last, reference], []);
-        // SAFETY: the three vessels are the graph's, as the check above found.
-        unsafe { self.relocate_segment_before_unchecked(first, last, reference) }
-    }
-
-    /// Moves the segment `first ..= last` to directly before `reference`, for vessels the caller knows to be the
-    /// graph's.
-    ///
-    /// # Preconditions
-    ///
-    /// Those of [`relocate_segment_before`](Self::relocate_segment_before).
-    ///
-    /// # Safety
-    ///
-    /// The three vessels must be the graph's, the condition
-    /// [`relocate_segment_before`](Self::relocate_segment_before) checks.
-    #[inline]
-    pub unsafe fn relocate_segment_before_unchecked(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        reference: VesselIndex,
-    ) {
-        debug_assert!(
-            [first, last, reference]
-                .iter()
-                .all(|vessel| vessel.index() < self.num_vessels()),
-            "called `ScheduleGraph::relocate_segment_before_unchecked` with {first}, {last} or {reference}, \
-             outside a graph of {} vessels",
-            self.num_vessels()
-        );
-        debug_assert!(
-            self.is_segment(first, last),
-            "called `ScheduleGraph::relocate_segment_before_unchecked` with {first} ..= {last}, which is no \
-             segment of one berth"
-        );
-        // SAFETY: the three vessels are the graph's, the precondition of this function, so their nodes lie in the
-        // arena by the invariant of `ScheduleGraph`.
-        unsafe {
-            let (from, to) = (
-                self.vessel_berth_unchecked(first),
-                self.vessel_berth_unchecked(reference),
-            );
-            self.arena.relocate_segment_before_unchecked(
-                node_of(first),
-                node_of(last),
-                node_of(reference),
-            );
-            self.move_segment_berth_unchecked(first, last, from, to);
-        }
-    }
-
-    /// Moves the segment `first ..= last` to the head of `berth`; nothing changes if it already heads `berth`.
-    ///
-    /// # Preconditions
-    ///
-    /// `last` follows `first` on its berth. Otherwise the order breaks, though no access leaves the graph; a debug
-    /// build checks it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `first`, `last` or `berth` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_segment_to_head(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        berth: BerthIndex,
-    ) {
-        self.check(Step::RelocateSegmentToHead, [first, last], [berth]);
-        // SAFETY: the vessels and the berth are the graph's, as the check above found.
-        unsafe { self.relocate_segment_to_head_unchecked(first, last, berth) }
-    }
-
-    /// Moves the segment `first ..= last` to the head of `berth`, for vessels and a berth the caller knows to be
-    /// the graph's.
-    ///
-    /// # Preconditions
-    ///
-    /// Those of [`relocate_segment_to_head`](Self::relocate_segment_to_head).
-    ///
-    /// # Safety
-    ///
-    /// The vessels and the berth must be the graph's, the condition
-    /// [`relocate_segment_to_head`](Self::relocate_segment_to_head) checks.
-    #[inline]
-    pub unsafe fn relocate_segment_to_head_unchecked(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        berth: BerthIndex,
-    ) {
-        debug_assert!(
-            first.index() < self.num_vessels()
-                && last.index() < self.num_vessels()
-                && berth.index() < self.num_berths(),
-            "called `ScheduleGraph::relocate_segment_to_head_unchecked` with {first}, {last} or {berth}, outside \
-             a graph of {} vessels and {} berths",
-            self.num_vessels(),
-            self.num_berths()
-        );
-        debug_assert!(
-            self.is_segment(first, last),
-            "called `ScheduleGraph::relocate_segment_to_head_unchecked` with {first} ..= {last}, which is no \
-             segment of one berth"
-        );
-        let sentinel = self.sentinel_of(berth);
-        // SAFETY: the vessels and the berth are the graph's, the precondition of this function, so the vessels'
-        // nodes and the berth's sentinel lie in the arena by the invariant of `ScheduleGraph`.
-        unsafe {
-            let from = self.vessel_berth_unchecked(first);
-            self.arena
-                .relocate_segment_after_unchecked(node_of(first), node_of(last), sentinel);
-            self.move_segment_berth_unchecked(first, last, from, berth);
-        }
-    }
-
-    /// Moves the segment `first ..= last` to the tail of `berth`; nothing changes if it already ends `berth`.
-    ///
-    /// # Preconditions
-    ///
-    /// `last` follows `first` on its berth. Otherwise the order breaks, though no access leaves the graph; a debug
-    /// build checks it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `first`, `last` or `berth` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_segment_to_tail(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        berth: BerthIndex,
-    ) {
-        self.check(Step::RelocateSegmentToTail, [first, last], [berth]);
-        // SAFETY: the vessels and the berth are the graph's, as the check above found.
-        unsafe { self.relocate_segment_to_tail_unchecked(first, last, berth) }
-    }
-
-    /// Moves the segment `first ..= last` to the tail of `berth`, for vessels and a berth the caller knows to be
-    /// the graph's.
-    ///
-    /// # Preconditions
-    ///
-    /// Those of [`relocate_segment_to_tail`](Self::relocate_segment_to_tail).
-    ///
-    /// # Safety
-    ///
-    /// The vessels and the berth must be the graph's, the condition
-    /// [`relocate_segment_to_tail`](Self::relocate_segment_to_tail) checks.
-    #[inline]
-    pub unsafe fn relocate_segment_to_tail_unchecked(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        berth: BerthIndex,
-    ) {
-        debug_assert!(
-            first.index() < self.num_vessels()
-                && last.index() < self.num_vessels()
-                && berth.index() < self.num_berths(),
-            "called `ScheduleGraph::relocate_segment_to_tail_unchecked` with {first}, {last} or {berth}, outside \
-             a graph of {} vessels and {} berths",
-            self.num_vessels(),
-            self.num_berths()
-        );
-        debug_assert!(
-            self.is_segment(first, last),
-            "called `ScheduleGraph::relocate_segment_to_tail_unchecked` with {first} ..= {last}, which is no \
-             segment of one berth"
-        );
-        let sentinel = self.sentinel_of(berth);
-        // Before the sentinel rather than after the tail, which lies inside the segment when it ends the berth.
-        // SAFETY: the vessels and the berth are the graph's, the precondition of this function, so the vessels'
-        // nodes and the berth's sentinel lie in the arena by the invariant of `ScheduleGraph`.
-        unsafe {
-            let from = self.vessel_berth_unchecked(first);
-            self.arena
-                .relocate_segment_before_unchecked(node_of(first), node_of(last), sentinel);
-            self.move_segment_berth_unchecked(first, last, from, berth);
-        }
-    }
-
     /// Records that `vessel` now stands on `berth`, which its ring has just made it.
     ///
     /// # Safety
@@ -1548,65 +895,6 @@ impl ScheduleGraph {
             *self.vessel_berth.get_unchecked_mut(vessel) = berth;
             *self.berth_vessel_count.get_unchecked_mut(from) -= 1;
             *self.berth_vessel_count.get_unchecked_mut(berth) += 1;
-        }
-    }
-
-    /// Records that the vessels of the segment `first ..= last` now stand on `to`, which their ring has just made
-    /// them, moved from `from`; at a cost of the segment's length if `from` and `to` differ.
-    ///
-    /// # Preconditions
-    ///
-    /// `last` follows `first` on its ring, and every vessel of the segment stood on `from`. Otherwise the berths
-    /// and counts go wrong, and a debug build panics if the walk does not reach `last`; the walk ends at the first
-    /// sentinel it meets, and after at most the graph's count of nodes.
-    ///
-    /// # Safety
-    ///
-    /// `first`, `last`, `from` and `to` must be the graph's.
-    #[inline(always)]
-    unsafe fn move_segment_berth_unchecked(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        from: BerthIndex,
-        to: BerthIndex,
-    ) {
-        debug_assert!(
-            first.index() < self.num_vessels()
-                && last.index() < self.num_vessels()
-                && from.index() < self.num_berths()
-                && to.index() < self.num_berths(),
-            "called `ScheduleGraph::move_segment_berth_unchecked` with {first}, {last}, {from} or {to}, outside \
-             the graph"
-        );
-        if from == to {
-            return;
-        }
-        // SAFETY: `first` and `last` are the graph's, the precondition of this function.
-        let segment = unsafe {
-            VesselSequenceIter::segment_unchecked(&self.arena, self.vessel_berth.len(), first, last)
-        };
-        let mut moved = 0;
-        let mut walked_to = first;
-        for vessel in segment {
-            debug_assert!(
-                vessel.index() < self.vessel_berth.len(),
-                "the walk over a segment should yield only vessels of the graph, but yielded {vessel}"
-            );
-            // SAFETY: the walk yields only vessels of the graph (`VesselSequenceIter`), which index `vessel_berth`.
-            *unsafe { self.vessel_berth.get_unchecked_mut(vessel) } = to;
-            moved += 1;
-            walked_to = vessel;
-        }
-        debug_assert!(
-            walked_to == last,
-            "called `ScheduleGraph::move_segment_berth_unchecked` with {last}, which does not follow {first} on its \
-             berth"
-        );
-        // SAFETY: `from` and `to` are the graph's, the precondition of this function.
-        unsafe {
-            *self.berth_vessel_count.get_unchecked_mut(from) -= moved;
-            *self.berth_vessel_count.get_unchecked_mut(to) += moved;
         }
     }
 }
@@ -1634,31 +922,14 @@ mod tests {
             berth_index
         );
 
-        let reverse: Vec<usize> = graph
-            .vessel_sequence_rev_iter(b)
-            .map(|v| v.index())
-            .collect();
-        let mut expected_rev = expected.to_vec();
-        expected_rev.reverse();
-        assert_eq!(
-            reverse, expected_rev,
-            "Reverse mismatch for Berth {}",
-            berth_index
-        );
-
         for pair in expected.windows(2) {
-            assert_eq!(
-                graph.vessel_successor(vessel(pair[0])),
-                Some(vessel(pair[1]))
-            );
             assert_eq!(
                 graph.vessel_predecessor(vessel(pair[1])),
                 Some(vessel(pair[0]))
             );
         }
-        if let (Some(&head), Some(&tail)) = (expected.first(), expected.last()) {
+        if let Some(&head) = expected.first() {
             assert_eq!(graph.vessel_predecessor(vessel(head)), None);
-            assert_eq!(graph.vessel_successor(vessel(tail)), None);
         }
 
         for &v in expected {
@@ -1721,35 +992,6 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_segments() {
-        let mut graph = standard_fixture();
-        graph.swap_segments(vessel(0), vessel(2), vessel(3), vessel(4));
-        check_berth(&graph, 0, &[3, 4, 1]);
-        check_berth(&graph, 1, &[0, 2]);
-    }
-
-    #[test]
-    fn test_swap_segments_adjacent() {
-        let mut graph = standard_fixture();
-        graph.swap_segments(vessel(0), vessel(0), vessel(2), vessel(1));
-        check_berth(&graph, 0, &[2, 1, 0]);
-    }
-
-    #[test]
-    fn test_reverse_segment() {
-        let mut graph = standard_fixture();
-        graph.reverse_segment(vessel(0), vessel(1));
-        check_berth(&graph, 0, &[1, 2, 0]);
-    }
-
-    #[test]
-    fn test_reverse_single_noop() {
-        let mut graph = standard_fixture();
-        graph.reverse_segment(vessel(2), vessel(2));
-        check_berth(&graph, 0, &[0, 2, 1]);
-    }
-
-    #[test]
     fn test_relocate_after() {
         let mut graph = standard_fixture();
         graph.relocate_after(vessel(0), vessel(2));
@@ -1765,124 +1007,11 @@ mod tests {
     }
 
     #[test]
-    fn test_relocate_before() {
-        let mut graph = standard_fixture();
-        graph.relocate_before(vessel(1), vessel(0));
-        check_berth(&graph, 0, &[1, 0, 2]);
-    }
-
-    #[test]
     fn test_relocate_to_head() {
         let mut graph = standard_fixture();
         graph.relocate_to_head(vessel(4), berth(0));
         check_berth(&graph, 0, &[4, 0, 2, 1]);
         check_berth(&graph, 1, &[3]);
-    }
-
-    #[test]
-    fn test_relocate_to_tail() {
-        let mut graph = standard_fixture();
-        graph.relocate_to_tail(vessel(0), berth(3));
-        check_berth(&graph, 0, &[2, 1]);
-        check_berth(&graph, 3, &[0]);
-    }
-
-    #[test]
-    fn test_relocate_segment_after() {
-        let mut graph = standard_fixture();
-        graph.relocate_segment_after(vessel(0), vessel(2), vessel(4));
-        check_berth(&graph, 0, &[1]);
-        check_berth(&graph, 1, &[3, 4, 0, 2]);
-    }
-
-    #[test]
-    fn test_relocate_segment_before() {
-        let mut graph = standard_fixture();
-        graph.relocate_segment_before(vessel(2), vessel(1), vessel(0));
-        check_berth(&graph, 0, &[2, 1, 0]);
-    }
-
-    // The reference heads berth 1, so the node before it is the berth's sentinel, not a vessel.
-    #[test]
-    fn test_relocate_segment_before_the_head_of_a_berth() {
-        let mut graph = standard_fixture();
-        graph.relocate_segment_before(vessel(0), vessel(2), vessel(3));
-        check_berth(&graph, 0, &[1]);
-        check_berth(&graph, 1, &[0, 2, 3, 4]);
-    }
-
-    // The segment already stands before the reference, so the node before the reference is the segment's last.
-    #[test]
-    fn test_relocate_segment_before_the_vessel_it_precedes_changes_nothing() {
-        let mut graph = standard_fixture();
-        graph.relocate_segment_before(vessel(0), vessel(2), vessel(1));
-        check_berth(&graph, 0, &[0, 2, 1]);
-    }
-
-    #[test]
-    fn test_relocate_segment_to_head() {
-        let mut graph = standard_fixture();
-        graph.relocate_segment_to_head(vessel(3), vessel(4), berth(3));
-        check_berth(&graph, 1, &[]);
-        check_berth(&graph, 3, &[3, 4]);
-    }
-
-    #[test]
-    fn test_relocate_segment_to_tail() {
-        let mut graph = standard_fixture();
-        graph.relocate_segment_to_tail(vessel(0), vessel(2), berth(1));
-        check_berth(&graph, 0, &[1]);
-        check_berth(&graph, 1, &[3, 4, 0, 2]);
-    }
-
-    // The segment [V3, V4] already ends berth 1, so the berth's tail lies inside it.
-    #[test]
-    fn test_relocate_segment_to_the_tail_it_already_ends_changes_nothing() {
-        let mut graph = standard_fixture();
-        graph.relocate_segment_to_tail(vessel(3), vessel(4), berth(1));
-        check_berth(&graph, 1, &[3, 4]);
-        // SAFETY: the vessels and the berth are the graph's.
-        unsafe { graph.relocate_segment_to_tail_unchecked(vessel(3), vessel(4), berth(1)) };
-        check_berth(&graph, 1, &[3, 4]);
-    }
-
-    // B0: V0 V1. From V1 the ring runs through the sentinel of B0 back to V0, so V1 ..= V0 is no segment of a berth.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(
-        expected = "called `ScheduleGraph::reverse_segment_unchecked` with Vessel 1 ..= Vessel 0, which is no \
-                    segment of one berth"
-    )]
-    fn test_reverse_segment_refuses_a_segment_through_a_sentinel() {
-        let mut graph = ScheduleGraph::from_slices(&[berth(0), berth(0)], &[0, 1], 1);
-        graph.reverse_segment(vessel(1), vessel(0));
-    }
-
-    // B0: V0 V1, B1: V2 V3. From V1 the ring runs through the sentinel of B0 back to V0.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(
-        expected = "called `ScheduleGraph::swap_segments_unchecked` with Vessel 1 ..= Vessel 0 or Vessel 2 ..= \
-                    Vessel 2, which is no segment of one berth"
-    )]
-    fn test_swap_segments_refuses_a_segment_through_a_sentinel() {
-        let mut graph =
-            ScheduleGraph::from_slices(&[berth(0), berth(0), berth(1), berth(1)], &[0, 1, 0, 1], 2);
-        graph.swap_segments(vessel(1), vessel(0), vessel(2), vessel(2));
-    }
-
-    #[test]
-    fn test_is_segment_holds_exactly_for_a_vessel_and_one_that_follows_it_on_its_berth() {
-        let graph = standard_fixture();
-        assert!(graph.is_segment(vessel(0), vessel(0)));
-        assert!(graph.is_segment(vessel(0), vessel(1)));
-        assert!(graph.is_segment(vessel(2), vessel(1)));
-        assert!(graph.is_segment(vessel(3), vessel(4)));
-        assert!(!graph.is_segment(vessel(1), vessel(0)));
-        assert!(!graph.is_segment(vessel(1), vessel(2)));
-        assert!(!graph.is_segment(vessel(0), vessel(3)));
-        assert!(!graph.is_segment(vessel(0), vessel(6)));
-        assert!(!graph.is_segment(vessel(6), vessel(0)));
     }
 
     #[test]
@@ -1956,68 +1085,71 @@ mod tests {
         let mut graph = standard_fixture();
 
         graph.swap_vessels(vessel(0), vessel(5));
-        graph.relocate_segment_to_head(vessel(2), vessel(1), berth(3));
+        graph.relocate_to_head(vessel(1), berth(3));
         graph.relocate_after(vessel(3), vessel(5));
-        graph.reverse_segment(vessel(5), vessel(3));
-        graph.swap_segments(vessel(3), vessel(5), vessel(2), vessel(1));
+        graph.relocate_after(vessel(2), vessel(1));
+        graph.swap_vessels(vessel(3), vessel(4));
 
-        check_berth(&graph, 0, &[2, 1]);
-        check_berth(&graph, 1, &[4]);
+        check_berth(&graph, 0, &[5, 4]);
+        check_berth(&graph, 1, &[3]);
         check_berth(&graph, 2, &[0]);
-        check_berth(&graph, 3, &[3, 5]);
-    }
-
-    /// Asserts that every walk over the vessels of `graph`, along each berth and against it, yields only vessels of
-    /// the graph.
-    #[cfg(not(debug_assertions))]
-    fn assert_walks_yield_only_vessels(graph: &ScheduleGraph) {
-        for b in graph.berths() {
-            let along = graph.vessel_sequence_iter(b);
-            let against = graph.vessel_sequence_rev_iter(b);
-            for v in along.chain(against) {
-                assert!(
-                    v.index() < graph.num_vessels(),
-                    "the walk over {b} should yield only vessels of a graph of {} vessels, but yielded {v}",
-                    graph.num_vessels()
-                );
-            }
-        }
-    }
-
-    // B0: V0 V1, B1: V2 V3. The segment V0 ..= V3 runs over the end of B0 into B1, against the precondition of
-    // `swap_segments`, which only a debug build checks; the order then breaks, but no walk may yield a sentinel.
-    #[cfg(not(debug_assertions))]
-    #[test]
-    fn test_walks_yield_only_vessels_after_a_swap_of_a_segment_across_two_berths() {
-        let mut graph =
-            ScheduleGraph::from_slices(&[berth(0), berth(0), berth(1), berth(1)], &[0, 1, 0, 1], 2);
-        graph.swap_segments(vessel(0), vessel(3), vessel(1), vessel(1));
-        assert_walks_yield_only_vessels(&graph);
-    }
-
-    // B0: V0 V1, B1: V2 V3. The segment V1 ..= V0 runs through the sentinel of B0, against the precondition of
-    // `swap_segments`; swapped with V2 it takes that sentinel into the ring of B1, and the vessels it moves to B1
-    // are recorded by a walk that must stop at the sentinel rather than read past the vessels.
-    #[cfg(not(debug_assertions))]
-    #[test]
-    fn test_walks_yield_only_vessels_after_a_swap_of_a_segment_through_a_sentinel() {
-        let mut graph =
-            ScheduleGraph::from_slices(&[berth(0), berth(0), berth(1), berth(1)], &[0, 1, 0, 1], 2);
-        graph.swap_segments(vessel(1), vessel(0), vessel(2), vessel(2));
-        assert_walks_yield_only_vessels(&graph);
+        check_berth(&graph, 3, &[1, 2]);
     }
 
     #[test]
-    fn test_predecessor_successor() {
+    fn test_predecessor() {
         let graph = standard_fixture();
-
         assert_eq!(graph.vessel_predecessor(vessel(0)), None);
         assert_eq!(graph.vessel_predecessor(vessel(2)), Some(vessel(0)));
         assert_eq!(graph.vessel_predecessor(vessel(1)), Some(vessel(2)));
+        assert_eq!(graph.vessel_predecessor(vessel(5)), None);
+    }
 
-        assert_eq!(graph.vessel_successor(vessel(0)), Some(vessel(2)));
-        assert_eq!(graph.vessel_successor(vessel(1)), None);
-        assert_eq!(graph.vessel_successor(vessel(5)), None);
+    /// A move of the walk test: a swap of two vessels or a relocation of one after another, named by numbers read
+    /// modulo the count of vessels.
+    #[derive(Clone, Copy, Debug)]
+    enum Shuffle {
+        Swap(usize, usize),
+        After(usize, usize),
+    }
+
+    fn shuffle() -> impl Strategy<Value = Shuffle> {
+        prop_oneof![
+            (0_usize..16, 0_usize..16).prop_map(|(a, b)| Shuffle::Swap(a, b)),
+            (0_usize..16, 0_usize..16).prop_map(|(a, b)| Shuffle::After(a, b)),
+        ]
+    }
+
+    proptest! {
+        // Whatever moves the graph made, every walk over its vessels yields only vessels of the graph, each vessel
+        // once over all berths, on the berth the graph records for it and as many as the berth counts: the
+        // columns of vessels may be indexed by what the walks yield without a check.
+        #[test]
+        fn test_walks_yield_each_vessel_once_after_any_moves(
+            berths in proptest::collection::vec(0_usize..3, 1..9),
+            shuffles in proptest::collection::vec(shuffle(), 0..16),
+        ) {
+            let ids: Vec<BerthIndex> = berths.iter().map(|&b| berth(b)).collect();
+            let mut graph = ScheduleGraph::from_slices(&ids, &vec![0; ids.len()], 3);
+            let n = graph.num_vessels();
+            for shuffle in shuffles {
+                match shuffle {
+                    Shuffle::Swap(a, b) => graph.swap_vessels(vessel(a % n), vessel(b % n)),
+                    Shuffle::After(a, b) => graph.relocate_after(vessel(a % n), vessel(b % n)),
+                }
+            }
+            let mut seen = vec![0_usize; n];
+            for b in graph.berths() {
+                let walked: Vec<VesselIndex> = graph.vessel_sequence_iter(b).collect();
+                prop_assert_eq!(walked.len(), graph.vessel_count(b));
+                for v in walked {
+                    prop_assert!(v.index() < n, "the walk over {} yielded {}", b, v);
+                    prop_assert_eq!(graph.vessel_berth(v), b);
+                    seen[v.index()] += 1;
+                }
+            }
+            prop_assert!(seen.iter().all(|&times| times == 1), "{:?}", seen);
+        }
     }
 
     /// A safe step of the graph, as the refusal test calls it.
@@ -2026,92 +1158,53 @@ mod tests {
         VesselBerth,
         VesselCount,
         VesselPredecessor,
-        VesselSuccessor,
         VesselSequenceIter,
-        VesselSequenceRevIter,
         BerthTopologyIter,
         SwapVessels,
-        SwapSegments,
-        ReverseSegment,
         RelocateAfter,
-        RelocateBefore,
         RelocateToHead,
-        RelocateToTail,
-        RelocateSegmentAfter,
-        RelocateSegmentBefore,
-        RelocateSegmentToHead,
-        RelocateSegmentToTail,
     }
 
     impl Call {
-        const ALL: [Self; 18] = [
+        const ALL: [Self; 8] = [
             Self::VesselBerth,
             Self::VesselCount,
             Self::VesselPredecessor,
-            Self::VesselSuccessor,
             Self::VesselSequenceIter,
-            Self::VesselSequenceRevIter,
             Self::BerthTopologyIter,
             Self::SwapVessels,
-            Self::SwapSegments,
-            Self::ReverseSegment,
             Self::RelocateAfter,
-            Self::RelocateBefore,
             Self::RelocateToHead,
-            Self::RelocateToTail,
-            Self::RelocateSegmentAfter,
-            Self::RelocateSegmentBefore,
-            Self::RelocateSegmentToHead,
-            Self::RelocateSegmentToTail,
         ];
 
         /// The number of vessels and of berths the step takes.
         fn arity(self) -> (usize, usize) {
             match self {
-                Self::VesselBerth | Self::VesselPredecessor | Self::VesselSuccessor => (1, 0),
-                Self::VesselCount
-                | Self::VesselSequenceIter
-                | Self::VesselSequenceRevIter
-                | Self::BerthTopologyIter => (0, 1),
-                Self::SwapVessels
-                | Self::ReverseSegment
-                | Self::RelocateAfter
-                | Self::RelocateBefore => (2, 0),
-                Self::SwapSegments => (4, 0),
-                Self::RelocateToHead | Self::RelocateToTail => (1, 1),
-                Self::RelocateSegmentAfter | Self::RelocateSegmentBefore => (3, 0),
-                Self::RelocateSegmentToHead | Self::RelocateSegmentToTail => (2, 1),
+                Self::VesselBerth | Self::VesselPredecessor => (1, 0),
+                Self::VesselCount | Self::VesselSequenceIter | Self::BerthTopologyIter => (0, 1),
+                Self::SwapVessels | Self::RelocateAfter => (2, 0),
+                Self::RelocateToHead => (1, 1),
             }
         }
 
-        /// Makes the step on `graph` with the first vessels of `vessels` and the first berth of `berths`.
+        /// Makes the step on `graph` with the first vessels of `vessels` and the berth of `berths`.
         fn make(
             self,
             graph: &mut ScheduleGraph,
-            vessels: [VesselIndex; 4],
+            vessels: [VesselIndex; 2],
             berths: [BerthIndex; 1],
         ) {
-            let [a, b, c, d] = vessels;
+            let [a, b] = vessels;
             let [berth] = berths;
             match self {
                 Self::VesselBerth => drop(graph.vessel_berth(a)),
                 Self::VesselCount => drop(graph.vessel_count(berth)),
                 Self::VesselPredecessor => drop(graph.vessel_predecessor(a)),
-                Self::VesselSuccessor => drop(graph.vessel_successor(a)),
                 Self::VesselSequenceIter => drop(graph.vessel_sequence_iter(berth)),
-                Self::VesselSequenceRevIter => drop(graph.vessel_sequence_rev_iter(berth)),
                 Self::BerthTopologyIter => drop(graph.berth_topology_iter(berth)),
                 Self::SwapVessels => graph.swap_vessels(a, b),
-                Self::SwapSegments => graph.swap_segments(a, b, c, d),
-                Self::ReverseSegment => graph.reverse_segment(a, b),
                 Self::RelocateAfter => graph.relocate_after(a, b),
-                Self::RelocateBefore => graph.relocate_before(a, b),
                 Self::RelocateToHead => graph.relocate_to_head(a, berth),
-                Self::RelocateToTail => graph.relocate_to_tail(a, berth),
-                Self::RelocateSegmentAfter => graph.relocate_segment_after(a, b, c),
-                Self::RelocateSegmentBefore => graph.relocate_segment_before(a, b, c),
-                Self::RelocateSegmentToHead => graph.relocate_segment_to_head(a, b, berth),
-                Self::RelocateSegmentToTail => graph.relocate_segment_to_tail(a, b, berth),
             }
         }
     }
@@ -2134,9 +1227,9 @@ mod tests {
         #[test]
         fn test_safe_steps_refuse_every_id_outside_and_change_nothing(
             call in proptest::sample::select(Call::ALL.to_vec()),
-            inside in proptest::array::uniform4(0_usize..6),
+            inside in proptest::array::uniform2(0_usize..6),
             berth_inside in 0_usize..4,
-            place in 0_usize..5,
+            place in 0_usize..3,
             beyond in 0_usize..32,
         ) {
             let (num_vessels, num_berths) = call.arity();

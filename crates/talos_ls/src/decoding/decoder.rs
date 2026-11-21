@@ -856,32 +856,6 @@ pub mod benches {
                     },
                 );
             }
-
-            group.bench_with_input(
-                BenchmarkId::new("Reverse Segment (5 vessels)", name),
-                &is_worst_case,
-                |b, _| {
-                    b.iter(|| {
-                        mutator.clear_diff();
-                        mutator.reverse_segment(VesselIndex::new(10), VesselIndex::new(15));
-
-                        // SAFETY: the touched berths, the graph, the states and the model have the vessels and berths of
-
-                        // the scenario.
-
-                        unsafe {
-                            decode_unchecked::<_, StartTimeCost>(
-                                mutator.touched(),
-                                mutator.graph(),
-                                &mut candidate,
-                                &accepted,
-                                &model,
-                            )
-                        };
-                        mutator.rollback();
-                    });
-                },
-            );
         }
 
         group.finish();

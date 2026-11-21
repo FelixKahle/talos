@@ -227,32 +227,6 @@ impl ScheduleGraphDiff {
         self.reallocated_to.push(to);
     }
 
-    /// The number of links recorded as broken.
-    #[inline(always)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
-        )
-    )]
-    pub fn link_broken_count(&self) -> usize {
-        self.broken_from.len()
-    }
-
-    /// The number of links recorded as created.
-    #[inline(always)]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
-        )
-    )]
-    pub fn link_created_count(&self) -> usize {
-        self.created_from.len()
-    }
-
     /// The links recorded as broken, in the order the moves recorded them.
     #[inline(always)]
     pub fn broken_links(&self) -> DiffLinkIter<'_> {
@@ -333,10 +307,6 @@ mod tests {
                 from: berth(0),
                 to: berth(1)
             }]
-        );
-        assert_eq!(
-            (diff.link_broken_count(), diff.link_created_count()),
-            (2, 1)
         );
     }
 
