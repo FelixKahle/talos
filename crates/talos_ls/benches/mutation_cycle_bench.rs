@@ -110,7 +110,9 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                         )
                     };
 
-                    undo.apply_rollback(&mut graph);
+                    // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
+
+                    unsafe { undo.apply_rollback_unchecked(&mut graph) };
                 });
             },
         );
@@ -138,7 +140,8 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                                 evaluator,
                             )
                         };
-                        undo.apply_rollback(&mut graph);
+                        // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
+                        unsafe { undo.apply_rollback_unchecked(&mut graph) };
                     });
                 },
             );
@@ -166,7 +169,8 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                             evaluator,
                         )
                     };
-                    undo.apply_rollback(&mut graph);
+                    // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
+                    unsafe { undo.apply_rollback_unchecked(&mut graph) };
                 });
             },
         );
@@ -194,7 +198,8 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                                 evaluator,
                             )
                         };
-                        undo.apply_rollback(&mut graph);
+                        // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
+                        unsafe { undo.apply_rollback_unchecked(&mut graph) };
                     });
                 },
             );
@@ -222,7 +227,8 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                             evaluator,
                         )
                     };
-                    undo.apply_rollback(&mut graph);
+                    // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
+                    unsafe { undo.apply_rollback_unchecked(&mut graph) };
                 });
             },
         );
@@ -272,7 +278,8 @@ fn bench_single_mutation_cycle(c: &mut Criterion) {
                     };
 
                     black_box(candidate.objective());
-                    undo.apply_rollback(&mut graph);
+                    // SAFETY: the log holds only the moves a mutator over `graph` just recorded.
+                    unsafe { undo.apply_rollback_unchecked(&mut graph) };
                 });
             },
         );

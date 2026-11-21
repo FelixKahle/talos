@@ -157,7 +157,9 @@ impl<T> Engine<T> {
         // Grow all buffers if this problem is larger than anything seen before.
         self.ensure_capacity(model.num_vessels(), model.num_berths());
 
-        // Initialise topology from the validated initial solution.
+        // Initialise topology from the validated initial solution. The undo log may hold moves of an earlier run
+        // that ended in a panic, on a graph of other counts.
+        self.schedule_graph_undo_log.clear();
         self.topology_graph.overwrite_from_slices(
             params.berths,
             params.start_times,
@@ -572,8 +574,7 @@ impl<T> Engine<T> {
 
                         // Roll back the topology graph so the next mutation
                         // starts from the accepted state.
-                        self.schedule_graph_undo_log
-                            .apply_rollback(&mut self.topology_graph);
+                        self.rollback();
 
                         metaheuristic.on_iteration(
                             stats.iterations,
@@ -705,9 +706,19 @@ impl<T> Engine<T> {
     /// Rejects the current candidate and restores the graph to its previous state.
     #[inline(always)]
     fn reject_candidate(&mut self) {
-        self.schedule_graph_undo_log
-            .apply_rollback(&mut self.topology_graph);
+        self.rollback();
         self.touched.reset();
+    }
+
+    /// Undoes on the topology graph every move recorded since the accepted state.
+    #[inline(always)]
+    fn rollback(&mut self) {
+        // SAFETY: the undo log holds only moves that a mutator over the topology graph recorded since the run
+        // emptied it, while the graph's counts stayed those of the run's model.
+        unsafe {
+            self.schedule_graph_undo_log
+                .apply_rollback_unchecked(&mut self.topology_graph)
+        };
     }
 
     /// Saves the current candidate to the buffer for later comparison.

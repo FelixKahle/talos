@@ -197,6 +197,39 @@ impl<'a> Iterator for BerthTopologyIter<'a> {
 impl FusedIterator for BerthTopologyIter<'_> {}
 
 // ----------------------------------------------------------------
+// Outside
+// ----------------------------------------------------------------
+
+/// An id that is not one of a graph's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Outside {
+    /// A vessel at or beyond the graph's count of vessels.
+    Vessel {
+        vessel: VesselIndex,
+        num_vessels: usize,
+    },
+    /// A berth at or beyond the graph's count of berths.
+    Berth {
+        berth: BerthIndex,
+        num_berths: usize,
+    },
+}
+
+impl std::fmt::Display for Outside {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Vessel {
+                vessel,
+                num_vessels,
+            } => write!(f, "{vessel}, outside a graph of {num_vessels} vessels"),
+            Self::Berth { berth, num_berths } => {
+                write!(f, "{berth}, outside a graph of {num_berths} berths")
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------
 // ScheduleGraph
 // ----------------------------------------------------------------
 
@@ -457,6 +490,22 @@ impl ScheduleGraph {
     pub fn is_sentinel(&self, node: Node) -> bool {
         let raw = node.index();
         raw >= self.num_vessels && raw < self.num_vessels + self.num_berths
+    }
+
+    /// `vessel` as the refusal names it if it is not one of the graph's vessels.
+    pub(super) fn vessel_outside(&self, vessel: VesselIndex) -> Option<Outside> {
+        (vessel.index() >= self.num_vessels).then_some(Outside::Vessel {
+            vessel,
+            num_vessels: self.num_vessels,
+        })
+    }
+
+    /// `berth` as the refusal names it if it is not one of the graph's berths.
+    pub(super) fn berth_outside(&self, berth: BerthIndex) -> Option<Outside> {
+        (berth.index() >= self.num_berths).then_some(Outside::Berth {
+            berth,
+            num_berths: self.num_berths,
+        })
     }
 
     /// Returns the total number of nodes in the arena, including both vessels and sentinels.

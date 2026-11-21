@@ -32,7 +32,7 @@
 //! mutation and emits the net edge changes into the diff afterward.
 
 use super::diff::ScheduleGraphDiffTracker;
-use super::graph::ScheduleGraph;
+use super::graph::{Outside, ScheduleGraph};
 use super::touched_berths::TouchedBerthsTracker;
 use super::undo_log::ScheduleGraphUndoTracker;
 use crate::ring_arena::Node;
@@ -144,35 +144,6 @@ impl std::fmt::Display for Move {
             Self::RelocateSegmentToTail => "relocate_segment_to_tail",
         };
         write!(f, "`Mutator::{name}`")
-    }
-}
-
-/// An id that is not one of a graph's.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Outside {
-    /// A vessel at or beyond the graph's count of vessels.
-    Vessel {
-        vessel: VesselIndex,
-        num_vessels: usize,
-    },
-    /// A berth at or beyond the graph's count of berths.
-    Berth {
-        berth: BerthIndex,
-        num_berths: usize,
-    },
-}
-
-impl std::fmt::Display for Outside {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Vessel {
-                vessel,
-                num_vessels,
-            } => write!(f, "{vessel}, outside a graph of {num_vessels} vessels"),
-            Self::Berth { berth, num_berths } => {
-                write!(f, "{berth}, outside a graph of {num_berths} berths")
-            }
-        }
     }
 }
 
@@ -1365,20 +1336,13 @@ impl<'a> Mutator<'a> {
         vessels: [VesselIndex; V],
         berths: [BerthIndex; B],
     ) -> Option<MoveRefusal> {
-        let num_vessels = self.graph.num_vessels();
-        let num_berths = self.graph.num_berths();
         let vessel = vessels
             .into_iter()
-            .find(|vessel| vessel.index() >= num_vessels)
-            .map(|vessel| Outside::Vessel {
-                vessel,
-                num_vessels,
-            });
+            .find_map(|vessel| self.graph.vessel_outside(vessel));
         let berth = || {
             berths
                 .into_iter()
-                .find(|berth| berth.index() >= num_berths)
-                .map(|berth| Outside::Berth { berth, num_berths })
+                .find_map(|berth| self.graph.berth_outside(berth))
         };
         vessel
             .or_else(berth)
