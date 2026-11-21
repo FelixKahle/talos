@@ -29,12 +29,15 @@ pub fn calculate_weighted_completion_time<T>(
 where
     T: SolverNumeric,
 {
-    let processing_time = model.vessel_processing_time(vessel, berth)?;
-    let completion_time = start_time + processing_time;
-    if completion_time > model.vessel_latest_departure_time(vessel) {
-        return None;
-    }
-    Some(completion_time * model.vessel_weight(vessel))
+    assert!(
+        vessel.index() < model.num_vessels() && berth.index() < model.num_berths(),
+        "called `calculate_weighted_completion_time` with {vessel} or {berth}, outside a model of {} vessels and {} \
+         berths",
+        model.num_vessels(),
+        model.num_berths()
+    );
+    // SAFETY: `vessel` and `berth` are the model's, as the check above found.
+    unsafe { calculate_weighted_completion_time_unchecked(model, vessel, berth, start_time) }
 }
 
 /// The weighted completion time of `vessel` served at `berth` from `start_time`, for a vessel and a berth the
@@ -91,13 +94,15 @@ pub fn calculate_weighted_turnaround_time<T>(
 where
     T: SolverNumeric,
 {
-    let processing_time = model.vessel_processing_time(vessel, berth)?;
-    let completion_time = start_time + processing_time;
-    if completion_time > model.vessel_latest_departure_time(vessel) {
-        return None;
-    }
-    let turnaround_time = completion_time - model.vessel_arrival_time(vessel);
-    Some(turnaround_time * model.vessel_weight(vessel))
+    assert!(
+        vessel.index() < model.num_vessels() && berth.index() < model.num_berths(),
+        "called `calculate_weighted_turnaround_time` with {vessel} or {berth}, outside a model of {} vessels and {} \
+         berths",
+        model.num_vessels(),
+        model.num_berths()
+    );
+    // SAFETY: `vessel` and `berth` are the model's, as the check above found.
+    unsafe { calculate_weighted_turnaround_time_unchecked(model, vessel, berth, start_time) }
 }
 
 /// The weighted turnaround time of `vessel` served at `berth` from `start_time`, for a vessel and a berth the
@@ -220,12 +225,40 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(
+        expected = "called `calculate_weighted_completion_time` with Vessel 2 or Berth 0, outside a model of 2 \
+                    vessels and 2 berths"
+    )]
     fn test_completion_time_refuses_a_vessel_outside_the_model() {
         let _ = calculate_weighted_completion_time(&two_vessels(), vessel(2), berth(0), 0);
     }
 
+    #[test]
+    #[should_panic(
+        expected = "called `calculate_weighted_turnaround_time` with Vessel 0 or Berth 2, outside a model of 2 \
+                    vessels and 2 berths"
+    )]
+    fn test_turnaround_time_refuses_a_berth_outside_the_model() {
+        let _ = calculate_weighted_turnaround_time(&two_vessels(), vessel(0), berth(2), 0);
+    }
+
     proptest! {
+        #[test]
+        fn test_checked_costs_refuse_every_vessel_and_berth_outside_the_model(
+            vessel_index in 0_usize..8,
+            berth_index in 0_usize..8,
+        ) {
+            prop_assume!(vessel_index >= 2 || berth_index >= 2);
+            let model = two_vessels();
+            let (vessel, berth) = (vessel(vessel_index), berth(berth_index));
+            let refused =
+                std::panic::catch_unwind(|| calculate_weighted_completion_time(&model, vessel, berth, 0));
+            prop_assert!(refused.is_err());
+            let refused =
+                std::panic::catch_unwind(|| calculate_weighted_turnaround_time(&model, vessel, berth, 0));
+            prop_assert!(refused.is_err());
+        }
+
         #[test]
         fn test_checked_costs_match_their_unchecked_twins(
             vessel_index in 0_usize..2,
