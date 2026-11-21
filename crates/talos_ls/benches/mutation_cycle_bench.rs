@@ -6,9 +6,24 @@ use std::hint::black_box;
 use talos_core::ClosedOpenInterval;
 use talos_ls::{
     decoding::{ScheduleState, decode_unchecked},
+    objective::VesselCost,
     schedule::{Mutator, ScheduleGraph},
 };
 use talos_model::{BerthIndex, Model, VesselIndex};
+
+/// The start of a vessel's service as its cost.
+struct StartTimeCost;
+
+impl VesselCost<i64> for StartTimeCost {
+    unsafe fn cost_unchecked(
+        _: &Model<i64>,
+        _: VesselIndex,
+        _: BerthIndex,
+        start: i64,
+    ) -> Option<i64> {
+        Some(start)
+    }
+}
 
 fn build_mock_model(num_vessels: usize, num_berths: usize) -> Model<i64> {
     let mut arrivals = Vec::with_capacity(num_vessels);
@@ -77,7 +92,6 @@ fn bench_mutation_cycle(c: &mut Criterion) {
         let (graph, mut candidate, accepted, model) = setup_scenario(*is_worst_case);
 
         let mut mutator = Mutator::new(graph);
-        let evaluator = |_: &Model<i64>, _: VesselIndex, _: BerthIndex, start: i64| Some(start);
 
         group.bench_with_input(
             BenchmarkId::new("Swap Intra-Berth", name),
@@ -88,13 +102,12 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                     mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
 
                     unsafe {
-                        decode_unchecked(
+                        decode_unchecked::<_, StartTimeCost>(
                             mutator.touched(),
                             mutator.graph(),
                             &mut candidate,
                             &accepted,
                             &model,
-                            evaluator,
                         )
                     };
 
@@ -113,13 +126,12 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                         mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(60));
 
                         unsafe {
-                            decode_unchecked(
+                            decode_unchecked::<_, StartTimeCost>(
                                 mutator.touched(),
                                 mutator.graph(),
                                 &mut candidate,
                                 &accepted,
                                 &model,
-                                evaluator,
                             )
                         };
                         mutator.rollback();
@@ -137,13 +149,12 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                     mutator.relocate_after(VesselIndex::new(10), VesselIndex::new(40));
 
                     unsafe {
-                        decode_unchecked(
+                        decode_unchecked::<_, StartTimeCost>(
                             mutator.touched(),
                             mutator.graph(),
                             &mut candidate,
                             &accepted,
                             &model,
-                            evaluator,
                         )
                     };
                     mutator.rollback();
@@ -161,13 +172,12 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                         mutator.relocate_after(VesselIndex::new(10), VesselIndex::new(60));
 
                         unsafe {
-                            decode_unchecked(
+                            decode_unchecked::<_, StartTimeCost>(
                                 mutator.touched(),
                                 mutator.graph(),
                                 &mut candidate,
                                 &accepted,
                                 &model,
-                                evaluator,
                             )
                         };
                         mutator.rollback();
@@ -185,13 +195,12 @@ fn bench_mutation_cycle(c: &mut Criterion) {
                     mutator.reverse_segment(VesselIndex::new(10), VesselIndex::new(15));
 
                     unsafe {
-                        decode_unchecked(
+                        decode_unchecked::<_, StartTimeCost>(
                             mutator.touched(),
                             mutator.graph(),
                             &mut candidate,
                             &accepted,
                             &model,
-                            evaluator,
                         )
                     };
                     mutator.rollback();
@@ -216,7 +225,6 @@ fn bench_single_mutation_cycle(c: &mut Criterion) {
         let (graph, mut candidate, accepted, model) = setup_scenario(*is_worst_case);
 
         let mut mutator = Mutator::new(graph);
-        let evaluator = |_: &Model<i64>, _: VesselIndex, _: BerthIndex, start: i64| Some(start);
 
         group.bench_with_input(
             BenchmarkId::new("Swap Vessels", name),
@@ -227,13 +235,12 @@ fn bench_single_mutation_cycle(c: &mut Criterion) {
                     mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
 
                     unsafe {
-                        decode_unchecked(
+                        decode_unchecked::<_, StartTimeCost>(
                             mutator.touched(),
                             mutator.graph(),
                             &mut candidate,
                             &accepted,
                             &model,
-                            evaluator,
                         )
                     };
 

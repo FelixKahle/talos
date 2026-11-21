@@ -146,6 +146,89 @@ where
     Some((completion_time - arrival_time) * weight)
 }
 
+/// The objective a run minimises: the sum over the vessels of one cost of each vessel's service.
+///
+/// Both rank schedules alike, since they differ by the weighted arrival times, a sum the model fixes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Objective {
+    /// The sum of the weighted turnaround times, as [`calculate_weighted_turnaround_time`] gives each.
+    #[default]
+    WeightedTurnaroundTime,
+    /// The sum of the weighted completion times, as [`calculate_weighted_completion_time`] gives each.
+    WeightedCompletionTime,
+}
+
+/// The cost of one vessel's service, which the decoder sums over a schedule.
+///
+/// The decoder calls it only with a vessel and a berth of the model it decodes against, which its own
+/// precondition proves; an implementation reads the model unchecked through them.
+pub trait VesselCost<T>
+where
+    T: SolverNumeric,
+{
+    /// The cost of `vessel` served at `berth` from `start_time`, or `None` where that service is not allowed.
+    ///
+    /// # Safety
+    ///
+    /// `vessel` and `berth` must be `model`'s.
+    unsafe fn cost_unchecked(
+        model: &Model<T>,
+        vessel: VesselIndex,
+        berth: BerthIndex,
+        start_time: T,
+    ) -> Option<T>;
+}
+
+/// The weighted turnaround time of a vessel, as the cost the decoder sums for
+/// [`Objective::WeightedTurnaroundTime`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct TurnaroundCost;
+
+impl<T> VesselCost<T> for TurnaroundCost
+where
+    T: SolverNumeric,
+{
+    #[inline(always)]
+    unsafe fn cost_unchecked(
+        model: &Model<T>,
+        vessel: VesselIndex,
+        berth: BerthIndex,
+        start_time: T,
+    ) -> Option<T> {
+        debug_assert!(
+            vessel.index() < model.num_vessels() && berth.index() < model.num_berths(),
+            "called `TurnaroundCost::cost_unchecked` with {vessel} or {berth}, outside the model"
+        );
+        // SAFETY: `vessel` and `berth` are the model's, the precondition of this function.
+        unsafe { calculate_weighted_turnaround_time_unchecked(model, vessel, berth, start_time) }
+    }
+}
+
+/// The weighted completion time of a vessel, as the cost the decoder sums for
+/// [`Objective::WeightedCompletionTime`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct CompletionCost;
+
+impl<T> VesselCost<T> for CompletionCost
+where
+    T: SolverNumeric,
+{
+    #[inline(always)]
+    unsafe fn cost_unchecked(
+        model: &Model<T>,
+        vessel: VesselIndex,
+        berth: BerthIndex,
+        start_time: T,
+    ) -> Option<T> {
+        debug_assert!(
+            vessel.index() < model.num_vessels() && berth.index() < model.num_berths(),
+            "called `CompletionCost::cost_unchecked` with {vessel} or {berth}, outside the model"
+        );
+        // SAFETY: `vessel` and `berth` are the model's, the precondition of this function.
+        unsafe { calculate_weighted_completion_time_unchecked(model, vessel, berth, start_time) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +359,26 @@ mod tests {
                 prop_assert_eq!(
                     calculate_weighted_turnaround_time(&model, vessel, berth, start),
                     calculate_weighted_turnaround_time_unchecked(&model, vessel, berth, start)
+                );
+            }
+        }
+        #[test]
+        fn test_cost_types_match_their_cost_functions(
+            vessel_index in 0_usize..2,
+            berth_index in 0_usize..2,
+            start in -100_i64..200,
+        ) {
+            let model = two_vessels();
+            let (vessel, berth) = (vessel(vessel_index), berth(berth_index));
+            // SAFETY: both vessels and both berths are the model's.
+            unsafe {
+                prop_assert_eq!(
+                    <TurnaroundCost as VesselCost<i64>>::cost_unchecked(&model, vessel, berth, start),
+                    calculate_weighted_turnaround_time(&model, vessel, berth, start)
+                );
+                prop_assert_eq!(
+                    <CompletionCost as VesselCost<i64>>::cost_unchecked(&model, vessel, berth, start),
+                    calculate_weighted_completion_time(&model, vessel, berth, start)
                 );
             }
         }

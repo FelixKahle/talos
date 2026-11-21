@@ -24,6 +24,7 @@ use talos_ls::{
         iteration::IterationLimitMonitor, nimpr::NoImprovementMonitor,
         solution::SolutionLimitMonitor, time::TimeLimitMonitor,
     },
+    objective::Objective,
     operator::{
         composite::RoundRobinCompoundOperator,
         filter::{
@@ -36,7 +37,6 @@ use talos_ls::{
     },
     parameters::MutableLocalSearchParams,
 };
-use talos_model::{BerthIndex, Model, VesselIndex};
 
 #[pyclass(name = "Operator", eq, eq_int, from_py_object)]
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -112,26 +112,6 @@ impl PyLocalSearchConfig {
         format!(
             "LocalSearchConfig(operators={:?}, time_limit={:?}s)",
             self.operators, self.time_limit_secs
-        )
-    }
-}
-
-// ----------------------------------------------------------------
-// Evaluator
-// ----------------------------------------------------------------
-
-#[inline(always)]
-fn wtt_evaluator(
-    model: &Model<i64>,
-    vessel: VesselIndex,
-    berth: BerthIndex,
-    start: i64,
-) -> Option<i64> {
-    // SAFETY: the engine calls its evaluator only while decoding, with a vessel of its graph and that vessel's
-    // berth, which are of `model`, as the check at the door of `Engine::run` established.
-    unsafe {
-        talos_ls::objective::calculate_weighted_turnaround_time_unchecked(
-            model, vessel, berth, start,
         )
     }
 }
@@ -279,7 +259,7 @@ macro_rules! run_with_gls {
             start_times: $start_times,
             objective_value: $objective,
         };
-        $engine.run(params, wtt_evaluator, $cb)
+        $engine.run(params, Objective::WeightedTurnaroundTime, $cb)
     }};
 }
 

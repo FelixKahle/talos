@@ -12,7 +12,7 @@ use talos_ls::metaheuristic::guided_local_search::{
 use talos_ls::monitor::composite::CompositeLocalSearchMonitor;
 use talos_ls::monitor::nimpr::NoImprovementMonitor;
 use talos_ls::monitor::time::TimeLimitMonitor;
-use talos_ls::objective::calculate_weighted_turnaround_time_unchecked;
+use talos_ls::objective::Objective;
 use talos_ls::operator::composite::RoundRobinCompoundOperator;
 use talos_ls::operator::filter::{
     inter_berth_shift_filter_unchecked, inter_berth_swap_filter_unchecked,
@@ -22,7 +22,7 @@ use talos_ls::operator::neighborhood::LocalSearchOperator;
 use talos_ls::operator::shift::{InterBerthShiftOperator, IntraBerthShiftOperator};
 use talos_ls::operator::swap::{InterBerthSwapOperator, IntraBerthSwapOperator};
 use talos_ls::parameters::MutableLocalSearchParams;
-use talos_model::{BerthIndex, Model, VesselIndex};
+use talos_model::Model;
 
 mod edf;
 mod loading;
@@ -191,17 +191,6 @@ fn load_instance(path: &std::path::Path) -> Result<Model<i64>, ProblemLoaderErro
     loader.load_dbap_file(path)
 }
 
-fn evaluator(
-    model: &Model<i64>,
-    vessel: VesselIndex,
-    berth: BerthIndex,
-    start: i64,
-) -> Option<i64> {
-    // SAFETY: the engine calls its evaluator only while decoding, with a vessel of its graph and that vessel's
-    // berth, which are of `model`, as the check at the door of `Engine::run` established.
-    unsafe { calculate_weighted_turnaround_time_unchecked(model, vessel, berth, start) }
-}
-
 fn build_full_operator() -> RoundRobinCompoundOperator<'static, i64> {
     let ops: Vec<Box<dyn LocalSearchOperator<i64>>> = vec![
         Box::new(IntraBerthSwapOperator::new(
@@ -287,7 +276,7 @@ fn run_benchmark(
         start_times: initial.start_times(),
         objective_value: greedy_obj,
     };
-    let outcome = engine.run(params, evaluator, |_| {});
+    let outcome = engine.run(params, Objective::WeightedTurnaroundTime, |_| {});
     let (first_sol, _first_reason, first_stats) = outcome.into_inner();
     let first_obj = first_sol.objective_value();
     let first_time = first_stats.time_total;
@@ -319,7 +308,7 @@ fn run_benchmark(
         start_times: initial.start_times(),
         objective_value: greedy_obj,
     };
-    let outcome = engine.run(params, evaluator, |_| {});
+    let outcome = engine.run(params, Objective::WeightedTurnaroundTime, |_| {});
     let (second_sol, _second_reason, second_stats) = outcome.into_inner();
     let second_obj = second_sol.objective_value();
     let second_time = second_stats.time_total;

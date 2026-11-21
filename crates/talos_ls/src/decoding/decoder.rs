@@ -5,16 +5,17 @@
 //!
 //! Each berth is decoded on its own and left-justified: its vessels are served in their order, each from the
 //! earliest time that is no earlier than its arrival and the end of the service before it, at which its service
-//! fits an opening of the berth by [`Model::service_fits_opening`]. A caller-supplied evaluator prices each
-//! service; a berth whose vessel fits no opening, or that the evaluator refuses, makes the schedule infeasible.
+//! fits an opening of the berth by [`Model::service_fits_opening`]. A [`VesselCost`] prices each service; a berth
+//! whose vessel fits no opening, or whose service the cost refuses, makes the schedule infeasible.
 //!
 //! [`decode_full_unchecked`] decodes every berth; [`decode_unchecked`] decodes only the berths a move touched and
 //! carries the others' costs over from the accepted schedule.
 
 use super::schedule_state::ScheduleState;
+use crate::objective::VesselCost;
 use crate::schedule::{ScheduleGraph, TouchedBerths, VesselSequenceIter};
 use talos_core::SolverNumeric;
-use talos_model::{BerthIndex, Model, VesselIndex};
+use talos_model::{BerthIndex, Model};
 
 /// The earliest start no earlier than `earliest` at which a service of `processing_time` fits an opening of
 /// `berth`, searching the openings from the one at `first_opening` on, and the opening it fits; or `None` if it
@@ -59,22 +60,21 @@ where
 
 /// Serves the vessels of `sequence` on `berth` in their order, each as early as it fits, writes each one's berth
 /// and start into `candidate`, and answers the sum of their costs; or `None` if a vessel fits no opening or the
-/// evaluator refuses it, with `candidate` then partly written.
+/// cost refuses it, with `candidate` then partly written.
 ///
 /// # Safety
 ///
 /// `berth` must be one of `model`'s, and every vessel `sequence` yields one of `model`'s and of `candidate`'s.
 #[inline(always)]
-unsafe fn decode_berth_unchecked<T, F>(
+unsafe fn decode_berth_unchecked<T, C>(
     berth: BerthIndex,
     sequence: VesselSequenceIter<'_>,
     candidate: &mut ScheduleState<T>,
     model: &Model<T>,
-    evaluator: &F,
 ) -> Option<T>
 where
     T: SolverNumeric,
-    F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
+    C: VesselCost<T>,
 {
     debug_assert!(
         berth.index() < model.num_berths(),
@@ -107,7 +107,8 @@ where
                 opening,
             )
         }?;
-        berth_cost = berth_cost + evaluator(model, vessel, berth, start)?;
+        // SAFETY: `berth` and every vessel of the sequence are the model's, the precondition of this function.
+        berth_cost = berth_cost + unsafe { C::cost_unchecked(model, vessel, berth, start) }?;
         free_from = start + processing_time;
         opening = found;
         // SAFETY: every vessel of the sequence is the candidate's, the precondition of this function.
@@ -117,7 +118,7 @@ where
 }
 
 /// Decodes every berth of `graph` into `candidate`: each vessel's berth and start, each berth's cost and their
-/// sum as the objective; or `None` if a vessel fits no opening or the evaluator refuses it, with `candidate` then
+/// sum as the objective; or `None` if a vessel fits no opening or the cost refuses it, with `candidate` then
 /// partly written.
 ///
 /// # Safety
@@ -125,15 +126,14 @@ where
 /// `graph`, `candidate` and `model` must have the same vessels and the same berths: each must count as many of
 /// each as the others.
 #[inline]
-pub unsafe fn decode_full_unchecked<T, F>(
+pub unsafe fn decode_full_unchecked<T, C>(
     graph: &ScheduleGraph,
     candidate: &mut ScheduleState<T>,
     model: &Model<T>,
-    evaluator: F,
 ) -> Option<()>
 where
     T: SolverNumeric,
-    F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
+    C: VesselCost<T>,
 {
     debug_assert!(
         graph.num_vessels() == model.num_vessels()
@@ -149,7 +149,7 @@ where
         // SAFETY: `berth` is the model's; the walk yields only vessels of the graph (`VesselSequenceIter`), whose
         // vessels are the model's and the candidate's, a precondition of this function.
         let berth_cost =
-            unsafe { decode_berth_unchecked(berth, sequence, candidate, model, &evaluator) }?;
+            unsafe { decode_berth_unchecked::<T, C>(berth, sequence, candidate, model) }?;
         // SAFETY: `berth` is the model's, whose berths are the candidate's, a precondition of this function.
         unsafe { candidate.set_berth_cost_unchecked(berth, berth_cost) };
         objective = objective + berth_cost;
@@ -159,7 +159,7 @@ where
 }
 
 /// Decodes only the berths `touched` marks into `candidate`, and sets its objective to that of `accepted` with the
-/// touched berths' costs exchanged for their new ones; or `None` if a vessel fits no opening or the evaluator
+/// touched berths' costs exchanged for their new ones; or `None` if a vessel fits no opening or the cost
 /// refuses it.
 ///
 /// `candidate` is written only on the touched berths and their vessels; elsewhere it holds what it held, which
@@ -170,17 +170,16 @@ where
 /// `touched`, `graph`, `candidate`, `accepted` and `model` must have the same berths, and the last four the same
 /// vessels: each must count as many of each as the others.
 #[inline]
-pub unsafe fn decode_unchecked<T, F>(
+pub unsafe fn decode_unchecked<T, C>(
     touched: &TouchedBerths,
     graph: &ScheduleGraph,
     candidate: &mut ScheduleState<T>,
     accepted: &ScheduleState<T>,
     model: &Model<T>,
-    evaluator: F,
 ) -> Option<()>
 where
     T: SolverNumeric,
-    F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
+    C: VesselCost<T>,
 {
     debug_assert!(
         touched.num_berths() == model.num_berths()
@@ -201,7 +200,7 @@ where
         // graph (`VesselSequenceIter`), whose vessels are the model's and the candidate's, a precondition of this
         // function.
         let berth_cost =
-            unsafe { decode_berth_unchecked(berth, sequence, candidate, model, &evaluator) }?;
+            unsafe { decode_berth_unchecked::<T, C>(berth, sequence, candidate, model) }?;
         // SAFETY: `berth` is below the count of `touched`, which is that of both states, a precondition of this
         // function.
         let accepted_cost = unsafe {
@@ -217,9 +216,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::objective::calculate_weighted_completion_time;
+    use crate::objective::CompletionCost;
     use proptest::prelude::*;
     use talos_core::ClosedOpenInterval;
+    use talos_model::VesselIndex;
 
     // Helper to build a valid 2-vessel, 2-berth model for testing.
     fn build_test_model() -> Model<i64> {
@@ -241,14 +241,19 @@ mod tests {
         Model::new(arrivals, departures, weights, processing, opening)
     }
 
-    // Evaluator that simply uses the start time as the cost for easy math
-    fn mock_evaluator(
-        _model: &Model<i64>,
-        _vessel: VesselIndex,
-        _berth: BerthIndex,
-        start_time: i64,
-    ) -> Option<i64> {
-        Some(start_time)
+    /// The start time of a vessel as its cost, for easy arithmetic.
+    #[derive(Debug)]
+    struct StartTimeCost;
+
+    impl VesselCost<i64> for StartTimeCost {
+        unsafe fn cost_unchecked(
+            _model: &Model<i64>,
+            _vessel: VesselIndex,
+            _berth: BerthIndex,
+            start_time: i64,
+        ) -> Option<i64> {
+            Some(start_time)
+        }
     }
 
     // B0 is open on [0, 15) and [25, 100).
@@ -284,7 +289,7 @@ mod tests {
         );
         // SAFETY: the graph and the state are of the model's vessels and berths, as each test builds them.
         let decoded =
-            unsafe { decode_full_unchecked(graph, &mut candidate, model, mock_evaluator) };
+            unsafe { decode_full_unchecked::<_, StartTimeCost>(graph, &mut candidate, model) };
         assert_eq!(decoded, Some(()));
         candidate
     }
@@ -372,7 +377,7 @@ mod tests {
 
         // SAFETY: B0 and both vessels are the model's and the candidate's.
         let berth_cost = unsafe {
-            decode_berth_unchecked(b0, sequence, &mut candidate, &model, &mock_evaluator)
+            decode_berth_unchecked::<_, StartTimeCost>(b0, sequence, &mut candidate, &model)
         };
 
         // Expected logic:
@@ -407,7 +412,8 @@ mod tests {
         );
 
         // SAFETY: the graph, the candidate and the model have two vessels and two berths.
-        let res = unsafe { decode_full_unchecked(&graph, &mut candidate, &model, mock_evaluator) };
+        let res =
+            unsafe { decode_full_unchecked::<_, StartTimeCost>(&graph, &mut candidate, &model) };
         assert!(res.is_some());
 
         // B0 gets V0 (starts 10). B0 cost = 10.
@@ -452,13 +458,12 @@ mod tests {
         // Run partial decode!
         // SAFETY: the touched berths, the graph, the states and the model have two vessels and two berths.
         let res = unsafe {
-            decode_unchecked(
+            decode_unchecked::<_, StartTimeCost>(
                 &touched,
                 &candidate_graph,
                 &mut candidate_buffer,
                 &accepted,
                 &model,
-                mock_evaluator,
             )
         };
         assert!(res.is_some());
@@ -506,13 +511,12 @@ mod tests {
 
         // SAFETY: the touched berths, the graph, the states and the model have two vessels and two berths.
         let res = unsafe {
-            decode_unchecked(
+            decode_unchecked::<_, StartTimeCost>(
                 &touched,
                 &candidate_graph,
                 &mut candidate_buffer,
                 &accepted,
                 &model,
-                mock_evaluator,
             )
         };
         assert!(res.is_some());
@@ -626,9 +630,7 @@ mod tests {
             );
             // SAFETY: the graph, the candidate and the model have the same vessels and berths, as built above.
             let decoded = unsafe {
-                decode_full_unchecked(&graph, &mut candidate, &model, |model, vessel, berth, start| {
-                    calculate_weighted_completion_time(model, vessel, berth, start)
-                })
+                decode_full_unchecked::<_, CompletionCost>(&graph, &mut candidate, &model)
             };
             let expected = brute_force(&model, &order, 200);
             prop_assert_eq!(decoded.is_some(), expected.is_some());

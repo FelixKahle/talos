@@ -5,6 +5,7 @@ use crate::{
     decoding::{ScheduleState, decode_full_unchecked, decode_unchecked},
     metaheuristic::acceptance::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
     monitor::lsmonitor::LocalSearchMonitor,
+    objective::{CompletionCost, Objective, TurnaroundCost, VesselCost},
     operator::neighborhood::LocalSearchOperator,
     outcome::LocalSearchOutcome,
     parameters::{MutableLocalSearchParams, check_initial_solution},
@@ -14,7 +15,7 @@ use crate::{
 };
 use std::time::Instant;
 use talos_core::SolverNumeric;
-use talos_model::{BerthIndex, Model, Solution, SolutionView, VesselIndex};
+use talos_model::{BerthIndex, Solution, SolutionView};
 
 /// The core orchestration unit for the local search metaheuristic.
 ///
@@ -84,15 +85,14 @@ impl<T> Engine<T> {
         }
     }
 
-    /// Runs the local search engine loop.
+    /// Runs the local search engine loop, minimising `objective`.
     ///
-    /// Initializes the internal quad-buffer state from `params`, then repeatedly
+    /// Initializes the internal states from `params`, then repeatedly
     /// generates neighbors via the operator, decodes them, and asks the
     /// metaheuristic whether to accept, buffer, or reject each candidate.
     /// The monitor is notified of all lifecycle events and may request early
     /// termination. The `callback` is invoked whenever a new global best
-    /// solution is found. The `evaluator` computes per-vessel cost contributions
-    /// during decoding.
+    /// solution is found.
     ///
     /// Returns the best solution found, the termination reason, and statistics.
     ///
@@ -103,18 +103,41 @@ impl<T> Engine<T> {
     ///
     /// Panics if `params.berths` and `params.start_times` are not a schedule of the vessels and berths of
     /// `params.model`, as [`check_initial_solution`] refuses it, or if the initial solution cannot be decoded.
-    pub fn run<H, O, M, F, C>(
+    pub fn run<H, O, M, C>(
         &mut self,
         params: MutableLocalSearchParams<'_, T, H, O, M>,
-        evaluator: F,
-        mut callback: C,
+        objective: Objective,
+        callback: C,
     ) -> LocalSearchOutcome<T>
     where
         T: SolverNumeric,
         H: Metaheuristic<T>,
         O: LocalSearchOperator<T>,
         M: LocalSearchMonitor<T>,
-        F: Fn(&Model<T>, VesselIndex, BerthIndex, T) -> Option<T>,
+        C: FnMut(SolutionView<'_, T>),
+    {
+        match objective {
+            Objective::WeightedTurnaroundTime => {
+                self.run_with_cost::<TurnaroundCost, H, O, M, C>(params, callback)
+            }
+            Objective::WeightedCompletionTime => {
+                self.run_with_cost::<CompletionCost, H, O, M, C>(params, callback)
+            }
+        }
+    }
+
+    /// Runs the local search loop as [`Engine::run`] does, with `V` as the cost of each vessel's service.
+    fn run_with_cost<V, H, O, M, C>(
+        &mut self,
+        params: MutableLocalSearchParams<'_, T, H, O, M>,
+        mut callback: C,
+    ) -> LocalSearchOutcome<T>
+    where
+        T: SolverNumeric,
+        V: VesselCost<T>,
+        H: Metaheuristic<T>,
+        O: LocalSearchOperator<T>,
+        M: LocalSearchMonitor<T>,
         C: FnMut(SolutionView<'_, T>),
     {
         if let Err(error) = check_initial_solution(params.model, params.berths, params.start_times)
@@ -147,13 +170,8 @@ impl<T> Engine<T> {
         // SAFETY: the graph was built from `params`, which the check at the door found to be a schedule of the
         // vessels and berths of `model`, and every state was sized for those counts by `ensure_capacity`.
         unsafe {
-            decode_full_unchecked(
-                self.mutator.graph(),
-                &mut self.candidate_state,
-                model,
-                &evaluator,
-            )
-            .expect("initial solution must be decodable");
+            decode_full_unchecked::<T, V>(self.mutator.graph(), &mut self.candidate_state, model)
+                .expect("initial solution must be decodable");
         }
         self.accepted_state
             .overwrite_from_state(&self.candidate_state);
@@ -371,13 +389,12 @@ impl<T> Engine<T> {
                 // established and as every mutation keeps, and the touched berths count its berths by the
                 // invariant of `Mutator`.
                 let decode_ok = unsafe {
-                    decode_unchecked(
+                    decode_unchecked::<T, V>(
                         self.mutator.touched(),
                         self.mutator.graph(),
                         &mut self.candidate_state,
                         &self.accepted_state,
                         model,
-                        &evaluator,
                     )
                 };
 
@@ -795,14 +812,19 @@ mod tests {
         Model::new(arrivals, deadlines, weights, processing_times, time_windows)
     }
 
-    /// Simple evaluator: cost = weight * start_time.
-    fn mock_evaluator(
-        model: &Model<i64>,
-        vessel: VesselIndex,
-        _berth: BerthIndex,
-        start: i64,
-    ) -> Option<i64> {
-        Some(model.vessel_weight(vessel) * start)
+    /// A vessel's weight times its start, as its cost.
+    #[derive(Debug)]
+    struct WeightedStartCost;
+
+    impl VesselCost<i64> for WeightedStartCost {
+        unsafe fn cost_unchecked(
+            model: &Model<i64>,
+            vessel: VesselIndex,
+            _berth: BerthIndex,
+            start: i64,
+        ) -> Option<i64> {
+            Some(model.vessel_weight(vessel) * start)
+        }
     }
 
     #[derive(Debug, Default)]
@@ -1398,7 +1420,7 @@ mod tests {
 
         let mut engine = Engine::<i64>::new(2, 2);
         let mut best_callbacks = 0u32;
-        let outcome = engine.run(params, mock_evaluator, |_| {
+        let outcome = engine.run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {
             best_callbacks += 1;
         });
         // We cannot get the monitor back from the engine, so we reconstruct
@@ -1561,7 +1583,7 @@ mod tests {
         };
 
         let mut engine = Engine::<i64>::new(2, 2);
-        engine.run(params, mock_evaluator, |_| {})
+        engine.run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {})
     }
 
     // A schedule of three vessels for a model of two would build a graph whose third vessel every unchecked read
@@ -1583,7 +1605,8 @@ mod tests {
             start_times: TiSlice::from_ref(&start_times),
             objective_value: 0,
         };
-        let _ = Engine::<i64>::new(3, 2).run(params, mock_evaluator, |_| {});
+        let _ =
+            Engine::<i64>::new(3, 2).run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {});
     }
 
     #[test]
@@ -1601,7 +1624,7 @@ mod tests {
             objective_value: 0,
         };
         let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Engine::<i64>::new(2, 2).run(params, mock_evaluator, |_| {})
+            Engine::<i64>::new(2, 2).run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {})
         }))
         .expect_err("a berth beyond the model should be refused");
         let message = refusal
@@ -1868,7 +1891,8 @@ mod tests {
             start_times: TiSlice::from_ref(&start_times),
             objective_value: 5,
         };
-        let outcome = Engine::<i64>::new(2, 2).run(params, mock_evaluator, |_| {});
+        let outcome =
+            Engine::<i64>::new(2, 2).run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {});
         assert_eq!(
             outcome.termination_reason(),
             TerminationReason::NeighborhoodExhausted
@@ -1897,7 +1921,8 @@ mod tests {
             start_times: TiSlice::from_ref(&start_times),
             objective_value: 5,
         };
-        let outcome = Engine::<i64>::new(2, 2).run(params, mock_evaluator, |_| {});
+        let outcome =
+            Engine::<i64>::new(2, 2).run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {});
         assert_eq!(
             outcome.termination_reason(),
             TerminationReason::NeighborhoodExhausted
@@ -2015,7 +2040,7 @@ mod tests {
                 objective_value: 0,
             };
 
-            let outcome = engine.run(params, mock_evaluator, |_| {});
+            let outcome = engine.run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {});
             assert_eq!(outcome.solution().num_vessels(), 2);
             assert!(outcome.stats().iterations > 0);
         }
@@ -2051,7 +2076,7 @@ mod tests {
                 objective_value: 0,
             };
 
-            let outcome = engine.run(params, mock_evaluator, |_| {});
+            let outcome = engine.run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {});
             assert_eq!(outcome.solution().num_vessels(), 10);
             assert!(outcome.stats().iterations > 0);
         }
@@ -2076,7 +2101,7 @@ mod tests {
                 objective_value: 0,
             };
 
-            let outcome = engine.run(params, mock_evaluator, |_| {});
+            let outcome = engine.run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {});
             assert_eq!(outcome.solution().num_vessels(), 3);
             assert!(outcome.stats().iterations > 0);
         }
@@ -2101,7 +2126,7 @@ mod tests {
                 objective_value: 0,
             };
 
-            let outcome = engine.run(params, mock_evaluator, |_| {});
+            let outcome = engine.run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {});
             assert_eq!(outcome.solution().num_vessels(), 50);
             assert!(outcome.stats().iterations > 0);
         }
@@ -2127,7 +2152,7 @@ mod tests {
                 objective_value: 0,
             };
 
-            let outcome = engine.run(params, mock_evaluator, |_| {});
+            let outcome = engine.run_with_cost::<WeightedStartCost, _, _, _, _>(params, |_| {});
             assert_eq!(outcome.solution().num_vessels(), 2);
             assert!(outcome.stats().iterations > 0);
         }
