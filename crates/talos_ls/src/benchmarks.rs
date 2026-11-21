@@ -10,6 +10,6 @@ use criterion::Criterion;
 #[ignore = "benchmarks run on request, in a release build"]
 fn test_benchmarks() {
     let mut criterion = Criterion::default();
-    crate::decoding::benches::bench_mutation_cycles(&mut criterion);
+    crate::decoding::bench_mutation_cycles(&mut criterion);
     criterion.final_summary();
 }

@@ -648,7 +648,10 @@ mod tests {
 }
 
 #[cfg(test)]
-pub mod benches {
+pub use benches::bench_mutation_cycles;
+
+#[cfg(test)]
+mod benches {
     //! The mutation cycle of a run, a move, its decode and its undo, measured on fixed instances of 250 vessels.
 
     use super::{ScheduleState, decode_unchecked};
@@ -760,10 +763,8 @@ pub mod benches {
                         mutator.clear_diff();
                         mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
 
-                        // SAFETY: the touched berths, the graph, the states and the model have the vessels and berths of
-
-                        // the scenario.
-
+                        // SAFETY: the touched berths, the graph, the states and the model have the vessels and
+                        // berths of the scenario.
                         unsafe {
                             decode_unchecked::<_, StartTimeCost>(
                                 mutator.touched(),
@@ -788,10 +789,8 @@ pub mod benches {
                             mutator.clear_diff();
                             mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(60));
 
-                            // SAFETY: the touched berths, the graph, the states and the model have the vessels and berths of
-
-                            // the scenario.
-
+                            // SAFETY: the touched berths, the graph, the states and the model have the vessels and
+                            // berths of the scenario.
                             unsafe {
                                 decode_unchecked::<_, StartTimeCost>(
                                     mutator.touched(),
@@ -815,10 +814,8 @@ pub mod benches {
                         mutator.clear_diff();
                         mutator.relocate_after(VesselIndex::new(10), VesselIndex::new(40));
 
-                        // SAFETY: the touched berths, the graph, the states and the model have the vessels and berths of
-
-                        // the scenario.
-
+                        // SAFETY: the touched berths, the graph, the states and the model have the vessels and
+                        // berths of the scenario.
                         unsafe {
                             decode_unchecked::<_, StartTimeCost>(
                                 mutator.touched(),
@@ -842,10 +839,8 @@ pub mod benches {
                             mutator.clear_diff();
                             mutator.relocate_after(VesselIndex::new(10), VesselIndex::new(60));
 
-                            // SAFETY: the touched berths, the graph, the states and the model have the vessels and berths of
-
-                            // the scenario.
-
+                            // SAFETY: the touched berths, the graph, the states and the model have the vessels and
+                            // berths of the scenario.
                             unsafe {
                                 decode_unchecked::<_, StartTimeCost>(
                                     mutator.touched(),
@@ -887,10 +882,8 @@ pub mod benches {
                         mutator.clear_diff();
                         mutator.swap_vessels(VesselIndex::new(10), VesselIndex::new(40));
 
-                        // SAFETY: the touched berths, the graph, the states and the model have the vessels and berths of
-
-                        // the scenario.
-
+                        // SAFETY: the touched berths, the graph, the states and the model have the vessels and
+                        // berths of the scenario.
                         unsafe {
                             decode_unchecked::<_, StartTimeCost>(
                                 mutator.touched(),

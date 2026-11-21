@@ -12,6 +12,6 @@ mod schedule_state;
 mod decoder;
 
 #[cfg(test)]
-pub(super) use decoder::benches;
+pub(super) use decoder::bench_mutation_cycles;
 pub(super) use decoder::{decode_full_unchecked, decode_unchecked};
 pub(super) use schedule_state::ScheduleState;
