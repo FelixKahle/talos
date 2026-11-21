@@ -8,6 +8,11 @@ use std::num::NonZeroU64;
 
 /// The settings of a guided local search: how the penalty weight evolves, how penalties decay, and when the
 /// search penalizes.
+///
+/// A run of a guided local search keeps a penalty count for every link a schedule of its model can hold, from a
+/// vessel or the boundary of a berth to a vessel or the boundary of a berth, and for every assignment of a vessel to
+/// a berth: `8 * ((num_vessels + 1)^2 + num_vessels * num_berths)` bytes, which the run allocates and zeroes at its
+/// start. That is 8 MB for a thousand vessels, 800 MB for ten thousand and 20 GB for fifty thousand.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct GuidedLocalSearch {
     /// The weight of the penalties in the augmented objective, and how it evolves.

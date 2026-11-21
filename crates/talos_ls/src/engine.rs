@@ -90,9 +90,12 @@ where
     /// the metaheuristic accept, keep aside or reject it, until the metaheuristic, a limit or the monitor ends
     /// it. The outcome holds the best schedule found, which is never worse than the initial one.
     ///
-    /// The checks at the door cost one pass over the vessels. A run allocates its operator, the memory of its
-    /// metaheuristic and its outcome, and its states where the model is larger than any the engine has run on;
-    /// the steps of the search reuse the memory of the engine.
+    /// The checks at the door cost one pass over the vessels. A run allocates a table of a vessel per vessel to
+    /// order the initial schedule, its operator, the memory of its metaheuristic, its outcome, and its states,
+    /// graphs and records where the model is larger than any the engine has run on. The memory of a guided local
+    /// search is quadratic in the vessels, 8 MB for a thousand and 20 GB for fifty thousand, as
+    /// [`GuidedLocalSearch`](crate::GuidedLocalSearch) details. The steps of the search reuse the memory of the
+    /// engine; the records of the moves of a candidate grow to the most any candidate needed and then keep it.
     ///
     /// # Errors
     ///

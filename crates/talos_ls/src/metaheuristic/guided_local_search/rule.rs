@@ -4,7 +4,7 @@
 //! A guided local search under way: the rule the engine asks during a run.
 
 use super::{
-    penalty_memory::{Feature, PenaltyMemory},
+    penalty_memory::{Feature, PenaltyMemory, real_sum},
     schedules::{DecaySchedule, LambdaSchedule},
     settings::{GuidedLocalSearch, PenalizationTrigger},
 };
@@ -164,6 +164,11 @@ where
 {
     fn on_start(&mut self, graph: &ScheduleGraph, initial_objective: T) {
         self.memory.reset(graph.num_vessels(), graph.num_berths());
+        // A schedule has a link with a vessel at each end of each berth and between consecutive vessels, at most
+        // `num_vessels + num_berths`, and an assignment per vessel: every feature a penalization can raise.
+        self.winners.clear();
+        self.winners
+            .reserve(2 * graph.num_vessels() + graph.num_berths());
         self.penalty_sum = self.memory.penalty_sum(graph);
         self.trigger
             .restart(initial_objective.to_f64().unwrap_or(0.0));
@@ -171,10 +176,6 @@ where
         self.lambda.restart();
     }
 
-    #[expect(
-        clippy::as_conversions,
-        reason = "a sum of penalty counts stays far below 2^53, so it is an exact `f64`"
-    )]
     unsafe fn decide_unchecked(
         &mut self,
         accepted_objective: T,
@@ -195,8 +196,8 @@ where
         let candidate_penalty_sum =
             self.penalty_sum + unsafe { self.memory.penalty_delta_unchecked(diff) };
         let lambda = self.lambda.current;
-        let augmented_candidate = candidate + lambda * candidate_penalty_sum as f64;
-        let augmented_accepted = accepted + lambda * self.penalty_sum as f64;
+        let augmented_candidate = candidate + lambda * real_sum(candidate_penalty_sum);
+        let augmented_accepted = accepted + lambda * real_sum(self.penalty_sum);
         if augmented_candidate < augmented_accepted {
             AcceptanceOutcome::Accept
         } else {

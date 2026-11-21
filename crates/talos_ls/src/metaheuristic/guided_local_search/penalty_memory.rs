@@ -78,10 +78,58 @@ fn is_feature(from: LinkEnd, to: LinkEnd) -> bool {
     matches!(from, LinkEnd::Vessel(_)) || matches!(to, LinkEnd::Vessel(_))
 }
 
+// A penalty count grows by at most one per penalization, and a run penalizes at most once per candidate and once
+// per exhausted scan, so a count, and a sum of the counts of the at most `2 * num_vessels + num_berths` features of
+// one schedule, stays far below 2^53 in any run shorter than years: it is exact as an `i64` and as an `f64`.
+
+/// `count`, a penalty count, as an `i64`.
+#[inline(always)] // Called per entry of the diff of every candidate the search decides on.
+#[expect(
+    clippy::as_conversions,
+    reason = "a penalty count stays below 2^53, so it is an exact `i64`"
+)]
+fn signed(count: u64) -> i64 {
+    count as i64
+}
+
+/// `count`, a penalty count, as an `f64`.
+#[expect(
+    clippy::as_conversions,
+    reason = "a penalty count stays below 2^53, so it is an exact `f64`"
+)]
+fn real(count: u64) -> f64 {
+    count as f64
+}
+
+/// `sum`, a sum of penalty counts, as an `f64`.
+#[inline(always)] // Called twice for every candidate the search decides on.
+#[expect(
+    clippy::as_conversions,
+    reason = "a sum of the penalty counts of one schedule stays below 2^53, so it is an exact `f64`"
+)]
+pub(super) fn real_sum(sum: i64) -> f64 {
+    sum as f64
+}
+
+/// `count` multiplied by `factor`, in `[0, 1]`, and rounded toward zero.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "the product of a count and a factor in [0, 1] lies in [0, count], and rounding it toward zero is the \
+              decay"
+)]
+fn scaled(count: u64, factor: f64) -> u64 {
+    (real(count) * factor) as u64
+}
+
 /// The penalty count of every feature of the schedules of one instance, zero at the start of a run.
 ///
 /// The table of links has `(num_vessels + 1)^2` entries, the row and column `num_vessels` standing for the
 /// boundaries of all berths; the table of assignments has `num_vessels * num_berths`, by vessel and then berth.
+/// The memory so takes `8 * ((num_vessels + 1)^2 + num_vessels * num_berths)` bytes: 8 MB for a thousand vessels,
+/// 800 MB for ten thousand and 20 GB for fifty thousand. A count is a `u64` and not a `u32`: a run that penalizes at
+/// every candidate, as one triggered after a single non-improving step does, could raise one feature past 2^32
+/// within minutes.
 #[derive(Debug, Clone, Default)]
 pub(super) struct PenaltyMemory {
     links: Vec<u64>,
@@ -214,22 +262,18 @@ impl PenaltyMemory {
     /// # Safety
     ///
     /// Every vessel and berth `diff` names must be the memory's.
-    #[expect(
-        clippy::as_conversions,
-        reason = "a penalty count grows by one per penalization, far below 2^63, so it is an exact `i64`"
-    )]
     pub(super) unsafe fn penalty_delta_unchecked(&self, diff: &ScheduleGraphDiff) -> i64 {
         let mut delta: i64 = 0;
         for link in diff.broken_links() {
             let index = link_index(link.from, link.to, self.num_vessels);
             // SAFETY: both ends are boundaries or vessels of the memory, the precondition of this function, so
             // the index is below `(num_vessels + 1)^2`, the length of the table of links.
-            delta -= unsafe { self.count_unchecked(Feature::Link(index)) } as i64;
+            delta -= signed(unsafe { self.count_unchecked(Feature::Link(index)) });
         }
         for link in diff.created_links() {
             let index = link_index(link.from, link.to, self.num_vessels);
             // SAFETY: as for the broken links.
-            delta += unsafe { self.count_unchecked(Feature::Link(index)) } as i64;
+            delta += signed(unsafe { self.count_unchecked(Feature::Link(index)) });
         }
         for reallocation in diff.reallocations() {
             let left = self.assignment_index(reallocation.vessel, reallocation.from);
@@ -242,8 +286,7 @@ impl PenaltyMemory {
                     self.count_unchecked(Feature::Assignment(reached)),
                 )
             };
-            delta -= left as i64;
-            delta += reached as i64;
+            delta += signed(reached) - signed(left);
         }
         delta
     }
@@ -253,10 +296,6 @@ impl PenaltyMemory {
     /// # Panics
     ///
     /// Panics if `graph` does not count the vessels and berths of the memory.
-    #[expect(
-        clippy::as_conversions,
-        reason = "a penalty count grows by one per penalization, far below 2^63, so it is an exact `i64`"
-    )]
     pub(super) fn penalty_sum(&self, graph: &ScheduleGraph) -> i64 {
         self.assert_counts_of(graph);
         let mut sum: i64 = 0;
@@ -267,7 +306,7 @@ impl PenaltyMemory {
                     let index = link_index(from, to, self.num_vessels);
                     // SAFETY: both ends are boundaries or vessels of the graph, which counts the memory's
                     // vessels, as checked above.
-                    sum += unsafe { self.count_unchecked(Feature::Link(index)) } as i64;
+                    sum += signed(unsafe { self.count_unchecked(Feature::Link(index)) });
                 }
             }
         }
@@ -275,7 +314,7 @@ impl PenaltyMemory {
             let index = self.assignment_index(vessel, graph.vessel_berth(vessel));
             // SAFETY: the vessel and its berth are the graph's, which counts the memory's vessels and berths, as
             // checked above.
-            sum += unsafe { self.count_unchecked(Feature::Assignment(index)) } as i64;
+            sum += signed(unsafe { self.count_unchecked(Feature::Assignment(index)) });
         }
         sum
     }
@@ -286,16 +325,12 @@ impl PenaltyMemory {
     /// # Panics
     ///
     /// Panics if `graph` does not count the vessels and berths of the memory.
-    #[expect(
-        clippy::as_conversions,
-        reason = "a penalty count grows by one per penalization, far below 2^53, so it is an exact `f64`"
-    )]
     pub(super) fn penalize(&mut self, graph: &ScheduleGraph, winners: &mut Vec<Feature>) {
         self.assert_counts_of(graph);
         winners.clear();
         let mut best_utility = f64::NEG_INFINITY;
         let mut consider = |feature: Feature, penalty: u64| {
-            let utility = 1.0 / (1.0 + penalty as f64);
+            let utility = 1.0 / (1.0 + real(penalty));
             match rank_utility(utility, best_utility) {
                 UtilityRank::Better => {
                     best_utility = utility;
@@ -335,19 +370,13 @@ impl PenaltyMemory {
     /// Multiplies every count by `factor`, rounding toward zero.
     ///
     /// `factor` is in `[0, 1]`.
-    #[expect(
-        clippy::as_conversions,
-        clippy::cast_possible_truncation,
-        reason = "the product of a count and a factor in [0, 1] lies in [0, count], and rounding it toward zero is \
-                  the decay"
-    )]
     pub(super) fn decay(&mut self, factor: f64) {
         debug_assert!(
             (0.0..=1.0).contains(&factor),
             "called `PenaltyMemory::decay` with factor {factor}, outside [0, 1]"
         );
         for count in self.links.iter_mut().chain(self.assignments.iter_mut()) {
-            *count = (*count as f64 * factor) as u64;
+            *count = scaled(*count, factor);
         }
     }
 
