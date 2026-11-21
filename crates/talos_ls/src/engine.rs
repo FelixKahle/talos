@@ -15,7 +15,7 @@ use crate::{
     objective::{CompletionCost, Objective, TurnaroundCost, VesselCost},
     operator::{AcceptedMove, CompoundOperator, LocalSearchOperator},
     outcome::LocalSearchOutcome,
-    parameters::{LocalSearchError, LocalSearchParameters, check_initial_solution},
+    parameters::{LocalSearchError, LocalSearchParameters, check_initial_solution, check_run},
     schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff},
     statistics::LocalSearchStatistics,
     termination::{SearchCommand, TerminationReason},
@@ -113,10 +113,7 @@ where
     where
         M: LocalSearchMonitor<T>,
     {
-        if parameters.neighborhoods.is_empty() {
-            return Err(LocalSearchError::NoNeighborhood);
-        }
-        check_initial_solution(model, initial)?;
+        check_run(model, initial, parameters)?;
         match parameters.objective {
             Objective::WeightedTurnaroundTime => self.load::<TurnaroundCost>(model, initial)?,
             Objective::WeightedCompletionTime => self.load::<CompletionCost>(model, initial)?,

@@ -121,6 +121,28 @@ impl std::fmt::Display for LocalSearchError {
 
 impl std::error::Error for LocalSearchError {}
 
+/// Refuses a run of `parameters` from `initial` on `model` that [`Engine::run`](crate::Engine::run) refuses at its
+/// door: parameters that name no neighbourhood, or an initial schedule that is not a schedule of the vessels and
+/// berths of `model`. It costs one pass over the vessels.
+///
+/// # Errors
+///
+/// [`LocalSearchError::NoNeighborhood`] if `parameters` name no neighbourhood, or else the error of
+/// [`check_initial_solution`].
+pub(super) fn check_run<T>(
+    model: &Model<T>,
+    initial: SolutionView<'_, T>,
+    parameters: &LocalSearchParameters,
+) -> Result<(), LocalSearchError>
+where
+    T: SolverNumeric,
+{
+    if parameters.neighborhoods.is_empty() {
+        return Err(LocalSearchError::NoNeighborhood);
+    }
+    check_initial_solution(model, initial)
+}
+
 /// Refuses an initial schedule that is not a schedule of the vessels and berths of `model`: one berth per vessel,
 /// each a berth of the model the vessel may use. It costs one pass over the vessels.
 ///
@@ -215,6 +237,33 @@ mod tests {
                 vessel: VesselIndex::new(0),
                 berth: BerthIndex::new(1)
             })
+        );
+    }
+
+    #[test]
+    fn test_check_run_refuses_parameters_without_a_neighborhood_before_the_schedule() {
+        let berths = [BerthIndex::new(0)];
+        let view = SolutionView::new(&berths, &[0], 0);
+        let parameters = LocalSearchParameters {
+            neighborhoods: Vec::new(),
+            ..LocalSearchParameters::default()
+        };
+        assert_eq!(
+            check_run(&model(), view, &parameters),
+            Err(LocalSearchError::NoNeighborhood)
+        );
+        assert_eq!(
+            check_run(&model(), view, &LocalSearchParameters::default()),
+            Err(LocalSearchError::VesselCountMismatch {
+                model_vessels: 2,
+                solution_vessels: 1
+            })
+        );
+        let berths = [BerthIndex::new(0), BerthIndex::new(1)];
+        let view = SolutionView::new(&berths, &[0, 0], 0);
+        assert_eq!(
+            check_run(&model(), view, &LocalSearchParameters::default()),
+            Ok(())
         );
     }
 
