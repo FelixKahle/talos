@@ -429,12 +429,17 @@ where
 {
     /// Creates a new `MultiArmedBanditCompoundOperator` with the specified sub-operators
     /// and configuration parameters.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `operators` is empty.
     #[inline]
     pub fn new(
         operators: Vec<Box<dyn LocalSearchOperator<T> + 'a>>,
         memory_coeff: f64,
         exploration_coeff: f64,
     ) -> Self {
+        assert!(!operators.is_empty(), "called `MultiArmedBanditCompoundOperator::new` with no operators");
         let n = operators.len();
         Self {
             operators,
@@ -446,11 +451,6 @@ where
             op_started: vec![false; n],
             last_obj: None,
         }
-    }
-
-    #[inline]
-    pub fn empty(memory_coeff: f64, exploration_coeff: f64) -> Self {
-        Self::new(vec![], memory_coeff, exploration_coeff)
     }
 
     #[inline]
@@ -609,5 +609,18 @@ where
         self.operators.iter_mut().for_each(|op| op.reset());
         self.active_rank_index = 0;
         self.op_started.fill(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A bandit over no operators has no rank to credit after its first scan: its second `prepare` would read the
+    // first rank of an empty ranking. It must be refused where it is made.
+    #[test]
+    #[should_panic(expected = "called `MultiArmedBanditCompoundOperator::new` with no operators")]
+    fn test_bandit_refuses_no_operators() {
+        let _ = MultiArmedBanditCompoundOperator::<i64>::new(Vec::new(), 0.2, 1.0);
     }
 }
