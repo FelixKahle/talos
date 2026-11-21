@@ -9,6 +9,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+derive-where = { workspace = true }
 num-traits = { workspace = true }
 
 [dev-dependencies]

@@ -29,6 +29,8 @@ talos_ls = { path = "crates/talos_ls" }
 
 # Vectors and slices indexed by a typed id, so that one id cannot index another table; `alloc` is all a `TiVec` needs.
 typed-index-collections = { version = "3.5.0", default-features = false, features = ["alloc"] }
+# Std traits derived without bounds on phantom parameters, such as the tag of an id.
+derive-where = { version = "1.7.0", default-features = false }
 # Traits for code generic over the integer types the solver accepts.
 num-traits = { version = "0.2.19", default-features = false, features = ["std"] }
 # Iterator adaptors std lacks; the bindings use them to reshape tables.

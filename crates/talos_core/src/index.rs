@@ -3,8 +3,8 @@
 
 //! Typed ids: one type per kind of id, so that an id of one table cannot index another.
 
+use derive_where::derive_where;
 use std::fmt;
-use std::hash::Hash;
 use std::marker::PhantomData;
 
 // An id stores a `u32` and answers a `usize`; that conversion is exact only where a `usize` holds every `u32`.
@@ -27,7 +27,7 @@ const fn widen(value: u32) -> usize {
 ///
 /// A tag is a zero-sized type that exists only to tell one kind of id from another. Each kind of id declares
 /// its own tag and names its id type `TypedIndex<ThatTag>`.
-pub trait TypedIndexTag: Copy + Eq + Ord + Hash + fmt::Debug {
+pub trait TypedIndexTag {
     /// The name of the id kind, as `Debug` and `Display` print it (`Node 3`).
     const NAME: &'static str;
 }
@@ -35,11 +35,12 @@ pub trait TypedIndexTag: Copy + Eq + Ord + Hash + fmt::Debug {
 /// An id of the kind that `T` tags: a position in the tables of that kind.
 ///
 /// Ids of different kinds are different types, so an id of one table cannot be handed to another by mistake.
-/// The id stores a `u32`, which halves the memory of every stored column of ids, and speaks `usize` at its
-/// interface: it is made from a `usize` and answers one. An id is so at most `u32::MAX`, which [`new`] checks.
+/// The id stores a `u32` and speaks `usize` at its interface: it is made from a `usize` and answers one. An id is
+/// so at most `u32::MAX`, which [`new`] checks.
 ///
 /// [`new`]: TypedIndex::new
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+// The std traits are derived without bounds on the tag, which only names the kind.
+#[derive_where(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypedIndex<T>
 where
     T: TypedIndexTag,
@@ -155,14 +156,14 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+    #[derive(Debug)]
     struct TestTag;
 
     impl TypedIndexTag for TestTag {
         const NAME: &'static str = "Test";
     }
 
-    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+    #[derive(Debug)]
     struct OtherTag;
 
     impl TypedIndexTag for OtherTag {

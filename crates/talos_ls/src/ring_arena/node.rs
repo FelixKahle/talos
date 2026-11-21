@@ -6,7 +6,7 @@
 use talos_core::{TypedIndex, TypedIndexTag};
 
 /// The tag of [`Node`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug)]
 pub struct NodeIndexTag;
 
 impl TypedIndexTag for NodeIndexTag {
