@@ -13,7 +13,7 @@ use crate::{
     },
     monitor::{LocalSearchMonitor, SearchProgress},
     objective::{CompletionCost, Objective, TurnaroundCost, VesselCost},
-    operator::{CompoundOperator, LocalSearchOperator},
+    operator::{AcceptedMove, CompoundOperator, LocalSearchOperator},
     outcome::LocalSearchOutcome,
     parameters::{LocalSearchError, LocalSearchParameters, check_initial_solution},
     schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff},
@@ -506,10 +506,7 @@ where
             .rule
             .on_neighborhood_exhausted(self.engine.mutator.graph())
         {
-            NeighborhoodExhaustionOutcome::Restart => {
-                self.operator.reset();
-                None
-            }
+            NeighborhoodExhaustionOutcome::Restart => None,
             NeighborhoodExhaustionOutcome::Terminate => {
                 Some(TerminationReason::NeighborhoodExhausted)
             }
@@ -522,6 +519,8 @@ where
         self.engine.accept_buffered();
         self.buffer = Buffer::Empty;
         self.statistics.accepted_solutions += 1;
+        self.operator
+            .on_accepted(AcceptedMove::KeptAside, self.engine.accepted.objective());
         // SAFETY: the buffered diff records moves on the graph of the run, the graph `on_start` was given.
         unsafe {
             self.rule.on_accept_unchecked(
@@ -608,6 +607,8 @@ where
     fn accept(&mut self) -> StepEnd {
         self.engine.accept_candidate();
         self.statistics.accepted_solutions += 1;
+        self.operator
+            .on_accepted(AcceptedMove::Last, self.engine.accepted.objective());
         // SAFETY: the diff records moves on the graph of the run, the graph `on_start` was given.
         unsafe {
             self.rule.on_accept_unchecked(
@@ -629,6 +630,7 @@ where
     fn keep_aside(&mut self) -> StepEnd {
         self.engine.buffer_candidate();
         self.buffer = Buffer::Holding;
+        self.operator.on_kept_aside();
         self.monitor
             .on_solution_buffered(self.engine.progress(self.buffer, &self.statistics));
         self.engine.mutator.rollback();
@@ -662,7 +664,7 @@ mod tests {
     use crate::{
         metaheuristic::{GreedyDescent, GuidedLocalSearch, MoveSelection, PenalizationTrigger},
         monitor::NoMonitor,
-        operator::{Neighborhood, NeighborhoodSelection},
+        operator::{MultiArmedBandit, Neighborhood, NeighborhoodSelection},
     };
     use talos_core::ClosedOpenInterval;
     use talos_model::{BerthIndex, VesselIndex};
@@ -748,10 +750,6 @@ mod tests {
             self.made += 1;
             mutator.swap_vessels(VesselIndex::new(0), VesselIndex::new(1));
             true
-        }
-
-        fn reset(&mut self) {
-            self.made = 0;
         }
     }
 
@@ -1270,6 +1268,40 @@ mod tests {
         let first = trajectory(&parameters(1));
         assert!(first.len() > 100);
         assert_eq!(first, trajectory(&parameters(2)));
+    }
+
+    // The bandit learns only from accepted moves, those taken at once and those kept aside and committed at the end
+    // of a scan; under either a run stays reproducible and ends with a schedule of the model.
+    #[test]
+    fn test_a_run_under_the_multi_armed_bandit_repeats_itself_and_stays_feasible() {
+        let (model, berths, starts) = staggered_instance();
+        for metaheuristic in [
+            Metaheuristic::default(),
+            Metaheuristic::GreedyDescent(GreedyDescent {
+                selection: MoveSelection::BestImprovement,
+                ..GreedyDescent::default()
+            }),
+        ] {
+            let parameters = LocalSearchParameters {
+                selection: NeighborhoodSelection::MultiArmedBandit(MultiArmedBandit::default()),
+                metaheuristic,
+                limits: iterations(3000),
+                ..LocalSearchParameters::default()
+            };
+            let first = trajectory(&parameters);
+            assert!(!first.is_empty());
+            assert_eq!(first, trajectory(&parameters));
+            let outcome = Engine::new()
+                .run(
+                    &model,
+                    SolutionView::new(&berths, &starts, 0),
+                    &parameters,
+                    &mut NoMonitor,
+                )
+                .expect("the schedule should be one of the model");
+            assert!(outcome.statistics.accepted_solutions > 0);
+            assert_eq!(model.check_feasibility(outcome.solution.as_view()), Ok(()));
+        }
     }
 
     /// The outcome of a guided local search of `trigger` on the staggered instance, ended after `cycles` exhausted

@@ -30,12 +30,6 @@ impl PlacementsIter {
             anchor: 0,
         }
     }
-
-    /// Starts the placements again from the first, for the same count of vessels.
-    fn restart(&mut self) {
-        self.vessel = 0;
-        self.anchor = 0;
-    }
 }
 
 impl Iterator for PlacementsIter {
@@ -83,11 +77,6 @@ impl IntraBerthShiftOperator {
     /// Starts the neighbourhood of `graph` from its first move.
     pub(super) fn prepare(&mut self, graph: &ScheduleGraph) {
         self.placements = PlacementsIter::new(graph.num_vessels());
-    }
-
-    /// Starts the neighbourhood again from its first move, for a graph of the same vessels.
-    pub(super) fn reset(&mut self) {
-        self.placements.restart();
     }
 
     /// Makes the next move of the neighbourhood on the graph of `mutator` and answers `true`, or answers `false`
@@ -156,11 +145,6 @@ impl InterBerthShiftOperator {
         self.placements = PlacementsIter::new(graph.num_vessels());
     }
 
-    /// Starts the neighbourhood again from its first move, for a graph of the same vessels.
-    pub(super) fn reset(&mut self) {
-        self.placements.restart();
-    }
-
     /// Makes the next move of the neighbourhood on the graph of `mutator` and answers `true`, or answers `false`
     /// and changes nothing once the neighbourhood is exhausted.
     ///
@@ -223,14 +207,10 @@ mod tests {
     }
 
     #[test]
-    fn test_placements_stay_exhausted_and_restart_from_the_first() {
+    fn test_placements_stay_exhausted() {
         let mut placements = PlacementsIter::new(2);
         assert_eq!(placements.by_ref().count(), 2);
         assert_eq!(placements.next(), None);
-        placements.restart();
-        assert_eq!(
-            placements.next(),
-            Some((VesselIndex::new(0), VesselIndex::new(1)))
-        );
+        assert_eq!(placements.next(), None);
     }
 }

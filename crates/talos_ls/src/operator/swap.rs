@@ -30,12 +30,6 @@ impl VesselPairsIter {
             second: 1,
         }
     }
-
-    /// Starts the pairs again from the first, for the same count of vessels.
-    fn restart(&mut self) {
-        self.first = 0;
-        self.second = 1;
-    }
 }
 
 impl Iterator for VesselPairsIter {
@@ -77,11 +71,6 @@ impl IntraBerthSwapOperator {
     /// Starts the neighbourhood of `graph` from its first move.
     pub(super) fn prepare(&mut self, graph: &ScheduleGraph) {
         self.pairs = VesselPairsIter::new(graph.num_vessels());
-    }
-
-    /// Starts the neighbourhood again from its first move, for a graph of the same vessels.
-    pub(super) fn reset(&mut self) {
-        self.pairs.restart();
     }
 
     /// Makes the next swap of the neighbourhood on the graph of `mutator` and answers `true`, or answers `false`
@@ -147,11 +136,6 @@ impl InterBerthSwapOperator {
         self.pairs = VesselPairsIter::new(graph.num_vessels());
     }
 
-    /// Starts the neighbourhood again from its first move, for a graph of the same vessels.
-    pub(super) fn reset(&mut self) {
-        self.pairs.restart();
-    }
-
     /// Makes the next swap of the neighbourhood on the graph of `mutator` and answers `true`, or answers `false`
     /// and changes nothing once the neighbourhood is exhausted.
     ///
@@ -214,15 +198,10 @@ mod tests {
     }
 
     #[test]
-    fn test_vessel_pairs_stay_exhausted_and_restart_from_the_first() {
+    fn test_vessel_pairs_stay_exhausted() {
         let mut pairs = VesselPairsIter::new(3);
         assert_eq!(pairs.by_ref().count(), 3);
         assert_eq!(pairs.next(), None);
         assert_eq!(pairs.next(), None);
-        pairs.restart();
-        assert_eq!(
-            pairs.next(),
-            Some((VesselIndex::new(0), VesselIndex::new(1)))
-        );
     }
 }

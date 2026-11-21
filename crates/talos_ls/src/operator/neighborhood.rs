@@ -37,8 +37,8 @@ impl Neighborhood {
     ];
 }
 
-/// The source of the candidate moves of a run: it makes one move on the graph at each call, and is restarted for
-/// each scan of the neighbourhood of the accepted schedule.
+/// The source of the candidate moves of a run: it makes one move on the graph at each call, is prepared for each
+/// scan of the neighbourhood of the accepted schedule, and is told which of its moves the run takes.
 pub trait LocalSearchOperator<T>
 where
     T: SolverNumeric,
@@ -56,8 +56,21 @@ where
     /// vessels and berths of `model`.
     unsafe fn next_neighbor_unchecked(&mut self, model: &Model<T>, mutator: &mut Mutator) -> bool;
 
-    /// Starts the scan again from its first move, before the next `prepare`.
-    fn reset(&mut self);
+    /// Takes note that the move it made last was kept aside as the best candidate of the scan.
+    fn on_kept_aside(&mut self) {}
+
+    /// Takes note that `accepted`, a move of the current scan, made the accepted schedule of objective
+    /// `accepted_objective`.
+    fn on_accepted(&mut self, _accepted: AcceptedMove, _accepted_objective: T) {}
+}
+
+/// Which move of a scan the run takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AcceptedMove {
+    /// The move the operator made last.
+    Last,
+    /// The move it made earlier in the scan and that was kept aside.
+    KeptAside,
 }
 
 /// The scan of one neighbourhood, with its place in the scan.
@@ -87,16 +100,6 @@ impl NeighborhoodOperator {
             Self::InterBerthSwap(operator) => operator.prepare(graph),
             Self::IntraBerthShift(operator) => operator.prepare(graph),
             Self::InterBerthShift(operator) => operator.prepare(graph),
-        }
-    }
-
-    /// Starts the scan again from its first move, for a graph of the same vessels.
-    pub(super) fn reset(&mut self) {
-        match self {
-            Self::IntraBerthSwap(operator) => operator.reset(),
-            Self::InterBerthSwap(operator) => operator.reset(),
-            Self::IntraBerthShift(operator) => operator.reset(),
-            Self::InterBerthShift(operator) => operator.reset(),
         }
     }
 

@@ -9,10 +9,10 @@
 //!
 //! - round robin starts every scan at the first neighbourhood and keeps the order they were given in;
 //! - random selection starts every scan at a neighbourhood drawn at random and goes on in circular order;
-//! - the multi-armed bandit ranks the neighbourhoods before every scan by the UCB1 score of the improvement each
-//!   brought, and goes through them in the order of the ranking.
+//! - the multi-armed bandit ranks the neighbourhoods before every scan by the UCB1 score of the improvement their
+//!   accepted moves brought, and goes through them in the order of the ranking.
 
-use super::neighborhood::{LocalSearchOperator, Neighborhood, NeighborhoodOperator};
+use super::neighborhood::{AcceptedMove, LocalSearchOperator, Neighborhood, NeighborhoodOperator};
 use crate::schedule::{Mutator, ScheduleGraph};
 use rand::RngExt;
 use rand_core::SeedableRng;
@@ -159,14 +159,15 @@ where
         }
     }
 
-    fn reset(&mut self) {
-        for scan in &mut self.scans {
-            scan.reset();
+    fn on_kept_aside(&mut self) {
+        if let SelectionRule::MultiArmedBandit(rule) = &mut self.rule {
+            rule.on_kept_aside();
         }
-        match &mut self.rule {
-            SelectionRule::RoundRobin(rule) => rule.current = 0,
-            SelectionRule::Random(rule) => rule.current = 0,
-            SelectionRule::MultiArmedBandit(rule) => rule.active_rank = 0,
+    }
+
+    fn on_accepted(&mut self, accepted: AcceptedMove, accepted_objective: T) {
+        if let SelectionRule::MultiArmedBandit(rule) = &mut self.rule {
+            rule.on_accepted(accepted, accepted_objective.to_f64().unwrap_or(0.0));
         }
     }
 }
@@ -251,9 +252,9 @@ impl RandomSelection {
     }
 }
 
-/// The multi-armed bandit: before every scan it credits the neighbourhood that proposed the last accepted move
-/// with the improvement of the objective since the scan before, ranks the neighbourhoods by their UCB1 scores, and
-/// the scan asks them in the order of the ranking.
+/// The multi-armed bandit: it credits the neighbourhood that proposed an accepted move with the improvement of the
+/// objective over the scan, ranks the neighbourhoods by their UCB1 scores before every scan, and the scan asks them
+/// in the order of the ranking.
 #[derive(Debug, Clone)]
 struct Bandit {
     /// The memory and the exploration weight of the scores.
@@ -268,10 +269,13 @@ struct Bandit {
     largest_improvement: f64,
     /// The neighbourhoods, best score first.
     ranking: Vec<usize>,
-    /// The place in the ranking of the neighbourhood asked first for the next move.
+    /// The place in the ranking of the neighbourhood asked first for the next move, and so of the one that made
+    /// the last move.
     active_rank: usize,
-    /// The objective of the accepted schedule at the last scan, or `None` before the first.
-    last_objective: Option<f64>,
+    /// The neighbourhood that made the move kept aside in the current scan, or `None` while none is.
+    kept_aside: Option<usize>,
+    /// The objective of the accepted schedule when the current scan started, zero before the first scan.
+    scan_objective: f64,
 }
 
 impl Bandit {
@@ -285,21 +289,42 @@ impl Bandit {
             largest_improvement: 1.0,
             ranking: (0..count).collect(),
             active_rank: 0,
-            last_objective: None,
+            kept_aside: None,
+            scan_objective: 0.0,
         }
     }
 
-    /// Credits the neighbourhood at the active rank with the improvement from the last scan to
-    /// `accepted_objective`, ranks the neighbourhoods anew and starts at the first rank.
+    /// Starts a scan from the accepted schedule of `accepted_objective`: ranks the neighbourhoods anew and starts
+    /// at the first rank.
     fn prepare(&mut self, accepted_objective: f64) {
-        if let Some(last_objective) = self.last_objective {
-            let improvement = (last_objective - accepted_objective).max(0.0);
-            let credited = self.ranking[self.active_rank];
-            self.learn(credited, improvement);
-        }
-        self.last_objective = Some(accepted_objective);
+        self.scan_objective = accepted_objective;
+        self.kept_aside = None;
         self.rank();
         self.active_rank = 0;
+    }
+
+    /// Takes note that the neighbourhood at the active rank made the move kept aside.
+    fn on_kept_aside(&mut self) {
+        self.kept_aside = Some(self.ranking[self.active_rank]);
+    }
+
+    /// Credits the neighbourhood that made `accepted` with the improvement from the objective at the start of the
+    /// scan to `accepted_objective`, none where it is no lower.
+    fn on_accepted(&mut self, accepted: AcceptedMove, accepted_objective: f64) {
+        let credited = match accepted {
+            AcceptedMove::Last => Some(self.ranking[self.active_rank]),
+            AcceptedMove::KeptAside => self.kept_aside,
+        };
+        debug_assert!(
+            credited.is_some(),
+            "called `Bandit::on_accepted` for a kept-aside move with none kept aside"
+        );
+        if let Some(neighborhood) = credited {
+            self.learn(
+                neighborhood,
+                (self.scan_objective - accepted_objective).max(0.0),
+            );
+        }
     }
 
     /// Moves the average of `neighborhood` by the memory's fraction toward `improvement`, and raises the largest
@@ -425,8 +450,10 @@ mod tests {
         assert_eq!(bandit.ranking, [0, 1]);
     }
 
+    // A scan exhausted without an accepted move improved nothing, and no neighbourhood proposed a move that was
+    // taken: the next scan must leave every average as it was.
     #[test]
-    fn test_bandit_credits_the_improvement_to_the_active_rank() {
+    fn test_bandit_credits_nothing_for_a_scan_without_an_accepted_move() {
         let mut bandit = Bandit::new(
             2,
             MultiArmedBandit {
@@ -435,19 +462,53 @@ mod tests {
             },
         );
         bandit.prepare(100.0);
-        assert_eq!(bandit.averages, [0.0, 0.0]);
+        bandit.averages = vec![4.0, 4.0];
+        bandit.prepare(100.0);
+        assert_eq!(bandit.averages, [4.0, 4.0]);
+    }
+
+    #[test]
+    fn test_bandit_credits_the_improvement_of_the_scan_to_the_neighborhood_of_the_accepted_move() {
+        let mut bandit = Bandit::new(
+            2,
+            MultiArmedBandit {
+                memory: 0.5,
+                exploration: 1.0,
+            },
+        );
+        bandit.prepare(100.0);
         bandit.active_rank = 1;
         let credited = bandit.ranking[1];
-        bandit.prepare(90.0);
+        bandit.on_accepted(AcceptedMove::Last, 90.0);
         assert_eq!(bandit.averages[credited], 5.0);
+        assert_eq!(bandit.averages[bandit.ranking[0]], 0.0);
         assert_eq!(bandit.largest_improvement, 10.0);
         // A worse objective is no improvement, and only decays the average.
+        bandit.prepare(90.0);
         bandit.active_rank = bandit
             .ranking
             .iter()
             .position(|&n| n == credited)
             .expect("ranked");
-        bandit.prepare(95.0);
+        bandit.on_accepted(AcceptedMove::Last, 95.0);
         assert_eq!(bandit.averages[credited], 2.5);
+    }
+
+    #[test]
+    fn test_bandit_credits_a_kept_aside_move_to_the_neighborhood_that_made_it() {
+        let mut bandit = Bandit::new(
+            2,
+            MultiArmedBandit {
+                memory: 0.5,
+                exploration: 1.0,
+            },
+        );
+        bandit.prepare(100.0);
+        let maker = bandit.ranking[0];
+        bandit.on_kept_aside();
+        bandit.active_rank = 1;
+        bandit.on_accepted(AcceptedMove::KeptAside, 80.0);
+        assert_eq!(bandit.averages[maker], 10.0);
+        assert_eq!(bandit.averages[bandit.ranking[1]], 0.0);
     }
 }

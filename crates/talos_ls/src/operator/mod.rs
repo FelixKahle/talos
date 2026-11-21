@@ -18,7 +18,7 @@ mod neighborhood;
 mod composite;
 
 pub(super) use composite::CompoundOperator;
-pub(super) use neighborhood::LocalSearchOperator;
+pub(super) use neighborhood::{AcceptedMove, LocalSearchOperator};
 
 pub use composite::{MultiArmedBandit, NeighborhoodSelection};
 pub use neighborhood::Neighborhood;
