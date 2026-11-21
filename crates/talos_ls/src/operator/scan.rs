@@ -133,52 +133,52 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::reference::{self, WINDOWS};
+    use super::super::neighborhoods_on_lists::{self, WINDOWS};
     use super::super::shift::InterBerthShifts;
     use super::*;
 
     // A scan prepared anew starts again from its first move, whatever its cursor had reached.
     #[test]
     fn test_prepare_restarts_the_scan_from_its_first_move() {
-        let model = reference::model(&WINDOWS);
+        let model = neighborhoods_on_lists::model(&WINDOWS);
         let mut scan = VesselScan::<InterBerthShifts>::new();
-        scan.prepare(&reference::start_graph());
-        let mut mutator = Mutator::new(reference::start_graph());
+        scan.prepare(&neighborhoods_on_lists::start_graph());
+        let mut mutator = Mutator::new(neighborhoods_on_lists::start_graph());
         let mut orders = Vec::new();
         for _ in 0..8 {
             // SAFETY: the mutator's graph, rolled back after each move, has the counts the scan was prepared for,
             // which are the model's.
             assert!(unsafe { scan.next_neighbor_unchecked(&model, &mut mutator) });
-            orders.push(reference::order_of(mutator.graph()));
+            orders.push(neighborhoods_on_lists::order_of(mutator.graph()));
             mutator.rollback();
         }
-        scan.prepare(&reference::start_graph());
+        scan.prepare(&neighborhoods_on_lists::start_graph());
         // SAFETY: the mutator's graph, rolled back to the start, has the counts the scan was prepared for anew,
         // which are the model's.
         assert!(unsafe { scan.next_neighbor_unchecked(&model, &mut mutator) });
-        assert_eq!(reference::order_of(mutator.graph()), orders[0]);
+        assert_eq!(neighborhoods_on_lists::order_of(mutator.graph()), orders[0]);
         assert_ne!(orders[0], orders[7]);
     }
 
     #[test]
     fn test_a_new_scan_proposes_nothing_until_it_is_prepared() {
-        let model = reference::model(&WINDOWS);
-        let mut mutator = Mutator::new(reference::start_graph());
+        let model = neighborhoods_on_lists::model(&WINDOWS);
+        let mut mutator = Mutator::new(neighborhoods_on_lists::start_graph());
         // SAFETY: a scan that was never prepared counts no vessel, so it reads nothing of the graph.
         let proposed = unsafe {
             VesselScan::<InterBerthShifts>::new().next_neighbor_unchecked(&model, &mut mutator)
         };
         assert!(!proposed);
-        assert_eq!(mutator.graph(), &reference::start_graph());
+        assert_eq!(mutator.graph(), &neighborhoods_on_lists::start_graph());
     }
 
     // An exhausted scan stays exhausted and leaves the graph as it was.
     #[test]
     fn test_an_exhausted_scan_proposes_nothing_more() {
-        let model = reference::model(&WINDOWS);
+        let model = neighborhoods_on_lists::model(&WINDOWS);
         let mut scan = VesselScan::<InterBerthShifts>::new();
-        scan.prepare(&reference::start_graph());
-        let mut mutator = Mutator::new(reference::start_graph());
+        scan.prepare(&neighborhoods_on_lists::start_graph());
+        let mut mutator = Mutator::new(neighborhoods_on_lists::start_graph());
         let mut moves = 0;
         // SAFETY: the mutator's graph, rolled back after each move, has the counts the scan was prepared for,
         // which are the model's.
@@ -191,6 +191,6 @@ mod tests {
             // SAFETY: as in the loop, the graph stands at the start, of the counts prepared for.
             assert!(!unsafe { scan.next_neighbor_unchecked(&model, &mut mutator) });
         }
-        assert_eq!(mutator.graph(), &reference::start_graph());
+        assert_eq!(mutator.graph(), &neighborhoods_on_lists::start_graph());
     }
 }

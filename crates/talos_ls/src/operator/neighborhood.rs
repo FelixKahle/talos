@@ -159,7 +159,7 @@ impl NeighborhoodOperator {
 
 #[cfg(test)]
 mod tests {
-    use super::super::reference::{self, OVERLAPPING_WINDOWS, Order, WINDOWS};
+    use super::super::neighborhoods_on_lists::{self, OVERLAPPING_WINDOWS, Order, WINDOWS};
     use super::*;
     use std::collections::BTreeMap;
 
@@ -167,7 +167,7 @@ mod tests {
     /// three that does not hold the vessels in the order of their indices.
     fn starts() -> [Order; 3] {
         [
-            reference::start(),
+            neighborhoods_on_lists::start(),
             vec![vec![0, 1], vec![2, 3, 4], vec![6], vec![5], vec![]],
             vec![vec![2, 0, 6], vec![1, 4], vec![], vec![3, 5], vec![]],
         ]
@@ -176,7 +176,7 @@ mod tests {
     /// The order each move of a round of the four neighbourhoods on `start` makes, with the neighbourhoods that
     /// proposed it.
     fn proposed_by_round(model: &Model<i64>, start: &Order) -> BTreeMap<Order, Vec<Neighborhood>> {
-        let mut mutator = Mutator::new(reference::graph_of(start));
+        let mut mutator = Mutator::new(neighborhoods_on_lists::graph_of(start));
         let mut proposed: BTreeMap<Order, Vec<Neighborhood>> = BTreeMap::new();
         for neighborhood in Neighborhood::ALL {
             let mut operator = NeighborhoodOperator::new(neighborhood);
@@ -190,7 +190,7 @@ mod tests {
                     exhausted = true;
                     break;
                 }
-                let order = reference::order_of(mutator.graph());
+                let order = neighborhoods_on_lists::order_of(mutator.graph());
                 proposed.entry(order).or_default().push(neighborhood);
                 mutator.rollback();
             }
@@ -215,10 +215,10 @@ mod tests {
     // neighbour out.
     #[test]
     fn test_a_round_of_the_neighborhoods_proposes_each_feasible_neighbor_once() {
-        let model = reference::model(&OVERLAPPING_WINDOWS);
+        let model = neighborhoods_on_lists::model(&OVERLAPPING_WINDOWS);
         for start in starts() {
             assert!(
-                reference::is_feasible(&start, &model),
+                neighborhoods_on_lists::is_feasible(&start, &model),
                 "the start {start:?} should be feasible"
             );
             let proposed = proposed_by_round(&model, &start);
@@ -228,9 +228,10 @@ mod tests {
                 duplicates(&proposed)
             );
             let orders: Vec<Order> = proposed.into_keys().collect();
-            let expected = reference::feasible(reference::neighbors(&start), &model);
+            let expected =
+                neighborhoods_on_lists::feasible(neighborhoods_on_lists::neighbors(&start), &model);
             assert_eq!(orders, expected, "from {start:?}");
-            if start == reference::start() {
+            if start == neighborhoods_on_lists::start() {
                 // Ten swaps and twelve shifts on B0, six swaps and forty-two shifts across berths.
                 assert_eq!(orders.len(), 10 + 6 + 12 + 42);
             }
@@ -242,10 +243,10 @@ mod tests {
     // the neighbour is infeasible. A move after a vessel whose window lies wholly before its own may be skipped.
     #[test]
     fn test_a_round_under_disjoint_windows_proposes_every_feasible_swap_and_move_to_a_head() {
-        let model = reference::model(&WINDOWS);
+        let model = neighborhoods_on_lists::model(&WINDOWS);
         for start in starts() {
             assert!(
-                reference::is_feasible(&start, &model),
+                neighborhoods_on_lists::is_feasible(&start, &model),
                 "the start {start:?} should be feasible"
             );
             let proposed = proposed_by_round(&model, &start);
@@ -254,7 +255,7 @@ mod tests {
                 "proposed more than once from {start:?}: {:?}",
                 duplicates(&proposed)
             );
-            let neighbors = reference::neighbors(&start);
+            let neighbors = neighborhoods_on_lists::neighbors(&start);
             let strays: Vec<&Order> = proposed
                 .keys()
                 .filter(|order| !neighbors.contains(order))
@@ -263,11 +264,13 @@ mod tests {
                 strays.is_empty(),
                 "proposed from {start:?} orders that are no neighbours: {strays:?}"
             );
-            let missed: Vec<Order> =
-                reference::feasible(reference::swap_or_head_neighbors(&start), &model)
-                    .into_iter()
-                    .filter(|order| !proposed.contains_key(order))
-                    .collect();
+            let missed: Vec<Order> = neighborhoods_on_lists::feasible(
+                neighborhoods_on_lists::swap_or_head_neighbors(&start),
+                &model,
+            )
+            .into_iter()
+            .filter(|order| !proposed.contains_key(order))
+            .collect();
             assert!(
                 missed.is_empty(),
                 "missed from {start:?} feasible neighbours: {missed:?}"

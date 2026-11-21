@@ -298,7 +298,7 @@ impl VesselMoves for InterBerthShifts {
 
 #[cfg(test)]
 mod tests {
-    use super::super::reference::{self, OVERLAPPING_WINDOWS, WINDOWS};
+    use super::super::neighborhoods_on_lists::{self, OVERLAPPING_WINDOWS, WINDOWS};
     use super::*;
     use talos_model::BerthIndex;
 
@@ -308,7 +308,7 @@ mod tests {
 
     /// The near places of `index` in the start of the reference.
     fn near_places_of(index: usize) -> NearPlaces {
-        let graph = reference::start_graph();
+        let graph = neighborhoods_on_lists::start_graph();
         // SAFETY: every vessel of the reference is the graph's.
         unsafe { NearPlaces::of_unchecked(vessel(index), &graph) }
     }
@@ -351,11 +351,18 @@ mod tests {
     // after V4; V3 to the head and after V0; V4 after V1. The berths of one vessel offer none.
     #[test]
     fn test_the_intra_berth_scan_proposes_every_far_insertion_on_the_own_berth_once_in_order() {
-        let moves = reference::moves_of::<IntraBerthShifts>(&reference::model(&WINDOWS));
-        assert_eq!(moves, reference::intra_berth_shifts(&WINDOWS));
+        let moves = neighborhoods_on_lists::moves_of::<IntraBerthShifts>(
+            &neighborhoods_on_lists::model(&WINDOWS),
+        );
+        assert_eq!(moves, neighborhoods_on_lists::intra_berth_shifts(&WINDOWS));
         assert_eq!(moves.len(), 9);
-        let all = reference::moves_of::<IntraBerthShifts>(&reference::model(&OVERLAPPING_WINDOWS));
-        assert_eq!(all, reference::intra_berth_shifts(&OVERLAPPING_WINDOWS));
+        let all = neighborhoods_on_lists::moves_of::<IntraBerthShifts>(
+            &neighborhoods_on_lists::model(&OVERLAPPING_WINDOWS),
+        );
+        assert_eq!(
+            all,
+            neighborhoods_on_lists::intra_berth_shifts(&OVERLAPPING_WINDOWS)
+        );
         // A berth of five vessels offers (5 - 1) * (5 - 2) such places in all.
         assert_eq!(all.len(), 12);
     }
@@ -365,8 +372,10 @@ mod tests {
     // for V5, which may not use B0, and nine for V6, which may not use B4.
     #[test]
     fn test_the_inter_berth_scan_proposes_every_insertion_on_another_allowed_berth_once_in_order() {
-        let moves = reference::moves_of::<InterBerthShifts>(&reference::model(&WINDOWS));
-        assert_eq!(moves, reference::inter_berth_shifts());
+        let moves = neighborhoods_on_lists::moves_of::<InterBerthShifts>(
+            &neighborhoods_on_lists::model(&WINDOWS),
+        );
+        assert_eq!(moves, neighborhoods_on_lists::inter_berth_shifts());
         assert_eq!(moves.len(), 4 * 6 + 5 + 4 + 9);
         assert!(
             moves.contains(&vec![vec![1, 2, 3, 4], vec![5], vec![0], vec![6], vec![]]),

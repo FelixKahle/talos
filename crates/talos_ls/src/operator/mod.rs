@@ -15,7 +15,7 @@ mod filter;
 mod scan;
 
 #[cfg(test)]
-mod reference;
+mod neighborhoods_on_lists;
 
 mod shift;
 mod swap;

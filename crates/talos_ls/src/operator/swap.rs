@@ -154,7 +154,7 @@ impl VesselMoves for InterBerthSwaps {
 
 #[cfg(test)]
 mod tests {
-    use super::super::reference::{self, OVERLAPPING_WINDOWS, WINDOWS};
+    use super::super::neighborhoods_on_lists::{self, OVERLAPPING_WINDOWS, WINDOWS};
     use super::*;
 
     // Each pair on one berth once, from the vessel of lower index, the partners in increasing order; refused only
@@ -162,11 +162,18 @@ mod tests {
     // vessel.
     #[test]
     fn test_the_intra_berth_scan_proposes_every_swap_on_one_berth_once_in_order() {
-        let moves = reference::moves_of::<IntraBerthSwaps>(&reference::model(&WINDOWS));
-        assert_eq!(moves, reference::intra_berth_swaps(&WINDOWS));
+        let moves = neighborhoods_on_lists::moves_of::<IntraBerthSwaps>(
+            &neighborhoods_on_lists::model(&WINDOWS),
+        );
+        assert_eq!(moves, neighborhoods_on_lists::intra_berth_swaps(&WINDOWS));
         assert_eq!(moves.len(), 9);
-        let all = reference::moves_of::<IntraBerthSwaps>(&reference::model(&OVERLAPPING_WINDOWS));
-        assert_eq!(all, reference::intra_berth_swaps(&OVERLAPPING_WINDOWS));
+        let all = neighborhoods_on_lists::moves_of::<IntraBerthSwaps>(
+            &neighborhoods_on_lists::model(&OVERLAPPING_WINDOWS),
+        );
+        assert_eq!(
+            all,
+            neighborhoods_on_lists::intra_berth_swaps(&OVERLAPPING_WINDOWS)
+        );
         assert_eq!(all.len(), 10);
     }
 
@@ -175,8 +182,10 @@ mod tests {
     // partner.
     #[test]
     fn test_the_inter_berth_scan_proposes_every_swap_across_berths_once_in_order() {
-        let moves = reference::moves_of::<InterBerthSwaps>(&reference::model(&WINDOWS));
-        assert_eq!(moves, reference::inter_berth_swaps());
+        let moves = neighborhoods_on_lists::moves_of::<InterBerthSwaps>(
+            &neighborhoods_on_lists::model(&WINDOWS),
+        );
+        assert_eq!(moves, neighborhoods_on_lists::inter_berth_swaps());
         assert_eq!(moves.len(), 5 + 1);
     }
 }
