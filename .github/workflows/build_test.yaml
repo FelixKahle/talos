@@ -1,95 +1,67 @@
-# Copyright (c) 2026 Felix Kahle.
-#
-# Permission is hereby granted, free of charge, to any person obtaining
-# a copy of this software and associated documentation files (the
-# "Software"), to deal in the Software without restriction, including
-# without limitation the rights to use, copy, modify, merge, publish,
-# distribute, sublicense, and/or sell copies of the Software, and to
-# permit persons to whom the Software is furnished to do so, subject to
-# the following conditions:
-#
-# The above copyright notice and this permission notice shall be
-# included in all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-# LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-# WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+# Copyright 2026 Felix Kahle
+# SPDX-License-Identifier: MIT OR Apache-2.0
 
 name: Talos Build and Test
 permissions:
   contents: read
 
-on: [push]
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
 
 jobs:
-  build_test:
+  lint:
+    name: Format, clippy, docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Reads rust-toolchain.toml: the latest stable with rustfmt and clippy.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo doc --locked --workspace --no-deps
+      - run: cargo bench --locked --workspace --no-run
+
+  test:
     name: Test (${{ matrix.profile }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         profile: [debug, release]
-
     steps:
       - uses: actions/checkout@v5
-      - name: Setup Rust Toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: rustfmt, clippy
           cache: false
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Set Cargo Flags
-        id: flags
-        shell: bash
-        run: |
-          if [ "${{ matrix.profile }}" == "release" ]; then
-            echo "arg=--release" >> $GITHUB_OUTPUT
-          else
-            echo "arg=" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Check Formatting
-        if: matrix.profile == 'debug'
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        if: matrix.profile == 'debug'
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Build (${{ matrix.profile }})
-        run: cargo build --verbose ${{ steps.flags.outputs.arg }} --workspace
-
-      - name: Test (${{ matrix.profile }})
-        run: cargo test --verbose ${{ steps.flags.outputs.arg }} --workspace
-
-      - name: Setup Python
-        if: matrix.profile == 'release'
-        uses: actions/setup-python@v5
+      - uses: Swatinem/rust-cache@v2
         with:
-          python-version: '3.12'
+          key: ${{ matrix.profile }}
+      - run: cargo test --locked --workspace ${{ matrix.profile == 'release' && '--release' || '' }}
 
-      - name: Install Python tooling
-        if: matrix.profile == 'release'
-        run: |
-          python -m pip install --upgrade pip
-          pip install maturin pytest pytest-cov
-
-      - name: Build and install pytalos
-        if: matrix.profile == 'release'
-        run: |
-          maturin build --release
-          pip install target/wheels/pytalos-*.whl
-
-      - name: Run pytest
-        if: matrix.profile == 'release'
-        run: pytest
+  python:
+    name: Python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12
+      - run: uv pip install maturin pytest
+      - run: uv run --no-project maturin develop --release
+      - run: uv run --no-project pytest
