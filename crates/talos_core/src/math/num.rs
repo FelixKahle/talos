@@ -5,7 +5,7 @@
 
 use std::hash::Hash;
 
-use num_traits::{PrimInt, Saturating, SaturatingAdd, SaturatingMul, SaturatingSub, Signed, Zero};
+use num_traits::{PrimInt, SaturatingAdd, SaturatingMul, SaturatingSub, Signed};
 
 /// A signed integer type in which a problem states its times, durations and costs.
 ///
@@ -18,9 +18,7 @@ pub trait SolverNumeric:
     + Sync
     + PrimInt
     + Signed
-    + Zero
     + Hash
-    + Saturating
     + SaturatingMul
     + SaturatingAdd
     + SaturatingSub
