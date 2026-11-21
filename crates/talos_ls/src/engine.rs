@@ -690,6 +690,7 @@ mod tests {
         monitor::NoMonitor,
         operator::{MultiArmedBandit, Neighborhood, NeighborhoodSelection},
     };
+    use std::time::Duration;
     use talos_core::ClosedOpenInterval;
     use talos_model::{BerthIndex, VesselIndex};
 
@@ -1359,6 +1360,113 @@ mod tests {
         );
         assert!(first.statistics.accepted_solutions > 0);
         assert!(later.statistics.accepted_solutions > first.statistics.accepted_solutions);
+    }
+
+    // Under a trigger that counts steps without a new best, an exhausted scan does not penalize, but each of its
+    // candidates is such a step: the count fires within a few scans, and the search leaves its local optimum.
+    #[test]
+    fn test_a_guided_search_triggered_by_non_improving_steps_leaves_its_first_local_optimum() {
+        let trigger = PenalizationTrigger::AfterNonImprovements(
+            std::num::NonZeroU64::new(200).expect("two hundred is not zero"),
+        );
+        let first = guided_search_on_staggered_instance(trigger, 1);
+        let later = guided_search_on_staggered_instance(trigger, 20);
+        assert_eq!(
+            later.termination_reason,
+            TerminationReason::CycleLimitReached
+        );
+        assert!(later.statistics.accepted_solutions > first.statistics.accepted_solutions);
+    }
+
+    /// The outcome of a run of `parameters` from the initial schedule of the staggered instance on `engine`.
+    fn run_staggered(
+        engine: &mut Engine<i64>,
+        parameters: &LocalSearchParameters,
+    ) -> LocalSearchOutcome<i64> {
+        let (model, berths, starts) = staggered_instance();
+        engine
+            .run(
+                &model,
+                SolutionView::new(&berths, &starts, 0),
+                parameters,
+                &mut NoMonitor,
+            )
+            .expect("the schedule should be one of the model")
+    }
+
+    // An engine keeps the memory of its states and records from one run to the next, and nothing else: a run on a
+    // reused engine, after runs on other models, answers what the same run on a fresh engine answers.
+    #[test]
+    fn test_a_reused_engine_answers_as_a_fresh_one() {
+        let parameters = LocalSearchParameters {
+            selection: NeighborhoodSelection::Random,
+            limits: iterations(5000),
+            seed: 3,
+            ..LocalSearchParameters::default()
+        };
+        let fresh = run_staggered(&mut Engine::new(), &parameters);
+        let mut reused = Engine::new();
+        let _ = run_staggered(&mut reused, &parameters);
+        let other = uniform_model(30, 4);
+        let berths: Vec<BerthIndex> = (0..30).map(|v| BerthIndex::new(v % 4)).collect();
+        let starts: Vec<i64> = (0..30).map(|v| (v / 4) * 10).collect();
+        let _ = reused
+            .run(
+                &other,
+                SolutionView::new(&berths, &starts, 0),
+                &parameters,
+                &mut NoMonitor,
+            )
+            .expect("the schedule should be one of the model");
+        assert_eq!(run_staggered(&mut reused, &parameters), fresh);
+    }
+
+    #[test]
+    fn test_a_deadline_already_past_ends_the_run_before_its_first_candidate() {
+        for (limits, reason) in [
+            (
+                SearchLimits {
+                    time: Some(Duration::ZERO),
+                    ..SearchLimits::default()
+                },
+                TerminationReason::TimeLimitReached,
+            ),
+            (
+                SearchLimits {
+                    non_improving_time: Some(Duration::ZERO),
+                    ..SearchLimits::default()
+                },
+                TerminationReason::MaxNonImprovingTime,
+            ),
+        ] {
+            let parameters = LocalSearchParameters {
+                limits,
+                ..LocalSearchParameters::default()
+            };
+            let outcome = run_staggered(&mut Engine::new(), &parameters);
+            assert_eq!(outcome.termination_reason, reason);
+            assert_eq!(outcome.statistics.iterations, 0);
+        }
+    }
+
+    // A deadline is measured at every checkpoint and every exhausted scan, so a run of no other end stops soon
+    // after it; the budget of candidates only bounds the test should the deadline not be measured.
+    #[test]
+    fn test_a_deadline_ends_a_run_that_nothing_else_ends() {
+        let parameters = LocalSearchParameters {
+            limits: SearchLimits {
+                time: Some(Duration::from_millis(20)),
+                iterations: Some(200_000_000),
+                ..SearchLimits::default()
+            },
+            ..LocalSearchParameters::default()
+        };
+        let outcome = run_staggered(&mut Engine::new(), &parameters);
+        assert_eq!(
+            outcome.termination_reason,
+            TerminationReason::TimeLimitReached
+        );
+        assert!(outcome.statistics.iterations > 0);
     }
 
     #[test]
