@@ -73,6 +73,8 @@ impl fmt::Display for NodeOutside {
 enum RingViolation {
     /// The two columns have different lengths.
     LengthsDiffer { prev: usize, next: usize },
+    /// The columns have more nodes than a [`Node`] can name.
+    TooManyNodes { len: usize },
     /// A link names a node outside the columns.
     LinkOutside { node: Node, link: Node, len: usize },
     /// The predecessor of a node's successor is not the node.
@@ -89,6 +91,7 @@ impl fmt::Display for RingViolation {
             Self::LengthsDiffer { prev, next } => {
                 write!(f, "{prev} predecessors and {next} successors")
             }
+            Self::TooManyNodes { len } => write!(f, "{len} nodes, more than a node id can name"),
             Self::LinkOutside { node, link, len } => {
                 write!(
                     f,
@@ -107,6 +110,12 @@ impl fmt::Display for RingViolation {
     }
 }
 
+/// Whether every node of an arena of `len` nodes has a [`Node`] that names it.
+fn nameable(len: usize) -> bool {
+    len.checked_sub(1)
+        .is_none_or(|last| Node::try_new(last).is_some())
+}
+
 /// The first way in which `prev` and `next` fail to describe closed rings, or `None` if they describe them.
 fn ring_violation(prev: &[Node], next: &[Node]) -> Option<RingViolation> {
     let len = prev.len();
@@ -115,6 +124,9 @@ fn ring_violation(prev: &[Node], next: &[Node]) -> Option<RingViolation> {
             prev: len,
             next: next.len(),
         });
+    }
+    if !nameable(len) {
+        return Some(RingViolation::TooManyNodes { len });
     }
     for (node, (&prev_link, &next_link)) in (0..len).map(Node::new).zip(prev.iter().zip(next)) {
         if let Some(link) = [prev_link, next_link]
@@ -178,9 +190,16 @@ impl RingArena {
     ///
     /// # Panics
     ///
-    /// Panics if a node of the arena would lie beyond `u32::MAX`, as [`Node::new`] does.
+    /// Panics if a node of the arena would lie beyond what a [`Node`] can name; the arena is then left
+    /// unchanged.
     #[track_caller]
     pub fn reset_to_self_loops(&mut self, len: usize) {
+        // Checked before anything is cleared: a panic midway would leave columns of different lengths, which a
+        // caller that catches the panic could then read out of bounds through a safe step.
+        assert!(
+            nameable(len),
+            "called `RingArena::reset_to_self_loops` with {len} nodes, more than a node id can name"
+        );
         self.prev.clear();
         self.next.clear();
         self.prev.extend((0..len).map(Node::new));
@@ -2269,6 +2288,29 @@ mod tests {
             None
         );
         assert_eq!(ring_violation(&[], &[]), None);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn test_nameable_holds_exactly_up_to_one_node_per_u32() {
+        let one_per_u32 = usize::try_from(u32::MAX).unwrap() + 1;
+        assert!(nameable(0));
+        assert!(nameable(1));
+        assert!(nameable(one_per_u32));
+        assert!(!nameable(one_per_u32 + 1));
+        assert!(!nameable(usize::MAX));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn test_reset_to_self_loops_refuses_too_many_nodes_before_changing_anything() {
+        let mut arena = complex_fixture();
+        let too_many = usize::try_from(u32::MAX).unwrap() + 2;
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            arena.reset_to_self_loops(too_many);
+        }));
+        assert!(refused.is_err());
+        assert_eq!(arena, complex_fixture());
     }
 
     #[test]
