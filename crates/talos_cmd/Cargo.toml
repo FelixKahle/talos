@@ -14,6 +14,8 @@ talos_model = { workspace = true }
 talos_ls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The pool the members of a portfolio run on, built here from the count of threads asked for.
+rayon = { workspace = true }
 
 # This crate is not yet brought in line with the workspace lints; it opts in with `workspace = true` once it is.
 [lints]
