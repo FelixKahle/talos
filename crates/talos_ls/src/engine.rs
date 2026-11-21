@@ -3,14 +3,14 @@
 
 use crate::{
     decoding::{ScheduleState, decode_full_unchecked, decode_unchecked},
-    exec::{SearchCommand, TerminationReason},
-    meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
+    metaheuristic::acceptance::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
     monitor::lsmonitor::LocalSearchMonitor,
-    operator::lsoperator::LocalSearchOperator,
+    operator::neighborhood::LocalSearchOperator,
     outcome::LocalSearchOutcome,
-    params::{MutableLocalSearchParams, check_initial_solution},
+    parameters::{MutableLocalSearchParams, check_initial_solution},
     schedule::{Mutator, ScheduleGraph, ScheduleGraphDiff},
-    stats::LocalSearchStatistics,
+    statistics::LocalSearchStatistics,
+    termination::{SearchCommand, TerminationReason},
 };
 use std::time::Instant;
 use talos_core::SolverNumeric;
@@ -750,14 +750,14 @@ impl<T> Engine<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::{SearchCommand, TerminationReason};
-    use crate::meta::metaheuristic::{
+    use crate::metaheuristic::acceptance::{
         AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome,
     };
     use crate::monitor::lsmonitor::LocalSearchMonitor;
-    use crate::operator::lsoperator::LocalSearchOperator;
-    use crate::params::MutableLocalSearchParams;
-    use crate::stats::LocalSearchStatistics;
+    use crate::operator::neighborhood::LocalSearchOperator;
+    use crate::parameters::MutableLocalSearchParams;
+    use crate::statistics::LocalSearchStatistics;
+    use crate::termination::{SearchCommand, TerminationReason};
     use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
     use talos_core::ClosedOpenInterval;
@@ -1851,7 +1851,9 @@ mod tests {
     // finds nothing to commit, and the search must end there instead of scanning again until a budget runs out.
     #[test]
     fn test_best_improvement_descent_ends_at_a_local_optimum() {
-        use crate::meta::{gd::GreedyDescent, selec::SelectionStrategy};
+        use crate::metaheuristic::{
+            greedy_descent::GreedyDescent, move_selection::SelectionStrategy,
+        };
         use crate::monitor::iteration::IterationLimitMonitor;
         let model = build_test_model();
         let berths = [BerthIndex::new(0), BerthIndex::new(0)];
@@ -1867,7 +1869,10 @@ mod tests {
             objective_value: 5,
         };
         let outcome = Engine::<i64>::new(2, 2).run(params, mock_evaluator, |_| {});
-        assert_eq!(outcome.termination_reason(), TerminationReason::NeighborhoodExhausted);
+        assert_eq!(
+            outcome.termination_reason(),
+            TerminationReason::NeighborhoodExhausted
+        );
         assert_eq!(outcome.stats().iterations, 1);
         assert_eq!(outcome.solution().objective_value(), 5);
     }
@@ -1877,7 +1882,7 @@ mod tests {
     // until a budget runs out, and a budget counted in candidates would never run out.
     #[test]
     fn test_engine_ends_at_a_scan_without_candidates() {
-        use crate::meta::gls::GuidedLocalSearch;
+        use crate::metaheuristic::guided_local_search::GuidedLocalSearch;
         use crate::monitor::cycle::CycleLimitMonitor;
         let model = build_test_model();
         let berths = [BerthIndex::new(0), BerthIndex::new(0)];
@@ -1893,7 +1898,10 @@ mod tests {
             objective_value: 5,
         };
         let outcome = Engine::<i64>::new(2, 2).run(params, mock_evaluator, |_| {});
-        assert_eq!(outcome.termination_reason(), TerminationReason::NeighborhoodExhausted);
+        assert_eq!(
+            outcome.termination_reason(),
+            TerminationReason::NeighborhoodExhausted
+        );
         assert_eq!(outcome.stats().cycles, 1);
     }
 

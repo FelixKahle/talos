@@ -10,9 +10,9 @@
 //! the threshold is met.
 
 use crate::{
-    exec::{SearchCommand, TerminationReason},
     monitor::lsmonitor::LocalSearchMonitor,
-    stats::LocalSearchStatistics,
+    statistics::LocalSearchStatistics,
+    termination::{SearchCommand, TerminationReason},
 };
 use talos_core::SolverNumeric;
 use talos_model::{Model, SolutionView};

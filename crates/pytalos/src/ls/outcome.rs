@@ -3,7 +3,7 @@
 
 use crate::solution::PySolution;
 use pyo3::prelude::*;
-use talos_ls::exec::TerminationReason;
+use talos_ls::termination::TerminationReason;
 
 /// The termination reason for a local search run.
 #[pyclass(name = "TerminationReason", eq, eq_int, skip_from_py_object)]

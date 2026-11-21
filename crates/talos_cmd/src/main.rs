@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use talos_ls::engine::Engine;
-use talos_ls::meta::gls::{
+use talos_ls::metaheuristic::guided_local_search::{
     DynamicLambda, GuidedLocalSearch, PenalizationTrigger, heuristic_lambda,
 };
 use talos_ls::monitor::composite::CompositeLocalSearchMonitor;
@@ -18,10 +18,10 @@ use talos_ls::operator::filter::{
     inter_berth_shift_filter_unchecked, inter_berth_swap_filter_unchecked,
     intra_berth_shift_filter_unchecked, intra_berth_swap_filter_unchecked,
 };
-use talos_ls::operator::lsoperator::LocalSearchOperator;
+use talos_ls::operator::neighborhood::LocalSearchOperator;
 use talos_ls::operator::shift::{InterBerthShiftOperator, IntraBerthShiftOperator};
 use talos_ls::operator::swap::{InterBerthSwapOperator, IntraBerthSwapOperator};
-use talos_ls::params::MutableLocalSearchParams;
+use talos_ls::parameters::MutableLocalSearchParams;
 use talos_model::{BerthIndex, Model, VesselIndex};
 
 mod edf;

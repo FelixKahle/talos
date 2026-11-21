@@ -19,9 +19,9 @@
 //! the termination command uses the zero-cost `TerminationReason::TimeLimitReached` variant.
 
 use crate::{
-    exec::{SearchCommand, TerminationReason},
     monitor::lsmonitor::LocalSearchMonitor,
-    stats::LocalSearchStatistics,
+    statistics::LocalSearchStatistics,
+    termination::{SearchCommand, TerminationReason},
 };
 use std::time::{Duration, Instant};
 use talos_core::SolverNumeric;

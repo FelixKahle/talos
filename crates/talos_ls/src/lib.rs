@@ -3,13 +3,13 @@
 
 pub mod decoding;
 pub mod engine;
-pub mod exec;
-pub mod meta;
+pub mod metaheuristic;
 pub mod monitor;
 pub mod objective;
 pub mod operator;
 pub mod outcome;
-pub mod params;
+pub mod parameters;
 mod ring_arena;
 pub mod schedule;
-pub mod stats;
+pub mod statistics;
+pub mod termination;

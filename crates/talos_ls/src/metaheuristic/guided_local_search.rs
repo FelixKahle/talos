@@ -11,9 +11,9 @@
 //! into unexplored regions of the solution space.
 
 use crate::{
-    exec::SearchCommand,
-    meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
+    metaheuristic::acceptance::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
     schedule::{LinkEnd, ScheduleGraph, ScheduleGraphDiff},
+    termination::SearchCommand,
 };
 use num_traits::ToPrimitive;
 use talos_core::SolverNumeric;
@@ -555,7 +555,7 @@ impl PenaltyDecay for GeometricDecay {
 /// # Examples
 ///
 /// ```
-/// # use talos_ls::meta::gls::heuristic_lambda;
+/// # use talos_ls::metaheuristic::guided_local_search::heuristic_lambda;
 /// let lambda = heuristic_lambda(1000.0, 50, 0.3);
 /// assert!((lambda - 6.0).abs() < f64::EPSILON);
 /// ```
@@ -1369,7 +1369,10 @@ mod tests {
             vec![100, 100],
             vec![1, 1],
             vec![Some(5), Some(5), Some(5), Some(5)],
-            vec![vec![ClosedOpenInterval::new(0, 200)], vec![ClosedOpenInterval::new(0, 200)]],
+            vec![
+                vec![ClosedOpenInterval::new(0, 200)],
+                vec![ClosedOpenInterval::new(0, 200)],
+            ],
         );
         let berths = [BerthIndex::new(0), BerthIndex::new(1)];
         let starts = [0_i64, 0];
@@ -1396,10 +1399,13 @@ mod tests {
 
     // A vessel beyond the memory must be refused, not read as the boundary of a berth.
     #[test]
-    #[should_panic(expected = "called `PenaltyMemory::edge_penalty` with a link outside a memory of 2 vessels")]
+    #[should_panic(
+        expected = "called `PenaltyMemory::edge_penalty` with a link outside a memory of 2 vessels"
+    )]
     fn test_penalty_memory_edge_penalty_refuses_a_vessel_outside() {
         let outside = LinkEnd::Vessel(VesselIndex::new(2));
-        let _ = PenaltyMemory::new(2, 2).edge_penalty(outside, LinkEnd::Vessel(VesselIndex::new(0)));
+        let _ =
+            PenaltyMemory::new(2, 2).edge_penalty(outside, LinkEnd::Vessel(VesselIndex::new(0)));
     }
 
     #[test]

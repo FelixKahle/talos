@@ -9,7 +9,8 @@
 //! are skipped.
 
 use crate::{
-    exec::SearchCommand, monitor::lsmonitor::LocalSearchMonitor, stats::LocalSearchStatistics,
+    monitor::lsmonitor::LocalSearchMonitor, statistics::LocalSearchStatistics,
+    termination::SearchCommand,
 };
 use talos_core::SolverNumeric;
 use talos_model::{Model, SolutionView};
@@ -276,9 +277,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::TerminationReason;
     use crate::monitor::iteration::IterationLimitMonitor;
     use crate::monitor::solution::SolutionLimitMonitor;
+    use crate::termination::TerminationReason;
     use talos_model::BerthIndex;
 
     fn dummy_view() -> SolutionView<'static, i64> {

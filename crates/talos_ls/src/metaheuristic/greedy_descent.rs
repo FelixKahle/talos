@@ -53,13 +53,13 @@
 //!   (the buffer remains empty and exhaustion yields `Terminate`).
 
 use crate::{
-    exec::SearchCommand,
-    meta::{
-        metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
-        selec::SelectionStrategy,
-        tie::{KeepFirst, TieBreakingStrategy},
+    metaheuristic::{
+        acceptance::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
+        move_selection::SelectionStrategy,
+        tie_breaking::{KeepFirst, TieBreakingStrategy},
     },
     schedule::{ScheduleGraph, ScheduleGraphDiff},
+    termination::SearchCommand,
 };
 use talos_core::SolverNumeric;
 use talos_model::{Model, SolutionView};
@@ -342,7 +342,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meta::tie::{KeepLast, RandomTieBreak};
+    use crate::metaheuristic::tie_breaking::{KeepLast, RandomTieBreak};
 
     #[test]
     fn test_greedy_descent_new_defaults() {

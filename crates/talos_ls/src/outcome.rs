@@ -1,8 +1,8 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use crate::exec::TerminationReason;
-use crate::stats::LocalSearchStatistics;
+use crate::statistics::LocalSearchStatistics;
+use crate::termination::TerminationReason;
 use talos_core::SolverNumeric;
 use talos_model::Solution;
 

@@ -8,8 +8,8 @@
 //! termination logic.
 
 use crate::{
-    exec::SearchCommand,
     schedule::{ScheduleGraph, ScheduleGraphDiff},
+    termination::SearchCommand,
 };
 use talos_core::SolverNumeric;
 use talos_model::{Model, SolutionView};

@@ -15,7 +15,7 @@ use pyo3::{exceptions::PyValueError, prelude::*};
 use std::time::Duration;
 use talos_ls::{
     engine::Engine,
-    meta::gls::{
+    metaheuristic::guided_local_search::{
         AdditiveDynamicLambda, DynamicLambda, GeometricDecay, GuidedLocalSearch,
         PenalizationTrigger, heuristic_lambda,
     },
@@ -30,11 +30,11 @@ use talos_ls::{
             inter_berth_shift_filter_unchecked, inter_berth_swap_filter_unchecked,
             intra_berth_shift_filter_unchecked, intra_berth_swap_filter_unchecked,
         },
-        lsoperator::LocalSearchOperator,
+        neighborhood::LocalSearchOperator,
         shift::{InterBerthShiftOperator, IntraBerthShiftOperator},
         swap::{InterBerthSwapOperator, IntraBerthSwapOperator},
     },
-    params::MutableLocalSearchParams,
+    parameters::MutableLocalSearchParams,
 };
 use talos_model::{BerthIndex, Model, VesselIndex};
 

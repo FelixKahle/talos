@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::{
-    operator::lsoperator::LocalSearchOperator, schedule::Mutator, schedule::ScheduleGraph,
-    stats::LocalSearchStatistics,
+    operator::neighborhood::LocalSearchOperator, schedule::Mutator, schedule::ScheduleGraph,
+    statistics::LocalSearchStatistics,
 };
 use std::marker::PhantomData;
 use talos_core::SolverNumeric;

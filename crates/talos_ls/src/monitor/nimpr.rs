@@ -20,9 +20,9 @@
 //! 8192 iterations. The mask can be customized via `and_clock_check_mask`.
 
 use crate::{
-    exec::{SearchCommand, TerminationReason},
     monitor::lsmonitor::LocalSearchMonitor,
-    stats::LocalSearchStatistics,
+    statistics::LocalSearchStatistics,
+    termination::{SearchCommand, TerminationReason},
 };
 use std::time::{Duration, Instant};
 use talos_core::SolverNumeric;

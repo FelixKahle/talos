@@ -27,8 +27,8 @@
 //! mutation generation and evaluation.
 
 use crate::{
-    operator::lsoperator::LocalSearchOperator, schedule::Mutator, schedule::ScheduleGraph,
-    stats::LocalSearchStatistics,
+    operator::neighborhood::LocalSearchOperator, schedule::Mutator, schedule::ScheduleGraph,
+    statistics::LocalSearchStatistics,
 };
 use rand::{Rng, RngExt, SeedableRng};
 use std::cmp::Ordering;
@@ -439,7 +439,10 @@ where
         memory_coeff: f64,
         exploration_coeff: f64,
     ) -> Self {
-        assert!(!operators.is_empty(), "called `MultiArmedBanditCompoundOperator::new` with no operators");
+        assert!(
+            !operators.is_empty(),
+            "called `MultiArmedBanditCompoundOperator::new` with no operators"
+        );
         let n = operators.len();
         Self {
             operators,

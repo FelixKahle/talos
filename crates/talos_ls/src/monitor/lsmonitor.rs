@@ -11,7 +11,7 @@
 //! allowing monitors to remain lightweight unless an explicit limit or
 //! condition is reached.
 
-use crate::{exec::SearchCommand, stats::LocalSearchStatistics};
+use crate::{statistics::LocalSearchStatistics, termination::SearchCommand};
 use talos_core::SolverNumeric;
 use talos_model::{Model, SolutionView};
 

@@ -3,6 +3,6 @@
 
 pub mod composite;
 pub mod filter;
-pub mod lsoperator;
+pub mod neighborhood;
 pub mod shift;
 pub mod swap;
