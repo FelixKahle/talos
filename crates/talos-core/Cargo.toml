@@ -1,13 +1,12 @@
 [package]
 name = "talos_core"
-version = "0.1.0"
+description = "Foundations shared by the Talos crates: typed ids, intervals, the ring arena and the numeric trait."
+version.workspace = true
 edition.workspace = true
-
-[profile.release]
-panic = "abort"
-
-[profile.dev]
-panic = "abort"
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
 
 [dependencies]
-num-traits = "0.2.19"
+num-traits = { workspace = true }

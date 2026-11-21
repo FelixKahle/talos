@@ -28,7 +28,8 @@ cargo test --workspace
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT licence](LICENSE-MIT), at your
+option.
 
 ## Citation
 

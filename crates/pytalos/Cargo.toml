@@ -1,15 +1,20 @@
 [package]
 name = "pytalos"
-version = "0.1.0"
+description = "Python bindings for the Talos engine."
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
 
 [lib]
 name = "pytalos"
 crate-type = ["cdylib"]
 
 [dependencies]
-talos_core = { path = "../talos-core" }
-talos_model = { path = "../talos-model" }
-talos_ls = { path = "../talos-ls" }
-itertools = "0.14.0"
-pyo3 = { version = "0.28.2", features = ["abi3-py38"] }
+talos_core = { workspace = true }
+talos_model = { workspace = true }
+talos_ls = { workspace = true }
+itertools = { workspace = true }
+pyo3 = { workspace = true }

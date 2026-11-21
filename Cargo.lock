@@ -681,10 +681,6 @@ dependencies = [
 name = "talos_cmd"
 version = "0.1.0"
 dependencies = [
- "criterion",
- "num-traits",
- "rand",
- "regex",
  "serde",
  "serde_json",
  "talos_core",
@@ -714,7 +710,6 @@ dependencies = [
 name = "talos_model"
 version = "0.1.0"
 dependencies = [
- "num-traits",
  "talos_core",
 ]
 

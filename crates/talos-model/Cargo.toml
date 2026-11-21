@@ -1,14 +1,12 @@
 [package]
 name = "talos_model"
-version = "0.1.0"
+description = "The problem instance of the dynamic berth allocation problem."
+version.workspace = true
 edition.workspace = true
-
-[profile.release]
-panic = "abort"
-
-[profile.dev]
-panic = "abort"
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
 
 [dependencies]
-talos_core = { path = "../talos-core" }
-num-traits = "0.2.19"
+talos_core = { workspace = true }

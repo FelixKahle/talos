@@ -1,22 +1,21 @@
 [package]
 name = "talos_ls"
-version = "0.1.0"
+description = "The local-search engine for the dynamic berth allocation problem."
+version.workspace = true
 edition.workspace = true
-
-[profile.release]
-panic = "abort"
-
-[profile.dev]
-panic = "abort"
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
 
 [dependencies]
-talos_core = { path = "../talos-core" }
-talos_model = { path = "../talos-model" }
-num-traits = "0.2.19"
-rand = "0.10.0"
+talos_core = { workspace = true }
+talos_model = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
-criterion = "0.8.2"
+criterion = { workspace = true }
 
 [[bench]]
 name = "mutation_cycle_bench"

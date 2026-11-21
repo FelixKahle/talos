@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "pytalos"
 version = "0.1.0"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 requires-python = ">=3.8"
 description = "Python bindings for Talos - Dynamic Berth Allocation Problem solver"
 classifiers = [
