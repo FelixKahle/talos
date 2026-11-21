@@ -458,7 +458,7 @@ where
             self.engine.accepted.objective(),
             self.engine.mutator.graph(),
         );
-        let iterations_at_start = self.statistics.iterations;
+        let solutions_at_start = self.statistics.total_solutions;
         loop {
             self.engine.mutator.clear_diff();
             debug_assert_eq!(
@@ -471,7 +471,7 @@ where
                 self.operator
                     .next_neighbor_unchecked(self.model, &mut self.engine.mutator)
             } {
-                return self.exhaust(iterations_at_start);
+                return self.exhaust(solutions_at_start);
             }
             match self.step() {
                 StepEnd::NextCandidate => {}
@@ -481,10 +481,13 @@ where
         }
     }
 
-    /// Ends an exhausted scan that started at `iterations_at_start`: commits the candidate kept aside where the
-    /// metaheuristic asks, and restarts the scan or ends the run as it decides; a scan that yielded no candidate
-    /// and committed nothing ends the run, since every later scan would find the same empty neighbourhood.
-    fn exhaust(&mut self, iterations_at_start: u64) -> Option<TerminationReason> {
+    /// Ends an exhausted scan that started with `solutions_at_start` feasible candidates counted: commits the
+    /// candidate kept aside where the metaheuristic asks, and restarts the scan or ends the run as it decides.
+    ///
+    /// A scan that yielded no feasible candidate, none at all or only infeasible ones, and committed nothing ends
+    /// the run: the accepted schedule is unchanged, so every later scan proposes the same moves, and whether a
+    /// move is feasible does not depend on the metaheuristic.
+    fn exhaust(&mut self, solutions_at_start: u64) -> Option<TerminationReason> {
         self.statistics.cycles += 1;
         self.monitor
             .on_neighborhood_exhausted(self.engine.progress(self.buffer, &self.statistics));
@@ -493,7 +496,7 @@ where
         if committed {
             self.commit_buffered();
         }
-        if !committed && self.statistics.iterations == iterations_at_start {
+        if !committed && self.statistics.total_solutions == solutions_at_start {
             return Some(TerminationReason::NeighborhoodExhausted);
         }
 
@@ -1049,10 +1052,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_an_infeasible_candidate_is_counted_and_undone() {
-        // Both berths close at 15, and V1 arrives at 5: served first, V1 ends at 15 and V0 fits nowhere after it.
-        let model = Model::new(
+    /// Two vessels on two berths that both close at 15: V0 takes 5 and arrives at 0, V1 takes 10 and arrives at 5.
+    /// Served first, V1 ends at 15 and V0 fits nowhere after it, so the swap of the two on one berth is infeasible.
+    fn v1_first_is_infeasible() -> Model<i64> {
+        Model::new(
             vec![0_i64, 5],
             vec![100, 100],
             vec![1, 1],
@@ -1061,7 +1064,12 @@ mod tests {
                 vec![ClosedOpenInterval::new(0, 15)],
                 vec![ClosedOpenInterval::new(0, 15)],
             ],
-        );
+        )
+    }
+
+    #[test]
+    fn test_an_infeasible_candidate_is_counted_and_undone() {
+        let model = v1_first_is_infeasible();
         let mut monitor = CountingMonitor::default();
         let outcome = search_mocked(
             &model,
@@ -1123,6 +1131,31 @@ mod tests {
             TerminationReason::NeighborhoodExhausted
         );
         assert_eq!(outcome.statistics.cycles, 1);
+    }
+
+    // A scan whose every candidate is infeasible commits nothing, so every later scan proposes the same infeasible
+    // candidates: the search must end at the first such scan, and a budget counted in feasible candidates would
+    // never run out. The cycle limit only bounds the test if the search does not end.
+    #[test]
+    fn test_search_ends_at_a_scan_whose_every_candidate_is_infeasible() {
+        let outcome = search_mocked(
+            &v1_first_is_infeasible(),
+            both_on_first_berth(),
+            &mut GuidedLocalSearchRule::new(&GuidedLocalSearch::default()),
+            &mut SwapFirstTwo::new(1),
+            SearchLimits {
+                solutions: Some(10),
+                cycles: Some(1000),
+                ..SearchLimits::default()
+            },
+            &mut NoMonitor,
+        );
+        assert_eq!(
+            outcome.termination_reason,
+            TerminationReason::NeighborhoodExhausted
+        );
+        assert_eq!(outcome.statistics.cycles, 1);
+        assert_eq!(outcome.statistics.infeasible_moves, 1);
     }
 
     #[test]
