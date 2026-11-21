@@ -274,35 +274,38 @@ impl Mutator {
             return;
         }
         let (node_a, node_b) = (self.graph.vessel_node(a), self.graph.vessel_node(b));
-        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes and the nodes
-        // read before them are the graph's, and so are their berths.
-        let (links, berth_a, berth_b) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(node_a),
-                self.graph.prev_node_unchecked(node_b),
-                node_a,
-                node_b,
-            ];
-            let berths = (
+        // SAFETY: both vessels are the graph's, the precondition of this function.
+        let (berth_a, berth_b) = unsafe {
+            (
                 self.graph.vessel_berth_unchecked(a),
                 self.graph.vessel_berth_unchecked(b),
-            );
-            (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
-                berths.0,
-                berths.1,
             )
         };
+        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes lie in its arena
+        // (`ScheduleGraph`).
+        let (prev_a, prev_b) = unsafe {
+            (
+                self.graph.prev_node_unchecked(node_a),
+                self.graph.prev_node_unchecked(node_b),
+            )
+        };
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links =
+            unsafe { LinkSnapshot::new_unchecked(&self.graph, [prev_a, prev_b, node_a, node_b]) };
+
         self.undo.push_swap_vessels(a, b);
-        // SAFETY: both vessels and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(berth_a);
-            self.touch_unchecked(berth_b);
-            self.graph.swap_vessels_unchecked(a, b);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(a, a, berth_a);
-            self.record_berth_change_unchecked(b, b, berth_b);
-        }
+        // SAFETY: both berths were read from the graph's column of berths, so they are its berths
+        // (`ScheduleGraph`).
+        unsafe { self.touch_both_unchecked(berth_a, berth_b) };
+        // SAFETY: both vessels are the graph's, the precondition of this function.
+        unsafe { self.graph.swap_vessels_unchecked(a, b) };
+        // SAFETY: the nodes of `links` are the graph's, read from it before the swap, which keeps its counts.
+        unsafe { links.commit_unchecked(&self.graph, &mut self.diff) };
+        // SAFETY: both vessels are the graph's, the precondition of this function.
+        unsafe { self.record_berth_change_unchecked(a, a, berth_a) };
+        // SAFETY: both vessels are the graph's, the precondition of this function.
+        unsafe { self.record_berth_change_unchecked(b, b, berth_b) };
     }
 
     /// Exchanges the places of the segments `a_first ..= a_last` and `b_first ..= b_last`, on one berth or across
@@ -372,37 +375,43 @@ impl Mutator {
             self.graph.vessel_node(a_last),
             self.graph.vessel_node(b_last),
         );
-        // SAFETY: the four vessels are the graph's, the precondition of this function, so their nodes and the nodes
-        // read before them are the graph's, and so are their berths.
-        let (links, berth_a, berth_b) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(a_first_node),
-                a_last_node,
-                self.graph.prev_node_unchecked(b_first_node),
-                b_last_node,
-            ];
-            let berths = (
+        // SAFETY: both first vessels are the graph's, the precondition of this function.
+        let (berth_a, berth_b) = unsafe {
+            (
                 self.graph.vessel_berth_unchecked(a_first),
                 self.graph.vessel_berth_unchecked(b_first),
-            );
-            (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
-                berths.0,
-                berths.1,
             )
         };
+        // SAFETY: both first vessels are the graph's, the precondition of this function, so their nodes lie in its
+        // arena (`ScheduleGraph`).
+        let (prev_a, prev_b) = unsafe {
+            (
+                self.graph.prev_node_unchecked(a_first_node),
+                self.graph.prev_node_unchecked(b_first_node),
+            )
+        };
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links = unsafe {
+            LinkSnapshot::new_unchecked(&self.graph, [prev_a, a_last_node, prev_b, b_last_node])
+        };
+
         self.undo
             .push_swap_segments(a_first, a_last, b_first, b_last);
-        // SAFETY: the four vessels and both berths are the graph's, as above.
+        // SAFETY: both berths were read from the graph's column of berths, so they are its berths
+        // (`ScheduleGraph`).
+        unsafe { self.touch_both_unchecked(berth_a, berth_b) };
+        // SAFETY: the four vessels are the graph's, the precondition of this function.
         unsafe {
-            self.touch_unchecked(berth_a);
-            self.touch_unchecked(berth_b);
             self.graph
-                .swap_segments_unchecked(a_first, a_last, b_first, b_last);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(a_first, a_last, berth_a);
-            self.record_berth_change_unchecked(b_first, b_last, berth_b);
-        }
+                .swap_segments_unchecked(a_first, a_last, b_first, b_last)
+        };
+        // SAFETY: the nodes of `links` are the graph's, read from it before the swap, which keeps its counts.
+        unsafe { links.commit_unchecked(&self.graph, &mut self.diff) };
+        // SAFETY: the vessels of the first segment are the graph's, the precondition of this function.
+        unsafe { self.record_berth_change_unchecked(a_first, a_last, berth_a) };
+        // SAFETY: the vessels of the second segment are the graph's, the precondition of this function.
+        unsafe { self.record_berth_change_unchecked(b_first, b_last, berth_b) };
     }
 
     /// Reverses the order of the segment `first ..= last` on its berth, at a cost of its length; nothing changes
@@ -450,35 +459,30 @@ impl Mutator {
             return;
         }
         let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
-        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes and their berth
-        // are the graph's.
-        let (before_first, after_last, berth) = unsafe {
+        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes lie in its arena
+        // (`ScheduleGraph`).
+        let (before_first, after_last) = unsafe {
             (
                 self.graph.prev_node_unchecked(first_node),
                 self.graph.next_node_unchecked(last_node),
-                self.graph.vessel_berth_unchecked(first),
             )
         };
-        // SAFETY: `berth` is the graph's, as above.
-        unsafe { self.touch_unchecked(berth) };
+        // SAFETY: `first` is the graph's, the precondition of this function.
+        let berth = unsafe { self.graph.vessel_berth_unchecked(first) };
+        debug_assert!(
+            berth.index() < self.touched.num_berths(),
+            "the berth {berth} read from the graph should be one of the touched berths' {}",
+            self.touched.num_berths()
+        );
+        // SAFETY: `berth` was read from the graph's column of berths, so it is one of its berths (`ScheduleGraph`),
+        // and the touched berths count the graph's berths by the invariant of `Mutator`.
+        unsafe { self.touched.touch_unchecked(berth) };
         let (before_first, after_last) = (
             self.graph.link_end(before_first),
             self.graph.link_end(after_last),
         );
-        let (first_end, last_end) = (LinkEnd::Vessel(first), LinkEnd::Vessel(last));
-        self.diff.push_link_broken(before_first, first_end);
-        self.diff.push_link_broken(last_end, after_last);
         // SAFETY: both vessels are the graph's, the precondition of this function.
-        let segment = unsafe { self.graph.segment_unchecked(first, last) };
-        let mut previous = first_end;
-        for vessel in segment.skip(1) {
-            let end = LinkEnd::Vessel(vessel);
-            self.diff.push_link_broken(previous, end);
-            self.diff.push_link_created(end, previous);
-            previous = end;
-        }
-        self.diff.push_link_created(before_first, last_end);
-        self.diff.push_link_created(first_end, after_last);
+        unsafe { self.record_reversal_unchecked(first, last, before_first, after_last) };
         self.undo.push_reverse_segment(first, last);
         // SAFETY: both vessels are the graph's, the precondition of this function.
         unsafe { self.graph.reverse_segment_unchecked(first, last) };
@@ -516,37 +520,37 @@ impl Mutator {
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
-        let vessel_node = self.graph.vessel_node(vessel);
-        let anchor_node = self.graph.vessel_node(anchor);
-        // SAFETY: `vessel` is the graph's, the precondition of this function, so its node is.
-        if vessel_node == anchor_node
-            || unsafe { self.graph.prev_node_unchecked(vessel_node) } == anchor_node
-        {
+        let (vessel_node, anchor_node) = (
+            self.graph.vessel_node(vessel),
+            self.graph.vessel_node(anchor),
+        );
+        // SAFETY: `vessel` is the graph's, the precondition of this function, so its node lies in its arena
+        // (`ScheduleGraph`).
+        let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
+        if vessel_node == anchor_node || vessel_prev == anchor_node {
             return;
         }
-        // SAFETY: the vessels are the graph's, the precondition of this function, so the nodes named here and
-        // the nodes read from the graph are the graph's, and so are the berths.
-        let (links, from, to) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(vessel_node),
-                vessel_node,
-                anchor_node,
-            ];
+        // SAFETY: both vessels are the graph's, the precondition of this function.
+        let (from, to) = unsafe {
             (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(vessel),
                 self.graph.vessel_berth_unchecked(anchor),
             )
         };
-        // SAFETY: the vessel and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(from);
-            self.touch_unchecked(to);
-            self.record_position_unchecked(vessel, vessel);
-            self.graph.relocate_after_unchecked(vessel, anchor);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(vessel, vessel, from);
-        }
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links = unsafe {
+            LinkSnapshot::new_unchecked(&self.graph, [vessel_prev, vessel_node, anchor_node])
+        };
+        let step = |graph: &mut ScheduleGraph| {
+            // SAFETY: both vessels are the graph's, the precondition of this function, and the step is made
+            // on the graph.
+            unsafe { graph.relocate_after_unchecked(vessel, anchor) }
+        };
+        // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
+        // column of berths or are the berth of the precondition, so they are its berths; the nodes of `links` were
+        // read from it; and `step` is a move of the graph.
+        unsafe { self.relocate_recorded_unchecked(vessel, vessel, from, to, links, step) };
     }
 
     /// Moves `vessel` to directly before `reference`, on its berth or another; nothing changes and nothing is recorded
@@ -586,36 +590,42 @@ impl Mutator {
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
-        let vessel_node = self.graph.vessel_node(vessel);
-        let reference_node = self.graph.vessel_node(reference);
-        // SAFETY: `reference` is the graph's, the precondition of this function, so its node is.
-        let reference_prev = unsafe { self.graph.prev_node_unchecked(reference_node) };
+        let (vessel_node, reference_node) = (
+            self.graph.vessel_node(vessel),
+            self.graph.vessel_node(reference),
+        );
+        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes lie in its arena
+        // (`ScheduleGraph`).
+        let (vessel_prev, reference_prev) = unsafe {
+            (
+                self.graph.prev_node_unchecked(vessel_node),
+                self.graph.prev_node_unchecked(reference_node),
+            )
+        };
         if vessel_node == reference_node || vessel_node == reference_prev {
             return;
         }
-        // SAFETY: the vessels are the graph's, the precondition of this function, so the nodes named here and
-        // the nodes read from the graph are the graph's, and so are the berths.
-        let (links, from, to) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(vessel_node),
-                vessel_node,
-                reference_prev,
-            ];
+        // SAFETY: both vessels are the graph's, the precondition of this function.
+        let (from, to) = unsafe {
             (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(vessel),
                 self.graph.vessel_berth_unchecked(reference),
             )
         };
-        // SAFETY: the vessel and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(from);
-            self.touch_unchecked(to);
-            self.record_position_unchecked(vessel, vessel);
-            self.graph.relocate_before_unchecked(vessel, reference);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(vessel, vessel, from);
-        }
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links = unsafe {
+            LinkSnapshot::new_unchecked(&self.graph, [vessel_prev, vessel_node, reference_prev])
+        };
+        let step = |graph: &mut ScheduleGraph| {
+            // SAFETY: both vessels are the graph's, the precondition of this function, and the step is made
+            // on the graph.
+            unsafe { graph.relocate_before_unchecked(vessel, reference) }
+        };
+        // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
+        // column of berths or are the berth of the precondition, so they are its berths; the nodes of `links` were
+        // read from it; and `step` is a move of the graph.
+        unsafe { self.relocate_recorded_unchecked(vessel, vessel, from, to, links, step) };
     }
 
     /// Moves `vessel` to the head of `berth`.
@@ -649,31 +659,29 @@ impl Mutator {
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
-        let vessel_node = self.graph.vessel_node(vessel);
-        let sentinel = self.graph.sentinel_of(berth);
-        // SAFETY: the vessel and the berth are the graph's, the precondition of this function, so the nodes named here and
-        // the nodes read from the graph are the graph's, and so are the berths.
-        let (links, from, to) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(vessel_node),
-                vessel_node,
-                sentinel,
-            ];
-            (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
-                self.graph.vessel_berth_unchecked(vessel),
-                berth,
-            )
+        let (vessel_node, sentinel) = (
+            self.graph.vessel_node(vessel),
+            self.graph.sentinel_of(berth),
+        );
+        // SAFETY: `vessel` is the graph's, the precondition of this function, so its node lies in its arena
+        // (`ScheduleGraph`).
+        let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
+        // SAFETY: `vessel` is the graph's, the precondition of this function.
+        let (from, to) = unsafe { (self.graph.vessel_berth_unchecked(vessel), berth) };
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links = unsafe {
+            LinkSnapshot::new_unchecked(&self.graph, [vessel_prev, vessel_node, sentinel])
         };
-        // SAFETY: the vessel and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(from);
-            self.touch_unchecked(to);
-            self.record_position_unchecked(vessel, vessel);
-            self.graph.relocate_to_head_unchecked(vessel, berth);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(vessel, vessel, from);
-        }
+        let step = |graph: &mut ScheduleGraph| {
+            // SAFETY: the vessel and the berth are the graph's, the precondition of this function, and the step is made
+            // on the graph.
+            unsafe { graph.relocate_to_head_unchecked(vessel, berth) }
+        };
+        // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
+        // column of berths or are the berth of the precondition, so they are its berths; the nodes of `links` were
+        // read from it; and `step` is a move of the graph.
+        unsafe { self.relocate_recorded_unchecked(vessel, vessel, from, to, links, step) };
     }
 
     /// Moves `vessel` to the tail of `berth`.
@@ -707,31 +715,33 @@ impl Mutator {
             self.graph.num_vessels(),
             self.graph.num_berths()
         );
-        let vessel_node = self.graph.vessel_node(vessel);
-        let sentinel = self.graph.sentinel_of(berth);
-        // SAFETY: the vessel and the berth are the graph's, the precondition of this function, so the nodes named here and
-        // the nodes read from the graph are the graph's, and so are the berths.
-        let (links, from, to) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(vessel_node),
-                vessel_node,
-                self.graph.prev_node_unchecked(sentinel),
-            ];
+        let (vessel_node, sentinel) = (
+            self.graph.vessel_node(vessel),
+            self.graph.sentinel_of(berth),
+        );
+        // SAFETY: the vessel and the berth are the graph's, the precondition of this function, so the vessel's node
+        // and the berth's sentinel lie in its arena (`ScheduleGraph`).
+        let (vessel_prev, tail) = unsafe {
             (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
-                self.graph.vessel_berth_unchecked(vessel),
-                berth,
+                self.graph.prev_node_unchecked(vessel_node),
+                self.graph.prev_node_unchecked(sentinel),
             )
         };
-        // SAFETY: the vessel and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(from);
-            self.touch_unchecked(to);
-            self.record_position_unchecked(vessel, vessel);
-            self.graph.relocate_to_tail_unchecked(vessel, berth);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(vessel, vessel, from);
-        }
+        // SAFETY: `vessel` is the graph's, the precondition of this function.
+        let (from, to) = unsafe { (self.graph.vessel_berth_unchecked(vessel), berth) };
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links =
+            unsafe { LinkSnapshot::new_unchecked(&self.graph, [vessel_prev, vessel_node, tail]) };
+        let step = |graph: &mut ScheduleGraph| {
+            // SAFETY: the vessel and the berth are the graph's, the precondition of this function, and the step is made
+            // on the graph.
+            unsafe { graph.relocate_to_tail_unchecked(vessel, berth) }
+        };
+        // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
+        // column of berths or are the berth of the precondition, so they are its berths; the nodes of `links` were
+        // read from it; and `step` is a move of the graph.
+        unsafe { self.relocate_recorded_unchecked(vessel, vessel, from, to, links, step) };
     }
 
     /// Moves the segment `first ..= last` to directly after `anchor`, on its berth or another; nothing changes and
@@ -789,34 +799,33 @@ impl Mutator {
         );
         let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
         let anchor_node = self.graph.vessel_node(anchor);
-        // SAFETY: `first` is the graph's, the precondition of this function, so its node is.
-        if unsafe { self.graph.prev_node_unchecked(first_node) } == anchor_node {
+        // SAFETY: `first` is the graph's, the precondition of this function, so its node lies in its arena
+        // (`ScheduleGraph`).
+        let first_prev = unsafe { self.graph.prev_node_unchecked(first_node) };
+        if first_prev == anchor_node {
             return;
         }
-        // SAFETY: the vessels are the graph's, the precondition of this function, so the nodes named here and the
-        // nodes read from the graph are the graph's, and so are the berths.
-        let (links, from, to) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(first_node),
-                last_node,
-                anchor_node,
-            ];
+        // SAFETY: `first` and `anchor` are the graph's, the precondition of this function.
+        let (from, to) = unsafe {
             (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(first),
                 self.graph.vessel_berth_unchecked(anchor),
             )
         };
-        // SAFETY: the vessels and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(from);
-            self.touch_unchecked(to);
-            self.record_position_unchecked(first, last);
-            self.graph
-                .relocate_segment_after_unchecked(first, last, anchor);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(first, last, from);
-        }
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links = unsafe {
+            LinkSnapshot::new_unchecked(&self.graph, [first_prev, last_node, anchor_node])
+        };
+        let step = |graph: &mut ScheduleGraph| {
+            // SAFETY: the three vessels are the graph's, the precondition of this function, and the step is made
+            // on the graph.
+            unsafe { graph.relocate_segment_after_unchecked(first, last, anchor) }
+        };
+        // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
+        // column of berths or are the berth of the precondition, so they are its berths; the nodes of `links` were
+        // read from it; and `step` is a move of the graph.
+        unsafe { self.relocate_recorded_unchecked(first, last, from, to, links, step) };
     }
 
     /// Moves the segment `first ..= last` to directly before `reference`, on its berth or another; nothing changes and
@@ -874,35 +883,38 @@ impl Mutator {
         );
         let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
         let reference_node = self.graph.vessel_node(reference);
-        // SAFETY: `reference` is the graph's, the precondition of this function, so its node is.
-        let reference_prev = unsafe { self.graph.prev_node_unchecked(reference_node) };
+        // SAFETY: `first` and `reference` are the graph's, the precondition of this function, so their nodes lie in
+        // its arena (`ScheduleGraph`).
+        let (first_prev, reference_prev) = unsafe {
+            (
+                self.graph.prev_node_unchecked(first_node),
+                self.graph.prev_node_unchecked(reference_node),
+            )
+        };
         if last_node == reference_prev {
             return;
         }
-        // SAFETY: the vessels are the graph's, the precondition of this function, so the nodes named here and the
-        // nodes read from the graph are the graph's, and so are the berths.
-        let (links, from, to) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(first_node),
-                last_node,
-                reference_prev,
-            ];
+        // SAFETY: `first` and `reference` are the graph's, the precondition of this function.
+        let (from, to) = unsafe {
             (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
                 self.graph.vessel_berth_unchecked(first),
                 self.graph.vessel_berth_unchecked(reference),
             )
         };
-        // SAFETY: the vessels and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(from);
-            self.touch_unchecked(to);
-            self.record_position_unchecked(first, last);
-            self.graph
-                .relocate_segment_before_unchecked(first, last, reference);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(first, last, from);
-        }
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links = unsafe {
+            LinkSnapshot::new_unchecked(&self.graph, [first_prev, last_node, reference_prev])
+        };
+        let step = |graph: &mut ScheduleGraph| {
+            // SAFETY: the three vessels are the graph's, the precondition of this function, and the step is made
+            // on the graph.
+            unsafe { graph.relocate_segment_before_unchecked(first, last, reference) }
+        };
+        // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
+        // column of berths or are the berth of the precondition, so they are its berths; the nodes of `links` were
+        // read from it; and `step` is a move of the graph.
+        unsafe { self.relocate_recorded_unchecked(first, last, from, to, links, step) };
     }
 
     /// Moves the segment `first ..= last` to the head of `berth`.
@@ -959,30 +971,24 @@ impl Mutator {
         );
         let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
         let sentinel = self.graph.sentinel_of(berth);
-        // SAFETY: the vessels and the berth are the graph's, the precondition of this function, so the nodes named here and the
-        // nodes read from the graph are the graph's, and so are the berths.
-        let (links, from, to) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(first_node),
-                last_node,
-                sentinel,
-            ];
-            (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
-                self.graph.vessel_berth_unchecked(first),
-                berth,
-            )
+        // SAFETY: `first` is the graph's, the precondition of this function, so its node lies in its arena
+        // (`ScheduleGraph`).
+        let first_prev = unsafe { self.graph.prev_node_unchecked(first_node) };
+        // SAFETY: `first` is the graph's, the precondition of this function.
+        let (from, to) = unsafe { (self.graph.vessel_berth_unchecked(first), berth) };
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links =
+            unsafe { LinkSnapshot::new_unchecked(&self.graph, [first_prev, last_node, sentinel]) };
+        let step = |graph: &mut ScheduleGraph| {
+            // SAFETY: the vessels and the berth are the graph's, the precondition of this function, and the step is made
+            // on the graph.
+            unsafe { graph.relocate_segment_to_head_unchecked(first, last, berth) }
         };
-        // SAFETY: the vessels and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(from);
-            self.touch_unchecked(to);
-            self.record_position_unchecked(first, last);
-            self.graph
-                .relocate_segment_to_head_unchecked(first, last, berth);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(first, last, from);
-        }
+        // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
+        // column of berths or are the berth of the precondition, so they are its berths; the nodes of `links` were
+        // read from it; and `step` is a move of the graph.
+        unsafe { self.relocate_recorded_unchecked(first, last, from, to, links, step) };
     }
 
     /// Moves the segment `first ..= last` to the tail of `berth`.
@@ -1039,47 +1045,133 @@ impl Mutator {
         );
         let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
         let sentinel = self.graph.sentinel_of(berth);
-        // SAFETY: the vessels and the berth are the graph's, the precondition of this function, so the nodes named here and the
-        // nodes read from the graph are the graph's, and so are the berths.
-        let (links, from, to) = unsafe {
-            let nodes = [
-                self.graph.prev_node_unchecked(first_node),
-                last_node,
-                self.graph.prev_node_unchecked(sentinel),
-            ];
+        // SAFETY: `first` and the berth are the graph's, the precondition of this function, so the node of `first`
+        // and the berth's sentinel lie in its arena (`ScheduleGraph`).
+        let (first_prev, tail) = unsafe {
             (
-                LinkSnapshot::new_unchecked(&self.graph, nodes),
-                self.graph.vessel_berth_unchecked(first),
-                berth,
+                self.graph.prev_node_unchecked(first_node),
+                self.graph.prev_node_unchecked(sentinel),
             )
         };
-        // SAFETY: the vessels and both berths are the graph's, as above.
-        unsafe {
-            self.touch_unchecked(from);
-            self.touch_unchecked(to);
-            self.record_position_unchecked(first, last);
-            self.graph
-                .relocate_segment_to_tail_unchecked(first, last, berth);
-            links.commit_unchecked(&self.graph, &mut self.diff);
-            self.record_berth_change_unchecked(first, last, from);
-        }
+        // SAFETY: `first` is the graph's, the precondition of this function.
+        let (from, to) = unsafe { (self.graph.vessel_berth_unchecked(first), berth) };
+        // SAFETY: the vessels' nodes are the graph's, as the vessels are, and so are the nodes read from the
+        // graph's links (`ScheduleGraph`).
+        let links =
+            unsafe { LinkSnapshot::new_unchecked(&self.graph, [first_prev, last_node, tail]) };
+        let step = |graph: &mut ScheduleGraph| {
+            // SAFETY: the vessels and the berth are the graph's, the precondition of this function, and the step is made
+            // on the graph.
+            unsafe { graph.relocate_segment_to_tail_unchecked(first, last, berth) }
+        };
+        // SAFETY: the vessels are the graph's, the precondition of this function; `from` and `to` were read from its
+        // column of berths or are the berth of the precondition, so they are its berths; the nodes of `links` were
+        // read from it; and `step` is a move of the graph.
+        unsafe { self.relocate_recorded_unchecked(first, last, from, to, links, step) };
     }
 
-    /// Marks `berth` touched.
+    /// Moves the segment `first ..= last` by `step`, which takes it from berth `from` to berth `to`, and records
+    /// the move: where the segment stood in the undo log, both berths among the touched berths, and in the diff
+    /// the links of the nodes of `links` that the step changed and the vessels it took to another berth.
+    ///
+    /// # Preconditions
+    ///
+    /// `last` follows `first` on its berth, and `step` moves the segment. Otherwise the records are wrong, though
+    /// they name only ids of the graph.
     ///
     /// # Safety
     ///
-    /// `berth` must be one of the graph's.
+    /// `first`, `last`, `from` and `to` must be the graph's, every node of `links` a vessel's node or a berth's
+    /// sentinel of the graph, and `step` a move of the graph, which keeps its counts.
     #[inline(always)]
-    unsafe fn touch_unchecked(&mut self, berth: BerthIndex) {
+    unsafe fn relocate_recorded_unchecked<const N: usize, S>(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        from: BerthIndex,
+        to: BerthIndex,
+        links: LinkSnapshot<N>,
+        step: S,
+    ) where
+        S: FnOnce(&mut ScheduleGraph),
+    {
         debug_assert!(
-            berth.index() < self.graph.num_berths(),
-            "called `Mutator::touch_unchecked` with {berth}, outside a graph of {} berths",
+            first.index() < self.graph.num_vessels()
+                && last.index() < self.graph.num_vessels()
+                && from.index() < self.graph.num_berths()
+                && to.index() < self.graph.num_berths(),
+            "called `Mutator::relocate_recorded_unchecked` with {first}, {last}, {from} or {to}, outside the graph"
+        );
+        // SAFETY: `from` and `to` are the graph's, the precondition of this function.
+        unsafe { self.touch_both_unchecked(from, to) };
+        // SAFETY: `first` and `last` are the graph's, the precondition of this function.
+        unsafe { self.record_position_unchecked(first, last) };
+        step(&mut self.graph);
+        // SAFETY: the nodes of `links` are the graph's and `step` kept its counts, the precondition of this
+        // function.
+        unsafe { links.commit_unchecked(&self.graph, &mut self.diff) };
+        // SAFETY: `first` and `last` are the graph's, the precondition of this function.
+        unsafe { self.record_berth_change_unchecked(first, last, from) };
+    }
+
+    /// Records in the diff the links a reversal of the segment `first ..= last` breaks and makes, where
+    /// `before_first` and `after_last` are the places around the segment.
+    ///
+    /// # Preconditions
+    ///
+    /// `last` follows `first` on its berth. Otherwise the wrong links are recorded, though they name only places
+    /// of the graph.
+    ///
+    /// # Safety
+    ///
+    /// `first` and `last` must be the graph's.
+    #[inline(always)]
+    unsafe fn record_reversal_unchecked(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        before_first: LinkEnd,
+        after_last: LinkEnd,
+    ) {
+        debug_assert!(
+            first.index() < self.graph.num_vessels() && last.index() < self.graph.num_vessels(),
+            "called `Mutator::record_reversal_unchecked` with {first} or {last}, outside a graph of {} vessels",
+            self.graph.num_vessels()
+        );
+        let (first_end, last_end) = (LinkEnd::Vessel(first), LinkEnd::Vessel(last));
+        self.diff.push_link_broken(before_first, first_end);
+        self.diff.push_link_broken(last_end, after_last);
+        // SAFETY: both vessels are the graph's, the precondition of this function.
+        let segment = unsafe { self.graph.segment_unchecked(first, last) };
+        let mut previous = first_end;
+        for vessel in segment.skip(1) {
+            let end = LinkEnd::Vessel(vessel);
+            self.diff.push_link_broken(previous, end);
+            self.diff.push_link_created(end, previous);
+            previous = end;
+        }
+        self.diff.push_link_created(before_first, last_end);
+        self.diff.push_link_created(first_end, after_last);
+    }
+
+    /// Marks `a` and `b` touched.
+    ///
+    /// # Safety
+    ///
+    /// `a` and `b` must be the graph's.
+    #[inline(always)]
+    unsafe fn touch_both_unchecked(&mut self, a: BerthIndex, b: BerthIndex) {
+        debug_assert!(
+            a.index() < self.graph.num_berths() && b.index() < self.graph.num_berths(),
+            "called `Mutator::touch_both_unchecked` with {a} or {b}, outside a graph of {} berths",
             self.graph.num_berths()
         );
-        // SAFETY: `berth` is the graph's, the precondition of this function, and the touched berths count the
+        // SAFETY: both berths are the graph's, the precondition of this function, and the touched berths count the
         // graph's berths by the invariant of `Mutator`.
-        unsafe { self.touched.touch_unchecked(berth) };
+        unsafe {
+            self.touched.touch_unchecked(a);
+            self.touched.touch_unchecked(b);
+        }
     }
 
     /// Records in the undo log where the segment `first ..= last` stands before it is moved: after the vessel
