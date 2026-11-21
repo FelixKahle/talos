@@ -94,7 +94,10 @@ impl PyLocalSearchConfig {
         time_limit_secs: Option<f64>,
     ) -> Self {
         Self {
-            operators: operators.into_iter().unique_by(|op| op.clone() as u8).collect(),
+            operators: operators
+                .into_iter()
+                .unique_by(|op| op.clone() as u8)
+                .collect(),
             max_iterations,
             max_solutions,
             max_cycles,
