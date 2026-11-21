@@ -1114,6 +1114,11 @@ impl RingArena {
             current_node = original_next;
         }
 
+        // A segment that is a whole ring is reversed by the swaps alone; it has no outside to relink.
+        if predecessor_of_segment == last {
+            return;
+        }
+
         self.next[first.get()] = successor_of_segment;
         self.prev[last.get()] = predecessor_of_segment;
 
@@ -1165,6 +1170,11 @@ impl RingArena {
             }
 
             current_node = original_next;
+        }
+
+        // A segment that is a whole ring is reversed by the swaps alone; it has no outside to relink.
+        if predecessor_of_segment == last {
+            return;
         }
 
         *unsafe { self.next.get_unchecked_mut(first.get()) } = successor_of_segment;
@@ -2255,5 +2265,21 @@ mod tests {
         unsafe { arena.swap_nodes_unchecked(Node::new(1), Node::new(0)) };
         verify_integrity(&arena);
         assert_eq!(extract_ring(&arena, 0), [0, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_segment_over_a_whole_ring_reverses_it() {
+        let mut arena = complex_fixture();
+        arena.reverse_segment(Node::new(0), Node::new(3));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 3, 2, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_reverse_segment_unchecked_over_a_whole_ring_reverses_it() {
+        let mut arena = complex_fixture();
+        unsafe { arena.reverse_segment_unchecked(Node::new(5), Node::new(4)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 4), [4, 6, 5].map(Node::new));
     }
 }
