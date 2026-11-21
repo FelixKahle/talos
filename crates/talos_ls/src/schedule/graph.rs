@@ -22,6 +22,32 @@ fn vessel_of(node: Node) -> VesselIndex {
 }
 
 // ----------------------------------------------------------------
+// LinkEnd
+// ----------------------------------------------------------------
+
+/// One end of a link between consecutive places of a berth: a vessel, or the boundary of a berth.
+///
+/// A link runs from the head boundary of its berth or a vessel to a vessel or the tail boundary of its berth: a
+/// [`Berth`](Self::Berth) end is the berth's head when it is where a link starts, and its tail when it is where a
+/// link ends. An empty berth has the one link from its head to its tail.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LinkEnd {
+    /// The vessel served at this place of the berth.
+    Vessel(VesselIndex),
+    /// The boundary of the berth: its head where a link starts, its tail where one ends.
+    Berth(BerthIndex),
+}
+
+impl fmt::Display for LinkEnd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Vessel(vessel) => write!(f, "{vessel}"),
+            Self::Berth(berth) => write!(f, "the boundary of {berth}"),
+        }
+    }
+}
+
+// ----------------------------------------------------------------
 // VesselSequenceIter
 // ----------------------------------------------------------------
 
@@ -94,39 +120,39 @@ impl FusedIterator for VesselSequenceIter<'_> {}
 /// Where a [`BerthTopologyIter`] stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BerthTopologyState {
-    /// The sentinel that opens the berth is next.
-    StartSentinel,
-    /// The berth's vessels are next, and after them the sentinel that closes it.
+    /// The berth's head is next.
+    Head,
+    /// The berth's vessels are next, and after them its tail.
     Vessels,
-    /// Every node has been yielded.
+    /// Every end has been yielded.
     Done,
 }
 
-/// The nodes of a berth's ring, from its sentinel through its vessels back to its sentinel, so that consecutive
-/// nodes are the links of the berth, its ends included.
+/// The places of a berth from its head through its vessels to its tail, so that consecutive ends are the links of
+/// the berth, its boundaries included.
 #[derive(Clone, Debug)]
 pub struct BerthTopologyIter<'a> {
     /// The walk over the berth's vessels.
     inner: VesselSequenceIter<'a>,
-    /// The berth's sentinel.
-    sentinel: Node,
+    /// The berth walked.
+    berth: BerthIndex,
     /// Where the walk stands.
     state: BerthTopologyState,
 }
 
 impl Iterator for BerthTopologyIter<'_> {
-    type Item = Node;
+    type Item = LinkEnd;
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         match self.state {
-            BerthTopologyState::StartSentinel => {
+            BerthTopologyState::Head => {
                 self.state = BerthTopologyState::Vessels;
-                Some(self.sentinel)
+                Some(LinkEnd::Berth(self.berth))
             }
-            BerthTopologyState::Vessels => self.inner.next().map(node_of).or_else(|| {
+            BerthTopologyState::Vessels => self.inner.next().map(LinkEnd::Vessel).or_else(|| {
                 self.state = BerthTopologyState::Done;
-                Some(self.sentinel)
+                Some(LinkEnd::Berth(self.berth))
             }),
             BerthTopologyState::Done => None,
         }
@@ -136,7 +162,7 @@ impl Iterator for BerthTopologyIter<'_> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, upper) = self.inner.inner.size_hint();
         let sentinels = match self.state {
-            BerthTopologyState::StartSentinel => 2,
+            BerthTopologyState::Head => 2,
             BerthTopologyState::Vessels => 1,
             BerthTopologyState::Done => 0,
         };
@@ -193,7 +219,6 @@ enum Step {
     VesselSequenceIter,
     VesselSequenceRevIter,
     BerthTopologyIter,
-    Sentinel,
     SwapVessels,
     SwapSegments,
     ReverseSegment,
@@ -217,7 +242,6 @@ impl fmt::Display for Step {
             Self::VesselSequenceIter => "vessel_sequence_iter",
             Self::VesselSequenceRevIter => "vessel_sequence_rev_iter",
             Self::BerthTopologyIter => "berth_topology_iter",
-            Self::Sentinel => "sentinel",
             Self::SwapVessels => "swap_vessels",
             Self::SwapSegments => "swap_segments",
             Self::ReverseSegment => "reverse_segment",
@@ -439,7 +463,7 @@ impl ScheduleGraph {
         self.berth_vessel_count.resize(num_berths, 0);
         for vessel in order {
             let berth = berths[vessel.index()];
-            let sentinel = self.sentinel(berth);
+            let sentinel = self.sentinel_of(berth);
             debug_assert!(
                 node_of(vessel).index() < self.arena.len() && sentinel.index() < self.arena.len()
             );
@@ -553,18 +577,6 @@ impl ScheduleGraph {
         VesselIndexIter::new(self.num_vessels())
     }
 
-    /// The node that opens and closes the ring of `berth`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `berth` is not one of the graph's.
-    #[inline]
-    #[track_caller]
-    pub fn sentinel(&self, berth: BerthIndex) -> Node {
-        self.check(Step::Sentinel, [], [berth]);
-        Node::new(self.num_vessels() + berth.index())
-    }
-
     /// The node that opens and closes the ring of `berth`, for a berth the caller knows to be the graph's.
     ///
     /// No memory rests on `berth`: the node is only computed. The node lies in the arena when `berth` is the
@@ -579,25 +591,25 @@ impl ScheduleGraph {
         Node::new(self.num_vessels() + berth.index())
     }
 
-    /// The node after `node` on its ring.
+    /// The link end that `node` stands for: its vessel, or the berth whose sentinel it is.
     ///
-    /// # Panics
-    ///
-    /// Panics if `node` is neither a vessel's node nor a berth's sentinel of the graph.
-    #[inline]
-    #[track_caller]
-    pub fn next_node(&self, node: Node) -> Node {
-        self.arena.next(node)
+    /// A node beyond the arena gives a berth beyond the graph's; no memory rests on it, since the end is only
+    /// computed.
+    #[inline(always)]
+    pub(super) fn link_end(&self, node: Node) -> LinkEnd {
+        match self.node_vessel(node) {
+            Some(vessel) => LinkEnd::Vessel(vessel),
+            None => LinkEnd::Berth(BerthIndex::new(node.index() - self.num_vessels())),
+        }
     }
 
     /// The node after `node` on its ring, for a node the caller knows to be the graph's.
     ///
     /// # Safety
     ///
-    /// `node` must be a vessel's node or a berth's sentinel of the graph, the condition
-    /// [`next_node`](Self::next_node) checks.
+    /// `node` must be a vessel's node or a berth's sentinel of the graph.
     #[inline(always)]
-    pub unsafe fn next_node_unchecked(&self, node: Node) -> Node {
+    pub(super) unsafe fn next_node_unchecked(&self, node: Node) -> Node {
         debug_assert!(
             node.index() < self.arena.len(),
             "called `ScheduleGraph::next_node_unchecked` with {node}, outside a graph of {} nodes",
@@ -607,25 +619,13 @@ impl ScheduleGraph {
         unsafe { self.arena.next_unchecked(node) }
     }
 
-    /// The node before `node` on its ring.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `node` is neither a vessel's node nor a berth's sentinel of the graph.
-    #[inline]
-    #[track_caller]
-    pub fn prev_node(&self, node: Node) -> Node {
-        self.arena.prev(node)
-    }
-
     /// The node before `node` on its ring, for a node the caller knows to be the graph's.
     ///
     /// # Safety
     ///
-    /// `node` must be a vessel's node or a berth's sentinel of the graph, the condition
-    /// [`prev_node`](Self::prev_node) checks.
+    /// `node` must be a vessel's node or a berth's sentinel of the graph.
     #[inline(always)]
-    pub unsafe fn prev_node_unchecked(&self, node: Node) -> Node {
+    pub(super) unsafe fn prev_node_unchecked(&self, node: Node) -> Node {
         debug_assert!(
             node.index() < self.arena.len(),
             "called `ScheduleGraph::prev_node_unchecked` with {node}, outside a graph of {} nodes",
@@ -887,7 +887,7 @@ impl ScheduleGraph {
         segment.last() == Some(last)
     }
 
-    /// The nodes of the ring of `berth`: its sentinel, its vessels from head to tail, and its sentinel again.
+    /// The places of `berth` as link ends: its head, its vessels from head to tail, and its tail.
     ///
     /// # Panics
     ///
@@ -900,7 +900,7 @@ impl ScheduleGraph {
         unsafe { self.berth_topology_iter_unchecked(berth) }
     }
 
-    /// The nodes of the ring of `berth`, sentinel to sentinel, for a berth the caller knows to be the graph's.
+    /// The places of `berth` as link ends, head to tail, for a berth the caller knows to be the graph's.
     ///
     /// # Safety
     ///
@@ -917,8 +917,8 @@ impl ScheduleGraph {
         let inner = unsafe { self.vessel_sequence_iter_unchecked(berth) };
         BerthTopologyIter {
             inner,
-            sentinel: self.sentinel_of(berth),
-            state: BerthTopologyState::StartSentinel,
+            berth,
+            state: BerthTopologyState::Head,
         }
     }
 
@@ -1882,6 +1882,41 @@ mod tests {
         assert!(!graph.is_segment(vessel(0), vessel(3)));
         assert!(!graph.is_segment(vessel(0), vessel(6)));
         assert!(!graph.is_segment(vessel(6), vessel(0)));
+    }
+
+    #[test]
+    fn test_berth_topology_walks_from_the_head_through_the_vessels_to_the_tail() {
+        let graph = standard_fixture();
+        let topology: Vec<_> = graph.berth_topology_iter(berth(0)).collect();
+        assert_eq!(
+            topology,
+            [
+                LinkEnd::Berth(berth(0)),
+                LinkEnd::Vessel(vessel(0)),
+                LinkEnd::Vessel(vessel(2)),
+                LinkEnd::Vessel(vessel(1)),
+                LinkEnd::Berth(berth(0)),
+            ]
+        );
+        let empty: Vec<_> = graph.berth_topology_iter(berth(3)).collect();
+        assert_eq!(empty, [LinkEnd::Berth(berth(3)), LinkEnd::Berth(berth(3))]);
+    }
+
+    #[test]
+    fn test_link_end_names_the_vessel_of_a_vessel_node_and_the_berth_of_a_sentinel() {
+        let graph = standard_fixture();
+        assert_eq!(
+            graph.link_end(graph.vessel_node(vessel(5))),
+            LinkEnd::Vessel(vessel(5))
+        );
+        assert_eq!(
+            graph.link_end(graph.sentinel_of(berth(0))),
+            LinkEnd::Berth(berth(0))
+        );
+        assert_eq!(
+            graph.link_end(graph.sentinel_of(berth(3))),
+            LinkEnd::Berth(berth(3))
+        );
     }
 
     #[test]

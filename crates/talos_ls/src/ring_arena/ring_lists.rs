@@ -7,6 +7,28 @@ use super::arena::RingArena;
 use super::node::Node;
 use proptest::prelude::*;
 
+/// The successor of `node`, which the test asserts to lie in `arena`.
+pub(super) fn next(arena: &RingArena, node: Node) -> Node {
+    assert!(
+        node.index() < arena.len(),
+        "{node} should lie in an arena of {} nodes",
+        arena.len()
+    );
+    // SAFETY: `node` lies in the arena, as the assertion above found.
+    unsafe { arena.next_unchecked(node) }
+}
+
+/// The predecessor of `node`, which the test asserts to lie in `arena`.
+pub(super) fn prev(arena: &RingArena, node: Node) -> Node {
+    assert!(
+        node.index() < arena.len(),
+        "{node} should lie in an arena of {} nodes",
+        arena.len()
+    );
+    // SAFETY: `node` lies in the arena, as the assertion above found.
+    unsafe { arena.prev_unchecked(node) }
+}
+
 /// The rings as lists of node indices, each in successor order.
 pub(super) type Rings = Vec<Vec<usize>>;
 
@@ -34,7 +56,7 @@ pub(super) fn three_rings() -> RingArena {
 pub(super) fn ring_of(arena: &RingArena, start: usize) -> Vec<usize> {
     let start = Node::new(start);
     let mut ring = vec![start.index()];
-    let mut current = arena.next(start);
+    let mut current = next(arena, start);
     while current != start {
         assert!(
             ring.len() < arena.len(),
@@ -42,7 +64,7 @@ pub(super) fn ring_of(arena: &RingArena, start: usize) -> Vec<usize> {
             arena.len()
         );
         ring.push(current.index());
-        current = arena.next(current);
+        current = next(arena, current);
     }
     ring
 }
@@ -51,12 +73,12 @@ pub(super) fn ring_of(arena: &RingArena, start: usize) -> Vec<usize> {
 pub(super) fn assert_links_are_inverse(arena: &RingArena) {
     for node in (0..arena.len()).map(Node::new) {
         assert_eq!(
-            arena.prev(arena.next(node)),
+            prev(arena, next(arena, node)),
             node,
             "the predecessor of the successor of {node} should be {node}"
         );
         assert_eq!(
-            arena.next(arena.prev(node)),
+            next(arena, prev(arena, node)),
             node,
             "the successor of the predecessor of {node} should be {node}"
         );

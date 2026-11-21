@@ -10,11 +10,10 @@
 //! increments its penalty counter. The augmented objective pushes the search
 //! into unexplored regions of the solution space.
 
-use crate::ring_arena::Node;
 use crate::{
     exec::SearchCommand,
     meta::metaheuristic::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
-    schedule::{ScheduleGraph, ScheduleGraphDiff},
+    schedule::{LinkEnd, ScheduleGraph, ScheduleGraphDiff},
 };
 use num_traits::ToPrimitive;
 use talos_core::SolverNumeric;
@@ -35,9 +34,9 @@ use talos_model::{BerthIndex, Model, SolutionView, VesselIndex};
 /// current penalty count. Features with high cost and low penalty
 /// are penalized first.
 pub trait FeatureCost: std::fmt::Debug {
-    /// Returns the cost of an edge feature between two nodes.
-    /// Either node may be a vessel or a berth sentinel.
-    fn edge_cost(&self, a: Node, b: Node) -> f64;
+    /// Returns the cost of an edge feature, the link from `a` to `b`.
+    /// Either end may be a vessel or the boundary of a berth.
+    fn edge_cost(&self, a: LinkEnd, b: LinkEnd) -> f64;
 
     /// Returns the cost of a berth-assignment feature (vessel `v` assigned
     /// to berth `b`).
@@ -53,7 +52,7 @@ pub struct UniformCost;
 
 impl FeatureCost for UniformCost {
     #[inline]
-    fn edge_cost(&self, _a: Node, _b: Node) -> f64 {
+    fn edge_cost(&self, _a: LinkEnd, _b: LinkEnd) -> f64 {
         1.0
     }
 
@@ -141,10 +140,10 @@ impl PenalizationStrategy for MaxUtilityPenalization {
         for berth in graph.berths() {
             let topo_iter = graph.berth_topology_iter(berth);
 
-            for (prev_node, next_node) in topo_iter.clone().zip(topo_iter.skip(1)) {
-                if prev_node.index() < num_vessels || next_node.index() < num_vessels {
-                    let c = cost.edge_cost(prev_node, next_node);
-                    let idx = edge_flat_index(prev_node, next_node, num_vessels);
+            for (prev_end, next_end) in topo_iter.clone().zip(topo_iter.skip(1)) {
+                if is_feature(prev_end, next_end) {
+                    let c = cost.edge_cost(prev_end, next_end);
+                    let idx = edge_flat_index(prev_end, next_end, num_vessels);
 
                     debug_assert!(idx < memory.edge.len());
                     let p = unsafe { *memory.edge.get_unchecked(idx) } as f64;
@@ -212,21 +211,41 @@ pub struct PenaltyMemory {
     num_berths: usize,
 }
 
+/// Whether the link `from -> to` is an edge feature: one of its ends is a vessel. The link from the head to the
+/// tail of an empty berth is none.
+#[inline(always)]
+fn is_feature(from: LinkEnd, to: LinkEnd) -> bool {
+    matches!(from, LinkEnd::Vessel(_)) || matches!(to, LinkEnd::Vessel(_))
+}
+
+/// The row or column of `end` in the table of edge features: a vessel's own index, and `num_vessels` for the
+/// boundary of every berth.
+///
+/// A vessel at or beyond `num_vessels`, which no graph of that many vessels names, takes the row of the
+/// boundaries, so that the index stays inside the table.
+#[inline(always)]
+fn end_index(end: LinkEnd, num_vessels: usize) -> usize {
+    match end {
+        LinkEnd::Vessel(vessel) => vessel.index().min(num_vessels),
+        LinkEnd::Berth(_) => num_vessels,
+    }
+}
+
 /// Computes the flat index for an edge feature.
 ///
-/// **Sentinel collapsing**: All sentinel nodes (index ≥ `num_vessels`)
-/// are mapped to the single row/column `num_vessels`. This means edges
-/// involving *different* berth sentinels share the same penalty counter.
-/// This is intentional — the sequence penalty tracks "vessel near a
-/// boundary", not "vessel near berth-3's boundary specifically".
+/// **Boundary collapsing**: The boundaries of all berths are mapped to
+/// the single row/column `num_vessels`. This means edges involving
+/// *different* berth boundaries share the same penalty counter. This is
+/// intentional — the sequence penalty tracks "vessel near a boundary",
+/// not "vessel near berth-3's boundary specifically".
 ///
 /// The resulting index is guaranteed to be less than
 /// $(\text{num\_vessels} + 1)^2$ — the allocation size of
 /// `PenaltyMemory::edge`.
 #[inline(always)]
-fn edge_flat_index(from: Node, to: Node, num_vessels: usize) -> usize {
-    let a = from.index().min(num_vessels);
-    let b = to.index().min(num_vessels);
+fn edge_flat_index(from: LinkEnd, to: LinkEnd, num_vessels: usize) -> usize {
+    let a = end_index(from, num_vessels);
+    let b = end_index(to, num_vessels);
     a * (num_vessels + 1) + b
 }
 
@@ -273,10 +292,10 @@ impl PenaltyMemory {
     ///
     /// # Arguments
     ///
-    /// * `from` — The source node (vessel or sentinel).
-    /// * `to` — The destination node (vessel or sentinel).
+    /// * `from` — The end the link leaves (a vessel or a berth's boundary).
+    /// * `to` — The end the link reaches (a vessel or a berth's boundary).
     #[inline]
-    pub fn edge_penalty(&self, from: Node, to: Node) -> u64 {
+    pub fn edge_penalty(&self, from: LinkEnd, to: LinkEnd) -> u64 {
         let idx = edge_flat_index(from, to, self.num_vessels);
         debug_assert!(idx < self.edge.len());
 
@@ -337,9 +356,10 @@ impl PenaltyMemory {
             }
 
             // Subtract penalties for old berth assignments, add for new.
-            for (vessel, old_berth, new_berth) in diff.reallocations() {
-                let old_idx = vessel.index() * self.num_berths + old_berth.index();
-                let new_idx = vessel.index() * self.num_berths + new_berth.index();
+            for reallocation in diff.reallocations() {
+                let vessel = reallocation.vessel;
+                let old_idx = vessel.index() * self.num_berths + reallocation.from.index();
+                let new_idx = vessel.index() * self.num_berths + reallocation.to.index();
                 debug_assert!(
                     old_idx < self.berth.len(),
                     "penalty_delta old berth: index {old_idx} out of bounds (len {})",
@@ -1047,21 +1067,15 @@ where
         let mut sum: i64 = 0;
 
         for berth in graph.berths() {
-            let sentinel = graph.sentinel(berth);
-            let mut prev_node = sentinel;
-            loop {
-                let next = graph.next_node(prev_node);
-                if prev_node.index() < num_vessels || next.index() < num_vessels {
-                    let idx = edge_flat_index(prev_node, next, num_vessels);
+            let topo_iter = graph.berth_topology_iter(berth);
+            for (prev_end, next_end) in topo_iter.clone().zip(topo_iter.skip(1)) {
+                if is_feature(prev_end, next_end) {
+                    let idx = edge_flat_index(prev_end, next_end, num_vessels);
                     debug_assert!(idx < self.memory.edge.len());
 
                     // SAFETY: idx < (num_vessels+1)^2, the edge allocation size.
                     sum += unsafe { *self.memory.edge.get_unchecked(idx) } as i64;
                 }
-                if next == sentinel {
-                    break;
-                }
-                prev_node = next;
             }
         }
 
@@ -1307,6 +1321,16 @@ where
 mod tests {
     use super::*;
 
+    /// The link end that node `index` of a graph of `num_vessels` vessels stands for: the vessel below the count,
+    /// and the boundary of berth `index - num_vessels` from it on.
+    fn end(index: usize, num_vessels: usize) -> LinkEnd {
+        if index < num_vessels {
+            LinkEnd::Vessel(VesselIndex::new(index))
+        } else {
+            LinkEnd::Berth(BerthIndex::new(index - num_vessels))
+        }
+    }
+
     #[test]
     fn test_penalty_memory_new_zeroed() {
         let mem = PenaltyMemory::new(3, 2);
@@ -1329,8 +1353,8 @@ mod tests {
     #[test]
     fn test_penalty_memory_edge_lookup() {
         let mut mem = PenaltyMemory::new(3, 2);
-        let a = Node::new(0);
-        let b = Node::new(1);
+        let a = end(0, 3);
+        let b = end(1, 3);
         assert_eq!(mem.edge_penalty(a, b), 0);
         let idx = edge_flat_index(a, b, 3);
         mem.edge[idx] = 7;
@@ -1351,8 +1375,8 @@ mod tests {
     fn test_penalty_memory_sentinel_edge() {
         let mem = PenaltyMemory::new(3, 2);
         // Sentinel -> vessel edge uses index num_vessels for the sentinel.
-        let sentinel = Node::new(3); // sentinel index = num_vessels
-        let v = Node::new(2);
+        let sentinel = end(3, 3); // the boundary of berth 0
+        let v = end(2, 3);
         let idx = edge_flat_index(sentinel, v, 3);
         // Should map to row=3, col=2 -> 3*4+2 = 14
         assert_eq!(idx, 14);
@@ -1362,8 +1386,8 @@ mod tests {
     #[test]
     fn test_uniform_cost_always_one() {
         let cost = UniformCost;
-        assert_eq!(cost.edge_cost(Node::new(0), Node::new(1)), 1.0);
-        assert_eq!(cost.edge_cost(Node::new(3), Node::new(0)), 1.0);
+        assert_eq!(cost.edge_cost(end(0, 3), end(1, 3)), 1.0);
+        assert_eq!(cost.edge_cost(end(3, 3), end(0, 3)), 1.0);
         assert_eq!(
             cost.berth_cost(VesselIndex::new(0), BerthIndex::new(0)),
             1.0
@@ -1372,24 +1396,24 @@ mod tests {
 
     #[test]
     fn test_edge_flat_index_vessel_to_vessel() {
-        let a = Node::new(1);
-        let b = Node::new(2);
+        let a = end(1, 4);
+        let b = end(2, 4);
         // With num_vessels=4, stride = 5. Index = 1*5 + 2 = 7.
         assert_eq!(edge_flat_index(a, b, 4), 7);
     }
 
     #[test]
     fn test_edge_flat_index_sentinel_to_vessel() {
-        let sentinel = Node::new(3); // sentinel index >= num_vessels
-        let b = Node::new(0);
+        let sentinel = end(3, 3); // the boundary of berth 0
+        let b = end(0, 3);
         // Sentinel maps to 3. Index = 3 * 4 + 0 = 12.
         assert_eq!(edge_flat_index(sentinel, b, 3), 12);
     }
 
     #[test]
     fn test_edge_flat_index_vessel_to_sentinel() {
-        let a = Node::new(0);
-        let sentinel = Node::new(3); // sentinel index >= num_vessels
+        let a = end(0, 3);
+        let sentinel = end(3, 3); // the boundary of berth 0
         // Sentinel maps to 3. Index = 0 * 4 + 3 = 3.
         assert_eq!(edge_flat_index(a, sentinel, 3), 3);
     }
@@ -1687,9 +1711,9 @@ mod tests {
     #[test]
     fn test_edge_flat_index_sentinels_collapse() {
         let num_vessels = 3;
-        let sentinel_berth0 = Node::new(3); // first sentinel
-        let sentinel_berth1 = Node::new(4); // second sentinel
-        let vessel = Node::new(0);
+        let sentinel_berth0 = end(3, num_vessels); // the boundary of berth 0
+        let sentinel_berth1 = end(4, num_vessels); // the boundary of berth 1
+        let vessel = end(0, num_vessels);
 
         // Both sentinels must map to the same flat index.
         let idx0 = edge_flat_index(sentinel_berth0, vessel, num_vessels);
@@ -1708,9 +1732,9 @@ mod tests {
     #[test]
     fn test_edge_flat_index_sentinel_to_sentinel_collapse() {
         let num_vessels = 4;
-        let s0 = Node::new(4);
-        let s1 = Node::new(5);
-        let s2 = Node::new(99); // wildly out of range sentinel
+        let s0 = end(4, num_vessels);
+        let s1 = end(5, num_vessels);
+        let s2 = end(99, num_vessels); // wildly out of range berth
 
         let idx_s0s0 = edge_flat_index(s0, s0, num_vessels);
         let idx_s1s2 = edge_flat_index(s1, s2, num_vessels);
@@ -1725,10 +1749,20 @@ mod tests {
         // Exhaustively verify every possible pair stays in bounds.
         for a in 0..=(num_vessels + 3) {
             for b in 0..=(num_vessels + 3) {
-                let idx = edge_flat_index(Node::new(a), Node::new(b), num_vessels);
+                let idx = edge_flat_index(end(a, num_vessels), end(b, num_vessels), num_vessels);
                 assert!(
                     idx < max_alloc,
                     "index {idx} out of bounds for a={a}, b={b}"
+                );
+                // A vessel beyond the count, which no graph of that many vessels names, stays inside too.
+                let (vessel_a, vessel_b) = (
+                    LinkEnd::Vessel(VesselIndex::new(a)),
+                    LinkEnd::Vessel(VesselIndex::new(b)),
+                );
+                let idx = edge_flat_index(vessel_a, vessel_b, num_vessels);
+                assert!(
+                    idx < max_alloc,
+                    "index {idx} out of bounds for vessels a={a}, b={b}"
                 );
             }
         }

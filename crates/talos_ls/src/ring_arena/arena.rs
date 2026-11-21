@@ -53,8 +53,6 @@ pub struct RingArena {
 )]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
-    Next,
-    Prev,
     Sequence,
     SequenceRev,
     Links,
@@ -70,8 +68,6 @@ enum Step {
 impl fmt::Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::Next => "next",
-            Self::Prev => "prev",
             Self::Sequence => "sequence",
             Self::SequenceRev => "sequence_rev",
             Self::Links => "links",
@@ -152,26 +148,11 @@ impl RingArena {
         self.prev.len()
     }
 
-    /// The successor of `node` in its ring.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `node` lies outside the arena.
-    #[inline]
-    #[track_caller]
-    pub fn next(&self, node: Node) -> Node {
-        let [node] = match self.slots([node]) {
-            Ok(slots) => slots,
-            Err(node) => self.outside(Step::Next, node).panic(),
-        };
-        self.next_slot(node).node()
-    }
-
     /// The successor of `node` in its ring, for a `node` the caller knows to lie in the arena.
     ///
     /// # Safety
     ///
-    /// `node` must lie in the arena, the condition [`next`](RingArena::next) checks.
+    /// `node` must lie in the arena.
     #[inline]
     pub unsafe fn next_unchecked(&self, node: Node) -> Node {
         debug_assert!(
@@ -184,26 +165,11 @@ impl RingArena {
         self.next_slot(node).node()
     }
 
-    /// The predecessor of `node` in its ring.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `node` lies outside the arena.
-    #[inline]
-    #[track_caller]
-    pub fn prev(&self, node: Node) -> Node {
-        let [node] = match self.slots([node]) {
-            Ok(slots) => slots,
-            Err(node) => self.outside(Step::Prev, node).panic(),
-        };
-        self.prev_slot(node).node()
-    }
-
     /// The predecessor of `node` in its ring, for a `node` the caller knows to lie in the arena.
     ///
     /// # Safety
     ///
-    /// `node` must lie in the arena, the condition [`prev`](RingArena::prev) checks.
+    /// `node` must lie in the arena.
     #[inline]
     pub unsafe fn prev_unchecked(&self, node: Node) -> Node {
         debug_assert!(
@@ -1075,8 +1041,8 @@ impl Clone for RingArena {
 #[cfg(test)]
 mod tests {
     use super::super::ring_lists::{
-        Rings, arena_of, assert_links_are_inverse, canonical, locate, ring_of, rings_of, segment,
-        some_rings, three_rings,
+        Rings, arena_of, assert_links_are_inverse, canonical, locate, next, prev, ring_of,
+        rings_of, segment, some_rings, three_rings,
     };
     use super::*;
     use proptest::prelude::*;
@@ -1137,9 +1103,9 @@ mod tests {
     fn test_next_and_prev_follow_the_rings() {
         let arena = three_rings();
         let [n0, n1, n3, n7] = nodes([0, 1, 3, 7]);
-        assert_eq!((arena.next(n0), arena.prev(n1)), (n1, n0));
-        assert_eq!((arena.next(n3), arena.prev(n0)), (n0, n3));
-        assert_eq!((arena.next(n7), arena.prev(n7)), (n7, n7));
+        assert_eq!((next(&arena, n0), prev(&arena, n1)), (n1, n0));
+        assert_eq!((next(&arena, n3), prev(&arena, n0)), (n0, n3));
+        assert_eq!((next(&arena, n7), prev(&arena, n7)), (n7, n7));
     }
 
     #[test]
@@ -1461,18 +1427,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "called `RingArena::next` with Node 8, outside an arena of 8 nodes")]
-    fn test_next_refuses_a_node_outside() {
-        let _ = three_rings().next(Node::new(8));
-    }
-
-    #[test]
-    #[should_panic(expected = "called `RingArena::prev` with Node 8, outside an arena of 8 nodes")]
-    fn test_prev_refuses_a_node_outside() {
-        let _ = three_rings().prev(Node::new(8));
-    }
-
-    #[test]
     #[should_panic(
         expected = "called `RingArena::swap_nodes` with Node 8, outside an arena of 8 nodes"
     )]
@@ -1777,13 +1731,11 @@ mod tests {
         }
 
         #[test]
-        fn test_next_and_prev_equal_their_unchecked_twins((len, rings) in some_rings()) {
+        fn test_next_and_prev_match_the_model_of_rings_as_lists((len, rings) in some_rings()) {
             let arena = arena_of(&rings, len);
             for node in (0..len).map(Node::new) {
                 // SAFETY: every node below the length lies in the arena.
                 let (next, prev) = unsafe { (arena.next_unchecked(node), arena.prev_unchecked(node)) };
-                prop_assert_eq!(arena.next(node), next);
-                prop_assert_eq!(arena.prev(node), prev);
                 let ring = &rings[locate(&rings, node.index()).0];
                 let place = ring.iter().position(|&n| n == node.index()).unwrap();
                 prop_assert_eq!(next.index(), ring[(place + 1) % ring.len()]);

@@ -4,7 +4,7 @@
 //! The moves of the local search on a schedule graph, each recorded as it is made.
 
 use super::diff::ScheduleGraphDiff;
-use super::graph::ScheduleGraph;
+use super::graph::{LinkEnd, ScheduleGraph};
 use super::touched_berths::TouchedBerths;
 use super::undo_log::ScheduleGraphUndoLog;
 use crate::ring_arena::Node;
@@ -52,8 +52,9 @@ impl<const N: usize> LinkSnapshot<N> {
             // SAFETY: `node` is the graph's, the precondition of this function.
             let after = unsafe { graph.next_node_unchecked(node) };
             if before != after {
-                diff.push_link_broken(node, before);
-                diff.push_link_created(node, after);
+                let from = graph.link_end(node);
+                diff.push_link_broken(from, graph.link_end(before));
+                diff.push_link_created(from, graph.link_end(after));
             }
         }
     }
@@ -396,19 +397,24 @@ impl<'a> Mutator<'a> {
         };
         // SAFETY: `berth` is the graph's, as above.
         unsafe { self.touch_unchecked(berth) };
-        self.diff.push_link_broken(before_first, first_node);
-        self.diff.push_link_broken(last_node, after_last);
+        let (before_first, after_last) = (
+            self.graph.link_end(before_first),
+            self.graph.link_end(after_last),
+        );
+        let (first_end, last_end) = (LinkEnd::Vessel(first), LinkEnd::Vessel(last));
+        self.diff.push_link_broken(before_first, first_end);
+        self.diff.push_link_broken(last_end, after_last);
         // SAFETY: both vessels are the graph's, the precondition of this function.
         let segment = unsafe { self.graph.segment_unchecked(first, last) };
-        let mut previous = first_node;
+        let mut previous = first_end;
         for vessel in segment.skip(1) {
-            let node = self.graph.vessel_node(vessel);
-            self.diff.push_link_broken(previous, node);
-            self.diff.push_link_created(node, previous);
-            previous = node;
+            let end = LinkEnd::Vessel(vessel);
+            self.diff.push_link_broken(previous, end);
+            self.diff.push_link_created(end, previous);
+            previous = end;
         }
-        self.diff.push_link_created(before_first, last_node);
-        self.diff.push_link_created(first_node, after_last);
+        self.diff.push_link_created(before_first, last_end);
+        self.diff.push_link_created(first_end, after_last);
         self.undo.push_reverse_segment(first, last);
         // SAFETY: both vessels are the graph's, the precondition of this function.
         unsafe { self.graph.reverse_segment_unchecked(first, last) };
@@ -1104,7 +1110,9 @@ mod tests {
     fn extract_reallocations(
         diff: &ScheduleGraphDiff,
     ) -> Vec<(VesselIndex, BerthIndex, BerthIndex)> {
-        diff.reallocations().collect()
+        diff.reallocations()
+            .map(|moved| (moved.vessel, moved.from, moved.to))
+            .collect()
     }
 
     #[test]
@@ -1682,7 +1690,7 @@ mod tests {
                 let moved: Vec<_> = harness.diff.reallocations().collect();
                 for vessel in 0..berths.len() {
                     let (from, to) = (locate(&before, vessel).0, locate(&after, vessel).0);
-                    let recorded = moved.iter().filter(|&&(recorded, _, _)| recorded == v(vessel)).count();
+                    let recorded = moved.iter().filter(|recorded| recorded.vessel == v(vessel)).count();
                     prop_assert_eq!(recorded, usize::from(from != to), "{:?} and vessel {}", change, vessel);
                 }
             }
