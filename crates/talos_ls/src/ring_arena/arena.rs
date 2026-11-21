@@ -834,7 +834,7 @@ impl RingArena {
             "called `RingArena::swap_ranges` with a last node that does not follow its first"
         );
         debug_assert!(
-            a_first == b_first
+            (a_first == b_first && a_last == b_last)
                 || !(self.segment_holds(a_first, a_last, b_first)
                     || self.segment_holds(b_first, b_last, a_first)),
             "called `RingArena::swap_ranges` with overlapping segments"
@@ -2256,6 +2256,12 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "called `RingArena::swap_ranges` with overlapping segments")]
+    fn test_swap_segments_of_one_first_node_but_different_last_nodes_fails_its_precondition() {
+        complex_fixture().swap_segments(Node::new(1), Node::new(2), Node::new(1), Node::new(3));
+    }
+
+    #[test]
+    #[should_panic(expected = "called `RingArena::swap_ranges` with overlapping segments")]
     fn test_swap_overlapping_segments_fails_its_precondition() {
         complex_fixture().swap_segments(Node::new(0), Node::new(2), Node::new(1), Node::new(3));
     }
@@ -2464,7 +2470,7 @@ mod tests {
             Step::SwapSegments(a, a_extra, b, b_extra) => {
                 let (ring_a, nodes_a, rest_a) = segment(rings, a % len, a_extra);
                 let (ring_b, nodes_b, rest_b) = segment(rings, b % len, b_extra);
-                let same = nodes_a[0] == nodes_b[0];
+                let same = nodes_a == nodes_b;
                 if !same && (nodes_a.contains(&nodes_b[0]) || nodes_b.contains(&nodes_a[0])) {
                     return;
                 }
