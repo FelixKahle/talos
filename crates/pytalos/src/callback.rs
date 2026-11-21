@@ -2,25 +2,38 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use pyo3::prelude::*;
-use talos_model::SolutionView;
+use talos_ls::{LocalSearchMonitor, SearchProgress};
 
-/// Wraps an optional Python callback into a Rust closure.
+/// The monitor that calls an optional Python callback at every new best solution.
 ///
 /// The callback receives `(objective: int, berths: list[int], start_times: list[int])`.
-#[allow(clippy::type_complexity)]
-pub fn make_callback(py_cb: Option<Py<PyAny>>) -> Box<dyn FnMut(SolutionView<'_, i64>) + Send> {
-    match py_cb {
-        Some(cb) => Box::new(move |sol: SolutionView<'_, i64>| {
-            let obj = sol.objective_value();
-            let berths: Vec<usize> = sol.assigned_berths().iter().map(|bi| bi.index()).collect();
-            let start_times: Vec<i64> = sol.start_times().iter().copied().collect();
+pub struct PyCallbackMonitor {
+    callback: Option<Py<PyAny>>,
+}
 
-            Python::attach(|py| {
-                if let Err(e) = cb.call1(py, (obj, berths, start_times)) {
-                    eprintln!("Python callback error: {}", e);
-                }
-            });
-        }),
-        None => Box::new(|_| {}),
+impl PyCallbackMonitor {
+    pub fn new(callback: Option<Py<PyAny>>) -> Self {
+        Self { callback }
+    }
+}
+
+impl LocalSearchMonitor<i64> for PyCallbackMonitor {
+    fn on_best_solution_updated(&mut self, progress: SearchProgress<'_, i64>) {
+        let Some(callback) = &self.callback else {
+            return;
+        };
+        let best = progress.best;
+        let objective = best.objective_value();
+        let berths: Vec<usize> = best
+            .assigned_berths()
+            .iter()
+            .map(|berth| berth.index())
+            .collect();
+        let start_times: Vec<i64> = best.start_times().iter().copied().collect();
+        Python::attach(|py| {
+            if let Err(error) = callback.call1(py, (objective, berths, start_times)) {
+                eprintln!("Python callback error: {}", error);
+            }
+        });
     }
 }

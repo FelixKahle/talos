@@ -11,5 +11,7 @@ mod schedule_state;
 
 mod decoder;
 
-pub use decoder::{decode_full_unchecked, decode_unchecked};
-pub use schedule_state::ScheduleState;
+#[cfg(test)]
+pub(super) use decoder::benches;
+pub(super) use decoder::{decode_full_unchecked, decode_unchecked};
+pub(super) use schedule_state::ScheduleState;

@@ -229,12 +229,26 @@ impl ScheduleGraphDiff {
 
     /// The number of links recorded as broken.
     #[inline(always)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn link_broken_count(&self) -> usize {
         self.broken_from.len()
     }
 
     /// The number of links recorded as created.
     #[inline(always)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn link_created_count(&self) -> usize {
         self.created_from.len()
     }

@@ -1,423 +1,206 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Greedy Descent metaheuristic for local search.
-//!
-//! Greedy Descent (GD) is the simplest descent-based strategy: it only accepts
-//! moves that strictly improve the objective value. It never accepts equal or
-//! worsening moves, making it a pure hill climber that terminates at the first
+//! Greedy descent: a hill climber that accepts only moves that strictly lower the objective, and ends at the first
 //! local optimum.
-//!
-//! # Selection Strategy
-//!
-//! The move selection strategy is configurable via
-//! `SelectionStrategy`
-//!
-//! | Strategy             | Behaviour                                                               |
-//! |----------------------|-------------------------------------------------------------------------|
-//! | `FirstImprovement`   | Accept the first strictly improving move immediately.                   |
-//! | `BestImprovement`    | Buffer all improving moves, commit the best one from the neighbourhood. |
-//!
-//! `FirstImprovement` is the default: as soon as a candidate with a strictly
-//! better objective is found, it is accepted and the neighbourhood scan ends.
-//!
-//! `BestImprovement` (steepest descent) evaluates the full neighbourhood,
-//! buffering each improving candidate that is strictly better than the current
-//! buffer. When the neighbourhood is exhausted, the engine commits the best
-//! improving move. If no improving move exists, the search terminates.
-//!
-//! # Tie-Breaking Strategy
-//!
-//! When using `BestImprovement`, ties between the current buffer and a new
-//! candidate with the same objective are resolved by the
-//! `TieBreakingStrategy`:
-//!
-//! | Strategy           | Behaviour                                              |
-//! |--------------------|--------------------------------------------------------|
-//! | `KeepFirst`        | Keep the earlier move (default).                       |
-//! | `KeepLast`         | Always replace the buffer with the newer move.         |
-//! | `RandomTieBreak`   | Fair coin flip — helps avoid cycling on flat surfaces. |
-//!
-//! # Engine Integration
-//!
-//! - **First-improvement mode:** `decide_fate` returns `Accept` on the first
-//!   strict improvement, `Reject` otherwise. `should_commit_buffered` returns
-//!   `false`. Neighbourhood exhaustion terminates the search (local optimum).
-//!
-//! - **Best-improvement mode:** `decide_fate` returns `Buffer` when the
-//!   candidate is strictly better than the current buffer (or ties and the
-//!   tie-breaking strategy decides in favour), `Reject` otherwise.
-//!   `should_commit_buffered` returns `true`. Neighbourhood exhaustion is the
-//!   normal end of each scan — the engine restarts for the next GD iteration.
-//!   The search terminates when no improving move is found in a full scan
-//!   (the buffer remains empty and exhaustion yields `Terminate`).
 
-use crate::{
-    metaheuristic::{
-        acceptance::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
-        move_selection::SelectionStrategy,
-        tie_breaking::{KeepFirst, TieBreakingStrategy},
-    },
-    schedule::{ScheduleGraph, ScheduleGraphDiff},
-    termination::SearchCommand,
+use super::{
+    acceptance::{AcceptanceOutcome, AcceptanceRule, NeighborhoodExhaustionOutcome},
+    move_selection::MoveSelection,
+    tie_breaking::{TieBreaker, TieBreaking},
 };
+use crate::schedule::{ScheduleGraph, ScheduleGraphDiff};
 use talos_core::SolverNumeric;
-use talos_model::{Model, SolutionView};
 
-// ----------------------------------------------------------------
-// Greedy Descent
-// ----------------------------------------------------------------
-
-/// Greedy Descent metaheuristic with configurable selection strategy.
-pub struct GreedyDescent<B = KeepFirst> {
-    /// Move selection strategy.
-    selection: SelectionStrategy,
-
-    /// Tie-breaking strategy for best-improvement mode.
-    tie_breaking: B,
-
-    /// Whether the scan under way has committed a buffered move, in best-improvement mode.
-    scan: Scan,
+/// The settings of a greedy descent.
+///
+/// With [`MoveSelection::FirstImprovement`] the descent takes the first strictly improving move of each scan; with
+/// [`MoveSelection::BestImprovement`] it keeps the best strictly improving move of the scan aside, ties decided by
+/// `tie_breaking`, and takes it once the scan is exhausted. Either ends the run at the first scan that finds no
+/// improving move.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct GreedyDescent {
+    /// Which of the improving moves of a scan the descent takes.
+    pub selection: MoveSelection,
+    /// Which of two improving moves of equal objective a best-improvement scan keeps aside.
+    pub tie_breaking: TieBreaking,
 }
 
-/// What a scan of the neighbourhood has done so far, in best-improvement mode.
+/// What a best-improvement scan has done so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scan {
-    /// No buffered move was committed: the scan found no improving move.
+    /// The scan committed no move: it found no improving one.
     NothingCommitted,
-    /// The best improving move the scan buffered was committed.
+    /// The scan committed the best improving move it kept aside.
     Committed,
 }
 
-impl<B: std::fmt::Debug> std::fmt::Debug for GreedyDescent<B> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GreedyDescent")
-            .field("selection", &self.selection)
-            .field("tie_breaking", &self.tie_breaking)
-            .field("scan", &self.scan)
-            .finish()
-    }
+/// A greedy descent under way.
+#[derive(Debug, Clone)]
+pub struct GreedyDescentRule {
+    selection: MoveSelection,
+    tie_breaker: TieBreaker,
+    scan: Scan,
 }
 
-impl GreedyDescent<KeepFirst> {
-    /// Creates a new Greedy Descent with `FirstImprovement` selection
-    /// and `KeepFirst` tie-breaking.
-    #[inline]
-    pub fn new() -> Self {
+impl GreedyDescentRule {
+    /// The descent of `settings`, whose random tie-breaking draws from a generator seeded with `seed`.
+    pub fn new(settings: &GreedyDescent, seed: u64) -> Self {
         Self {
-            selection: SelectionStrategy::FirstImprovement,
-            tie_breaking: KeepFirst,
+            selection: settings.selection,
+            tie_breaker: TieBreaker::new(settings.tie_breaking, seed),
             scan: Scan::NothingCommitted,
         }
     }
 }
 
-impl Default for GreedyDescent<KeepFirst> {
-    #[inline]
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<B: TieBreakingStrategy> GreedyDescent<B> {
-    /// Sets the move selection strategy.
-    ///
-    /// - `FirstImprovement` (default): accept the first improving move.
-    /// - `BestImprovement`: buffer all improving moves, commit the best.
-    #[inline]
-    pub fn with_selection(mut self, strategy: SelectionStrategy) -> Self {
-        self.selection = strategy;
-        self
-    }
-
-    /// Replaces the tie-breaking strategy.
-    ///
-    /// Only relevant in `BestImprovement` mode. The default is `KeepFirst`.
-    #[inline]
-    pub fn with_tie_breaking<B2: TieBreakingStrategy>(self, tie_breaking: B2) -> GreedyDescent<B2> {
-        GreedyDescent {
-            selection: self.selection,
-            tie_breaking,
-            scan: self.scan,
-        }
-    }
-
-    /// Returns the current selection strategy.
-    #[inline]
-    pub fn selection(&self) -> SelectionStrategy {
-        self.selection
-    }
-
-    /// Returns a reference to the tie-breaking strategy.
-    #[inline]
-    pub fn tie_breaking(&self) -> &B {
-        &self.tie_breaking
-    }
-
-    /// Returns a mutable reference to the tie-breaking strategy.
-    #[inline]
-    pub fn tie_breaking_mut(&mut self) -> &mut B {
-        &mut self.tie_breaking
-    }
-}
-
-impl<T, B> Metaheuristic<T> for GreedyDescent<B>
+impl<T> AcceptanceRule<T> for GreedyDescentRule
 where
     T: SolverNumeric,
-    B: TieBreakingStrategy,
 {
-    fn name(&self) -> &str {
-        "GreedyDescent"
+    fn on_start(&mut self, _graph: &ScheduleGraph, _initial_objective: T) {
+        self.scan = Scan::NothingCommitted;
     }
 
-    fn on_start(
+    unsafe fn decide_unchecked(
         &mut self,
-        _model: &Model<T>,
-        _initial_solution: SolutionView<T>,
-        _graph: &ScheduleGraph,
-    ) {
-    }
-
-    fn on_end(
-        &mut self,
-        _model: &Model<T>,
-        _final_solution: SolutionView<T>,
-        _graph: &ScheduleGraph,
-    ) {
-    }
-
-    /// In best-improvement mode, a scan that committed its best improving
-    /// move restarts for the next iteration, and a scan that found none
-    /// ends the search at a local optimum.
-    ///
-    /// In first-improvement mode, exhaustion means no improving move
-    /// exists — the search has reached a local optimum and terminates.
-    fn on_neighbourhood_exhausted(
-        &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _graph: &ScheduleGraph,
-    ) -> NeighborhoodExhaustionOutcome {
-        match (self.selection, self.scan) {
-            (SelectionStrategy::BestImprovement, Scan::Committed) => {
-                self.scan = Scan::NothingCommitted;
-                NeighborhoodExhaustionOutcome::Restart
+        accepted_objective: T,
+        buffered_objective: Option<T>,
+        candidate_objective: T,
+        _diff: &ScheduleGraphDiff,
+    ) -> AcceptanceOutcome {
+        if candidate_objective >= accepted_objective {
+            return AcceptanceOutcome::Reject;
+        }
+        match (self.selection, buffered_objective) {
+            (MoveSelection::FirstImprovement, _) => AcceptanceOutcome::Accept,
+            (MoveSelection::BestImprovement, None) => AcceptanceOutcome::Buffer,
+            (MoveSelection::BestImprovement, Some(buffered)) => {
+                if candidate_objective < buffered
+                    || (candidate_objective == buffered && self.tie_breaker.prefers_newer())
+                {
+                    AcceptanceOutcome::Buffer
+                } else {
+                    AcceptanceOutcome::Reject
+                }
             }
-            (SelectionStrategy::BestImprovement, Scan::NothingCommitted)
-            | (SelectionStrategy::FirstImprovement, _) => NeighborhoodExhaustionOutcome::Terminate,
         }
     }
 
-    /// In best-improvement mode, always commits the buffered solution
-    /// (the best improving move found in the neighbourhood scan).
-    /// In first-improvement mode, nothing is ever buffered.
-    fn should_commit_buffered(
+    unsafe fn on_accept_unchecked(
         &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _layout: &ScheduleGraph,
-        _buffer_layout: &ScheduleGraph,
-    ) -> bool {
+        _accepted_objective: T,
+        _graph: &ScheduleGraph,
+        _diff: &ScheduleGraphDiff,
+    ) {
+    }
+
+    fn on_new_best(&mut self, _best_objective: T) {}
+
+    fn after_step(&mut self, _best_objective: T, _graph: &ScheduleGraph) {}
+
+    fn commits_buffered(&mut self) -> bool {
         match self.selection {
-            SelectionStrategy::BestImprovement => {
+            MoveSelection::BestImprovement => {
                 self.scan = Scan::Committed;
                 true
             }
-            SelectionStrategy::FirstImprovement => false,
+            MoveSelection::FirstImprovement => false,
         }
     }
 
-    fn search_command(
+    fn on_neighborhood_exhausted(
         &mut self,
-        _iteration: u64,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-    ) -> SearchCommand {
-        SearchCommand::Continue
-    }
-
-    /// Decides the fate of a candidate move.
-    ///
-    /// Only strictly improving moves ($f' < f$) are considered. Equal
-    /// and worsening moves are always rejected.
-    ///
-    /// In **first-improvement** mode, the first strict improvement is
-    /// accepted immediately.
-    ///
-    /// In **best-improvement** mode, a strict improvement is buffered
-    /// when it is better than the current buffer, or when it ties and
-    /// the tie-breaking strategy decides in favour of the new candidate.
-    #[allow(clippy::too_many_arguments)]
-    fn decide_fate(
-        &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        accepted_solution: SolutionView<'_, T>,
-        buffered_solution: Option<SolutionView<'_, T>>,
-        candidate_objective: T,
         _graph: &ScheduleGraph,
-        _graph_diff: &ScheduleGraphDiff,
-    ) -> AcceptanceOutcome {
-        let current_objective = accepted_solution.objective_value();
-
-        // Only accept strict improvements.
-        if candidate_objective >= current_objective {
-            return AcceptanceOutcome::Reject;
+    ) -> NeighborhoodExhaustionOutcome {
+        match (self.selection, self.scan) {
+            (MoveSelection::BestImprovement, Scan::Committed) => {
+                self.scan = Scan::NothingCommitted;
+                NeighborhoodExhaustionOutcome::Restart
+            }
+            (MoveSelection::BestImprovement, Scan::NothingCommitted)
+            | (MoveSelection::FirstImprovement, _) => NeighborhoodExhaustionOutcome::Terminate,
         }
-
-        match self.selection {
-            SelectionStrategy::FirstImprovement => AcceptanceOutcome::Accept,
-            SelectionStrategy::BestImprovement => match buffered_solution {
-                None => AcceptanceOutcome::Buffer,
-                Some(buf) => {
-                    let buf_obj = buf.objective_value();
-                    if candidate_objective < buf_obj
-                        || (candidate_objective == buf_obj && self.tie_breaking.break_tie())
-                    {
-                        AcceptanceOutcome::Buffer
-                    } else {
-                        AcceptanceOutcome::Reject
-                    }
-                }
-            },
-        }
-    }
-
-    fn on_accept(
-        &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _new_accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _graph: &ScheduleGraph,
-        _graph_diff: &ScheduleGraphDiff,
-    ) {
-        // No state to update — pure descent has no memory.
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn on_reject(
-        &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _new_accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _candidate_objective: T,
-        _graph: &ScheduleGraph,
-        _graph_diff: &ScheduleGraphDiff,
-    ) {
-    }
-
-    fn on_new_best(
-        &mut self,
-        _model: &Model<T>,
-        _new_best: SolutionView<T>,
-        _graph: &ScheduleGraph,
-        _graph_diff: &ScheduleGraphDiff,
-    ) {
-    }
-
-    fn on_iteration(
-        &mut self,
-        _iteration: u64,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _new_accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _graph: &ScheduleGraph,
-    ) {
     }
 }
-
-// ----------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metaheuristic::tie_breaking::{KeepLast, RandomTieBreak};
 
-    #[test]
-    fn test_greedy_descent_new_defaults() {
-        let gd = GreedyDescent::new();
-        assert_eq!(gd.selection(), SelectionStrategy::FirstImprovement);
+    fn rule(selection: MoveSelection, tie_breaking: TieBreaking) -> GreedyDescentRule {
+        GreedyDescentRule::new(
+            &GreedyDescent {
+                selection,
+                tie_breaking,
+            },
+            0,
+        )
+    }
+
+    fn decide(
+        rule: &mut GreedyDescentRule,
+        buffered: Option<i64>,
+        candidate: i64,
+    ) -> AcceptanceOutcome {
+        // SAFETY: an empty diff names no vessel or berth.
+        unsafe {
+            AcceptanceRule::<i64>::decide_unchecked(
+                rule,
+                10,
+                buffered,
+                candidate,
+                &ScheduleGraphDiff::new(),
+            )
+        }
     }
 
     #[test]
-    fn test_greedy_descent_default_trait() {
-        let gd = GreedyDescent::default();
-        assert_eq!(gd.selection(), SelectionStrategy::FirstImprovement);
+    fn test_descent_rejects_every_move_that_does_not_improve() {
+        for selection in [
+            MoveSelection::FirstImprovement,
+            MoveSelection::BestImprovement,
+        ] {
+            let mut descent = rule(selection, TieBreaking::KeepLast);
+            assert_eq!(decide(&mut descent, None, 10), AcceptanceOutcome::Reject);
+            assert_eq!(decide(&mut descent, None, 11), AcceptanceOutcome::Reject);
+        }
     }
 
     #[test]
-    fn test_greedy_descent_with_selection() {
-        let gd = GreedyDescent::new().with_selection(SelectionStrategy::BestImprovement);
-        assert_eq!(gd.selection(), SelectionStrategy::BestImprovement);
+    fn test_first_improvement_accepts_the_first_improving_move() {
+        let mut descent = rule(MoveSelection::FirstImprovement, TieBreaking::KeepFirst);
+        assert_eq!(decide(&mut descent, None, 9), AcceptanceOutcome::Accept);
+        assert!(!AcceptanceRule::<i64>::commits_buffered(&mut descent));
     }
 
     #[test]
-    fn test_greedy_descent_with_tie_breaking_keep_last() {
-        let mut gd = GreedyDescent::new()
-            .with_selection(SelectionStrategy::BestImprovement)
-            .with_tie_breaking(KeepLast);
-        assert!(gd.tie_breaking_mut().break_tie());
+    fn test_best_improvement_keeps_the_best_aside_and_breaks_ties_by_its_rule() {
+        let mut first = rule(MoveSelection::BestImprovement, TieBreaking::KeepFirst);
+        assert_eq!(decide(&mut first, None, 9), AcceptanceOutcome::Buffer);
+        assert_eq!(decide(&mut first, Some(8), 7), AcceptanceOutcome::Buffer);
+        assert_eq!(decide(&mut first, Some(8), 9), AcceptanceOutcome::Reject);
+        assert_eq!(decide(&mut first, Some(8), 8), AcceptanceOutcome::Reject);
+        let mut last = rule(MoveSelection::BestImprovement, TieBreaking::KeepLast);
+        assert_eq!(decide(&mut last, Some(8), 8), AcceptanceOutcome::Buffer);
     }
 
     #[test]
-    fn test_greedy_descent_with_tie_breaking_random() {
-        let _gd = GreedyDescent::new()
-            .with_selection(SelectionStrategy::BestImprovement)
-            .with_tie_breaking(RandomTieBreak::new(0));
+    fn test_best_improvement_restarts_after_a_commit_and_ends_after_a_scan_without_one() {
+        let graph = ScheduleGraph::from_slices::<i64>(&[], &[], 0);
+        let mut descent = rule(MoveSelection::BestImprovement, TieBreaking::KeepFirst);
+        assert!(AcceptanceRule::<i64>::commits_buffered(&mut descent));
+        let exhausted = AcceptanceRule::<i64>::on_neighborhood_exhausted(&mut descent, &graph);
+        assert_eq!(exhausted, NeighborhoodExhaustionOutcome::Restart);
+        let exhausted = AcceptanceRule::<i64>::on_neighborhood_exhausted(&mut descent, &graph);
+        assert_eq!(exhausted, NeighborhoodExhaustionOutcome::Terminate);
     }
 
     #[test]
-    fn test_greedy_descent_tie_breaking_accessor() {
-        let mut gd = GreedyDescent::new();
-        // KeepFirst always returns false.
-        assert!(!gd.tie_breaking_mut().break_tie());
-    }
-
-    #[test]
-    fn test_greedy_descent_debug_does_not_panic() {
-        let gd = GreedyDescent::new();
-        let s = format!("{:?}", gd);
-        assert!(s.contains("GreedyDescent"));
-        assert!(s.contains("FirstImprovement"));
-        assert!(s.contains("KeepFirst"));
-    }
-
-    #[test]
-    fn test_greedy_descent_debug_best_improvement() {
-        let gd = GreedyDescent::new().with_selection(SelectionStrategy::BestImprovement);
-        let s = format!("{:?}", gd);
-        assert!(s.contains("BestImprovement"));
-    }
-
-    #[test]
-    fn test_greedy_descent_name() {
-        let gd = GreedyDescent::new();
-        assert_eq!(Metaheuristic::<i32>::name(&gd), "GreedyDescent");
-    }
-
-    #[test]
-    fn test_should_commit_buffered_first_improvement() {
-        let gd = GreedyDescent::new().with_selection(SelectionStrategy::FirstImprovement);
-        assert!(!matches!(
-            gd.selection(),
-            SelectionStrategy::BestImprovement
-        ));
-    }
-
-    #[test]
-    fn test_should_commit_buffered_best_improvement() {
-        let gd = GreedyDescent::new().with_selection(SelectionStrategy::BestImprovement);
-        assert!(matches!(gd.selection(), SelectionStrategy::BestImprovement));
+    fn test_first_improvement_ends_at_the_first_exhausted_scan() {
+        let graph = ScheduleGraph::from_slices::<i64>(&[], &[], 0);
+        let mut descent = rule(MoveSelection::FirstImprovement, TieBreaking::KeepFirst);
+        let exhausted = AcceptanceRule::<i64>::on_neighborhood_exhausted(&mut descent, &graph);
+        assert_eq!(exhausted, NeighborhoodExhaustionOutcome::Terminate);
     }
 }

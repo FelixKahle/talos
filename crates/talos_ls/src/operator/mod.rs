@@ -5,9 +5,8 @@
 //!
 //! - `filter` holds the tests by which a neighbourhood skips a move no optimum needs.
 //! - `swap` and `shift` hold the scans of the four neighbourhoods.
-//! - [`Neighborhood`] names a neighbourhood, and [`LocalSearchOperator`] is what the engine draws moves from.
-//! - [`CompoundOperator`] proposes the moves of several neighbourhoods, chosen among by a
-//!   [`NeighborhoodSelection`].
+//! - [`Neighborhood`] names a neighbourhood, and `LocalSearchOperator` is what the engine draws moves from.
+//! - `CompoundOperator` proposes the moves of several neighbourhoods, chosen among by a [`NeighborhoodSelection`].
 
 mod filter;
 
@@ -18,5 +17,8 @@ mod neighborhood;
 
 mod composite;
 
-pub use composite::{CompoundOperator, MultiArmedBandit, NeighborhoodSelection};
-pub use neighborhood::{LocalSearchOperator, Neighborhood};
+pub(super) use composite::CompoundOperator;
+pub(super) use neighborhood::LocalSearchOperator;
+
+pub use composite::{MultiArmedBandit, NeighborhoodSelection};
+pub use neighborhood::Neighborhood;

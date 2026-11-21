@@ -119,12 +119,12 @@ impl IntraBerthShiftOperator {
                     graph.vessel_predecessor_unchecked(vessel) == Some(anchor),
                 )
             };
+            if !same_berth || already_there {
+                continue;
+            }
             // SAFETY: both vessels are the graph's, whose vessels are the model's, the precondition of this
             // function.
-            if same_berth
-                && !already_there
-                && unsafe { intra_berth_shift_filter_unchecked(vessel, anchor, model) }
-            {
+            if unsafe { intra_berth_shift_filter_unchecked(vessel, anchor, model) } {
                 debug_assert!(vessel.index() < mutator.graph().num_vessels());
                 // SAFETY: both vessels are the graph's, as above.
                 unsafe { mutator.relocate_after_unchecked(vessel, anchor) };
@@ -187,11 +187,12 @@ impl InterBerthShiftOperator {
             let other_berth = unsafe {
                 graph.vessel_berth_unchecked(vessel) != graph.vessel_berth_unchecked(anchor)
             };
+            if !other_berth {
+                continue;
+            }
             // SAFETY: both vessels are the graph's, which has the vessels and berths of the model, the
             // precondition of this function.
-            if other_berth
-                && unsafe { inter_berth_shift_filter_unchecked(vessel, anchor, graph, model) }
-            {
+            if unsafe { inter_berth_shift_filter_unchecked(vessel, anchor, graph, model) } {
                 debug_assert!(vessel.index() < mutator.graph().num_vessels());
                 // SAFETY: both vessels are the graph's, as above.
                 unsafe { mutator.relocate_after_unchecked(vessel, anchor) };

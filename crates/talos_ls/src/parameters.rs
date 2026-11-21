@@ -1,339 +1,233 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! What a run is asked to do, and why a run refuses to start.
+
+use crate::{
+    limits::SearchLimits,
+    metaheuristic::Metaheuristic,
+    objective::Objective,
+    operator::{Neighborhood, NeighborhoodSelection},
+};
 use talos_core::SolverNumeric;
-use talos_model::{BerthIndex, Model, VesselIndex};
-use typed_index_collections::TiSlice;
+use talos_model::{BerthIndex, Model, SolutionView, VesselIndex};
 
-// ----------------------------------------------------------------
-// ModelSolutionMismatchError
-// ----------------------------------------------------------------
-
-/// Error indicating a mismatch between the Model and the Initial Solution vessel counts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelSolutionMismatchError {
-    pub model_count: usize,
-    pub solution_count: usize,
-}
-
-impl std::fmt::Display for ModelSolutionMismatchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "vessel count mismatch: model has {}, but initial solution has {}",
-            self.model_count, self.solution_count
-        )
-    }
-}
-
-impl std::error::Error for ModelSolutionMismatchError {}
-
-// ----------------------------------------------------------------
-// SolutionBerthOutOfBoundsError
-// ----------------------------------------------------------------
-
-/// Error indicating that the initial solution contains a vessel index that exceeds the model's bounds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SolutionVesselOutOfBoundsError {
-    pub invalid_index: usize,
-    pub model_count: usize,
-}
-
-impl std::fmt::Display for SolutionVesselOutOfBoundsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "initial solution contains an out-of-bounds vessel index: {} (model max index is {})",
-            self.invalid_index,
-            self.model_count.saturating_sub(1)
-        )
-    }
-}
-
-impl std::error::Error for SolutionVesselOutOfBoundsError {}
-
-// ----------------------------------------------------------------
-// SolutionBerthOutOfBoundsError
-// ----------------------------------------------------------------
-
-/// Error indicating that the initial solution contains a berth index that exceeds the model's bounds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SolutionBerthOutOfBoundsError {
-    pub invalid_index: usize,
-    pub model_count: usize,
-}
-
-impl std::fmt::Display for SolutionBerthOutOfBoundsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "initial solution contains an out-of-bounds berth index: {} (model max index is {})",
-            self.invalid_index,
-            self.model_count.saturating_sub(1)
-        )
-    }
-}
-
-impl std::error::Error for SolutionBerthOutOfBoundsError {}
-
-// ----------------------------------------------------------------
-// BerthStartTimeMismatchError
-// ----------------------------------------------------------------
-
-/// Error indicating a mismatch between the number of assigned berths and start times.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BerthStartTimeMismatchError {
-    pub berths_count: usize,
-    pub start_times_count: usize,
-}
-
-impl std::fmt::Display for BerthStartTimeMismatchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "length mismatch between initial solution arrays: berths array has {} elements, but start_times array has \
-             {}",
-            self.berths_count, self.start_times_count
-        )
-    }
-}
-
-impl std::error::Error for BerthStartTimeMismatchError {}
-
-// ----------------------------------------------------------------
-// SolutionIncompatibleBerthError
-// ----------------------------------------------------------------
-
-/// Error indicating that the initial solution assigns a vessel to a berth it is not allowed to use.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SolutionIncompatibleBerthError {
-    pub vessel_index: usize,
-    pub incompatible_berth: usize,
-}
-
-impl std::fmt::Display for SolutionIncompatibleBerthError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "initial solution assigns vessel {} to berth {}, but the model does not allow this assignment (processing \
-             time is None)",
-            self.vessel_index, self.incompatible_berth
-        )
-    }
-}
-
-impl std::error::Error for SolutionIncompatibleBerthError {}
-
-// ----------------------------------------------------------------
-// LocalSearchParamsError
-// ----------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LocalSearchParamsError {
-    ModelSolutionMismatch(ModelSolutionMismatchError),
-    BerthStartTimeMismatch(BerthStartTimeMismatchError),
-    SolutionBerthOutOfBounds(SolutionBerthOutOfBoundsError),
-    SolutionIncompatibleBerth(SolutionIncompatibleBerthError),
-}
-
-impl std::fmt::Display for LocalSearchParamsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ModelSolutionMismatch(e) => write!(f, "{}", e),
-            Self::BerthStartTimeMismatch(e) => write!(f, "{}", e),
-            Self::SolutionBerthOutOfBounds(e) => write!(f, "{}", e),
-            Self::SolutionIncompatibleBerth(e) => write!(f, "{}", e),
-        }
-    }
-}
-
-impl std::error::Error for LocalSearchParamsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::ModelSolutionMismatch(e) => Some(e),
-            Self::BerthStartTimeMismatch(e) => Some(e),
-            Self::SolutionBerthOutOfBounds(e) => Some(e),
-            Self::SolutionIncompatibleBerth(e) => Some(e),
-        }
-    }
-}
-
-// ----------------------------------------------------------------
-// Initial solution check
-// ----------------------------------------------------------------
-
-/// Refuses an initial solution that is not a schedule of the vessels and berths of `model`.
+/// The settings of a run: what it explores, how it decides, what it minimises, when it ends, and the seed of its
+/// random choices.
 ///
-/// The solution is accepted exactly when it holds one berth and one start time per vessel of `model`, and every
-/// berth is a berth of `model` that its vessel may use. A run of the engine builds its graph from these tables and
-/// reads the model unchecked through every vessel and berth of that graph, so it calls this at its door, in every
-/// build; it costs one pass over the berths.
+/// A run is reproducible from its model, its initial schedule, these parameters and its monitor: the same inputs
+/// make the same candidates in the same order, and only the deadlines of [`SearchLimits`] depend on the clock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalSearchParameters {
+    /// The neighbourhoods the run explores, in the order a selection takes them; at least one.
+    pub neighborhoods: Vec<Neighborhood>,
+    /// The rule that chooses which neighbourhood proposes the next move.
+    pub selection: NeighborhoodSelection,
+    /// The strategy that decides which candidates the run accepts and when it ends.
+    pub metaheuristic: Metaheuristic,
+    /// The objective the run minimises.
+    pub objective: Objective,
+    /// The budgets and deadlines that end the run.
+    pub limits: SearchLimits,
+    /// The seed every random choice of the run is drawn from.
+    pub seed: u64,
+}
+
+impl Default for LocalSearchParameters {
+    /// Every neighbourhood under round robin, a guided local search with its default settings, the weighted
+    /// turnaround time, no limit and seed zero.
+    ///
+    /// A guided local search never ends by itself, so a run of these parameters ends only by a limit set or by its
+    /// monitor.
+    fn default() -> Self {
+        Self {
+            neighborhoods: Neighborhood::ALL.to_vec(),
+            selection: NeighborhoodSelection::default(),
+            metaheuristic: Metaheuristic::default(),
+            objective: Objective::default(),
+            limits: SearchLimits::default(),
+            seed: 0,
+        }
+    }
+}
+
+/// Why a run refused to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocalSearchError {
+    /// The parameters name no neighbourhood to explore.
+    NoNeighborhood,
+    /// The initial schedule has another number of vessels than the model.
+    VesselCountMismatch {
+        /// The vessels of the model.
+        model_vessels: usize,
+        /// The vessels of the initial schedule.
+        solution_vessels: usize,
+    },
+    /// The initial schedule assigns a vessel to a berth the model does not have.
+    BerthOutOfBounds {
+        /// The vessel assigned.
+        vessel: VesselIndex,
+        /// The berth it is assigned to.
+        berth: BerthIndex,
+        /// The berths of the model.
+        num_berths: usize,
+    },
+    /// The initial schedule assigns a vessel to a berth it may not use.
+    IncompatibleBerth {
+        /// The vessel assigned.
+        vessel: VesselIndex,
+        /// The berth it may not use.
+        berth: BerthIndex,
+    },
+    /// The order of the vessels on the berths of the initial schedule has no feasible schedule: a vessel fits no
+    /// opening of its berth before its latest departure.
+    InfeasibleInitialSolution,
+}
+
+impl std::fmt::Display for LocalSearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoNeighborhood => write!(f, "the parameters name no neighborhood to explore"),
+            Self::VesselCountMismatch {
+                model_vessels,
+                solution_vessels,
+            } => write!(
+                f,
+                "the initial solution has {solution_vessels} vessels but the model has {model_vessels}"
+            ),
+            Self::BerthOutOfBounds {
+                vessel,
+                berth,
+                num_berths,
+            } => write!(
+                f,
+                "the initial solution assigns {vessel} to {berth}, outside a model of {num_berths} berths"
+            ),
+            Self::IncompatibleBerth { vessel, berth } => {
+                write!(
+                    f,
+                    "the initial solution assigns {vessel} to {berth}, which it may not use"
+                )
+            }
+            Self::InfeasibleInitialSolution => {
+                write!(
+                    f,
+                    "the order of the initial solution has no feasible schedule"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LocalSearchError {}
+
+/// Refuses an initial schedule that is not a schedule of the vessels and berths of `model`: one berth per vessel,
+/// each a berth of the model the vessel may use. It costs one pass over the vessels.
 ///
 /// # Errors
 ///
-/// The `LocalSearchParamsError` of the first condition broken, in the order stated.
-pub fn check_initial_solution<T>(
+/// [`LocalSearchError::VesselCountMismatch`], [`LocalSearchError::BerthOutOfBounds`] or
+/// [`LocalSearchError::IncompatibleBerth`], for the first vessel that breaks its condition.
+pub(super) fn check_initial_solution<T>(
     model: &Model<T>,
-    berths: &TiSlice<VesselIndex, BerthIndex>,
-    start_times: &TiSlice<VesselIndex, T>,
-) -> Result<(), LocalSearchParamsError>
+    initial: SolutionView<'_, T>,
+) -> Result<(), LocalSearchError>
 where
     T: SolverNumeric,
 {
-    let model_vessels = model.num_vessels();
-    let solution_vessels = berths.len();
-
-    // Check Model vs Solution bounds
-    if model_vessels != solution_vessels {
-        return Err(LocalSearchParamsError::ModelSolutionMismatch(
-            ModelSolutionMismatchError {
-                model_count: model_vessels,
-                solution_count: solution_vessels,
-            },
-        ));
+    if initial.num_vessels() != model.num_vessels() {
+        return Err(LocalSearchError::VesselCountMismatch {
+            model_vessels: model.num_vessels(),
+            solution_vessels: initial.num_vessels(),
+        });
     }
-
-    // Check internal solution array alignment
-    if berths.len() != start_times.len() {
-        return Err(LocalSearchParamsError::BerthStartTimeMismatch(
-            BerthStartTimeMismatchError {
-                berths_count: berths.len(),
-                start_times_count: start_times.len(),
-            },
-        ));
-    }
-
-    // Check that the initial solution does not contain out-of-bounds berth indices,
-    // AND check that every vessel is actually allowed to dock at its assigned berth.
-    let num_berths = model.num_berths();
-    for (vessel, &berth_idx) in berths.iter_enumerated() {
-        if berth_idx.index() >= num_berths {
-            return Err(LocalSearchParamsError::SolutionBerthOutOfBounds(
-                SolutionBerthOutOfBoundsError {
-                    invalid_index: berth_idx.index(),
-                    model_count: num_berths,
-                },
-            ));
+    for (vessel, &berth) in initial.assigned_berths().iter_enumerated() {
+        if berth.index() >= model.num_berths() {
+            return Err(LocalSearchError::BerthOutOfBounds {
+                vessel,
+                berth,
+                num_berths: model.num_berths(),
+            });
         }
-
-        if model.vessel_processing_time(vessel, berth_idx).is_none() {
-            return Err(LocalSearchParamsError::SolutionIncompatibleBerth(
-                SolutionIncompatibleBerthError {
-                    vessel_index: vessel.index(),
-                    incompatible_berth: berth_idx.index(),
-                },
-            ));
+        if model.vessel_processing_time(vessel, berth).is_none() {
+            return Err(LocalSearchError::IncompatibleBerth { vessel, berth });
         }
     }
-
     Ok(())
 }
 
-// ----------------------------------------------------------------
-// LocalSearchParams
-// ----------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use talos_core::ClosedOpenInterval;
 
-/// The validated parameters required to run the local search engine.
-#[derive(Debug)]
-pub struct LocalSearchParams<'a, T, H, O, M>
-where
-    T: SolverNumeric,
-{
-    model: &'a Model<T>,
-    operator: &'a mut O,
-    metaheuristic: &'a mut H,
-    monitor: M,
-    berths: &'a TiSlice<VesselIndex, BerthIndex>,
-    start_times: &'a TiSlice<VesselIndex, T>,
-    objective_value: T,
-}
-
-impl<'a, T, H, O, M> LocalSearchParams<'a, T, H, O, M>
-where
-    T: SolverNumeric,
-{
-    /// Creates a validated `LocalSearchParams` instance for the search engine.
-    ///
-    /// This constructor acts as a strict **fail-fast safety boundary** between the external
-    /// configuration (e.g., data provided via FFI) and the high-performance inner loop of the solver.
-    /// It exhaustively cross-references the state, model, and topology to mathematically prove
-    /// that all data invariants hold.
-    ///
-    /// By ensuring these properties upfront, downstream components (such as `LocalSearchOperator`s
-    /// and `Evaluator`s) are mathematically guaranteed to be safe when using zero-cost `_unchecked`
-    /// memory access.
-    ///
-    /// ### Validations Performed
-    /// 1. **Dimensional Consistency:** The `model`, `neighborhood`, and `initial_solution` must all
-    ///    declare the exact same number of vessels.
-    /// 2. **Neighborhood Bounds:** Every target `VesselIndex` yielded by the `neighborhood` topology
-    ///    must be strictly less than `model.num_vessels()`.
-    /// 3. **Solution Bounds:** Every `BerthIndex` assigned in the `initial_solution` must be
-    ///    strictly less than `model.num_berths()`.
-    /// 4. **Solution Feasibility:** Every vessel in the `initial_solution` must be mathematically
-    ///    allowed to dock at its assigned berth (i.e., the model must not return a `None` processing time).
-    ///
-    /// # Errors
-    ///
-    /// Returns a `LocalSearchParamsError` if any component is mismatched, out of bounds, or
-    /// violates the hard physical constraints of the `Model`.
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    pub fn new(
-        model: &'a Model<T>,
-        operator: &'a mut O,
-        metaheuristic: &'a mut H,
-        monitor: M,
-        berths: &'a TiSlice<VesselIndex, BerthIndex>,
-        start_times: &'a TiSlice<VesselIndex, T>,
-        objective_value: T,
-    ) -> Result<Self, LocalSearchParamsError> {
-        check_initial_solution(model, berths, start_times)?;
-
-        Ok(Self {
-            model,
-            operator,
-            metaheuristic,
-            monitor,
-            berths,
-            start_times,
-            objective_value,
-        })
+    /// Two vessels; V0 may use only B0, V1 either berth.
+    fn model() -> Model<i64> {
+        Model::new(
+            vec![0, 0],
+            vec![100, 100],
+            vec![1, 1],
+            vec![Some(5), None, Some(5), Some(5)],
+            vec![
+                vec![ClosedOpenInterval::new(0, 200)],
+                vec![ClosedOpenInterval::new(0, 200)],
+            ],
+        )
     }
-}
 
-// ----------------------------------------------------------------
-// MutableLocalSearchParams
-// ----------------------------------------------------------------
+    #[test]
+    fn test_check_initial_solution_accepts_a_schedule_of_the_model() {
+        let berths = [BerthIndex::new(0), BerthIndex::new(1)];
+        let view = SolutionView::new(&berths, &[0, 0], 0);
+        assert_eq!(check_initial_solution(&model(), view), Ok(()));
+    }
 
-#[derive(Debug)]
-pub struct MutableLocalSearchParams<'a, T, H, O, M>
-where
-    T: SolverNumeric,
-{
-    pub model: &'a Model<T>,
-    pub operator: &'a mut O,
-    pub metaheuristic: &'a mut H,
-    pub monitor: M,
-    pub berths: &'a TiSlice<VesselIndex, BerthIndex>,
-    pub start_times: &'a TiSlice<VesselIndex, T>,
-    pub objective_value: T,
-}
+    #[test]
+    fn test_check_initial_solution_refuses_another_count_of_vessels() {
+        let berths = [BerthIndex::new(0)];
+        let view = SolutionView::new(&berths, &[0], 0);
+        assert_eq!(
+            check_initial_solution(&model(), view),
+            Err(LocalSearchError::VesselCountMismatch {
+                model_vessels: 2,
+                solution_vessels: 1
+            })
+        );
+    }
 
-impl<'a, T, H, O, M> From<LocalSearchParams<'a, T, H, O, M>>
-    for MutableLocalSearchParams<'a, T, H, O, M>
-where
-    T: SolverNumeric,
-{
-    fn from(params: LocalSearchParams<'a, T, H, O, M>) -> Self {
-        Self {
-            model: params.model,
-            operator: params.operator,
-            metaheuristic: params.metaheuristic,
-            monitor: params.monitor,
-            berths: params.berths,
-            start_times: params.start_times,
-            objective_value: params.objective_value,
-        }
+    #[test]
+    fn test_check_initial_solution_refuses_a_berth_outside_and_a_berth_not_allowed() {
+        let berths = [BerthIndex::new(0), BerthIndex::new(2)];
+        let view = SolutionView::new(&berths, &[0, 0], 0);
+        assert_eq!(
+            check_initial_solution(&model(), view),
+            Err(LocalSearchError::BerthOutOfBounds {
+                vessel: VesselIndex::new(1),
+                berth: BerthIndex::new(2),
+                num_berths: 2
+            })
+        );
+        let berths = [BerthIndex::new(1), BerthIndex::new(0)];
+        let view = SolutionView::new(&berths, &[0, 0], 0);
+        assert_eq!(
+            check_initial_solution(&model(), view),
+            Err(LocalSearchError::IncompatibleBerth {
+                vessel: VesselIndex::new(0),
+                berth: BerthIndex::new(1)
+            })
+        );
+    }
+
+    #[test]
+    fn test_errors_display_their_values() {
+        let error = LocalSearchError::BerthOutOfBounds {
+            vessel: VesselIndex::new(1),
+            berth: BerthIndex::new(2),
+            num_berths: 2,
+        };
+        assert_eq!(
+            error.to_string(),
+            "the initial solution assigns Vessel 1 to Berth 2, outside a model of 2 berths"
+        );
     }
 }

@@ -20,7 +20,7 @@ mod undo_log;
 
 mod mutator;
 
-pub use diff::{DiffLinkIter, DiffReallocationIter, Link, Reallocation, ScheduleGraphDiff};
-pub use graph::{BerthTopologyIter, LinkEnd, ScheduleGraph, VesselSequenceIter};
-pub use mutator::Mutator;
-pub use touched_berths::{TouchedBerths, TouchedBerthsIter};
+pub(super) use diff::ScheduleGraphDiff;
+pub(super) use graph::{LinkEnd, ScheduleGraph, VesselSequenceIter};
+pub(super) use mutator::Mutator;
+pub(super) use touched_berths::TouchedBerths;

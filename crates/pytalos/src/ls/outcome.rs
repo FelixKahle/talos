@@ -3,7 +3,8 @@
 
 use crate::solution::PySolution;
 use pyo3::prelude::*;
-use talos_ls::termination::TerminationReason;
+use std::time::Duration;
+use talos_ls::{LocalSearchOutcome, TerminationReason};
 
 /// The termination reason for a local search run.
 #[pyclass(name = "TerminationReason", eq, eq_int, skip_from_py_object)]
@@ -80,17 +81,16 @@ impl PySearchResult {
 }
 
 #[inline(always)]
-pub fn outcome_to_py(outcome: talos_ls::outcome::LocalSearchOutcome<i64>) -> PySearchResult {
-    let (solution, reason, stats) = outcome.into_inner();
-
+pub fn outcome_to_py(outcome: LocalSearchOutcome<i64>, elapsed: Duration) -> PySearchResult {
+    let statistics = outcome.statistics;
     PySearchResult {
-        solution: PySolution::from_inner(solution),
-        termination_reason: PyTerminationReason::from(reason),
-        iterations: stats.iterations,
-        accepted_solutions: stats.accepted_solutions,
-        total_solutions: stats.total_solutions,
-        infeasible_moves: stats.infeasible_moves,
-        cycles: stats.cycles,
-        time_total_secs: stats.time_total.as_secs_f64(),
+        solution: PySolution::from_inner(outcome.solution),
+        termination_reason: PyTerminationReason::from(outcome.termination_reason),
+        iterations: statistics.iterations,
+        accepted_solutions: statistics.accepted_solutions,
+        total_solutions: statistics.total_solutions,
+        infeasible_moves: statistics.infeasible_moves,
+        cycles: statistics.cycles,
+        time_total_secs: elapsed.as_secs_f64(),
     }
 }

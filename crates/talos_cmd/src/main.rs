@@ -5,16 +5,11 @@ use crate::loading::{InstanceLoader, ProblemLoaderError};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use talos_ls::engine::Engine;
-use talos_ls::metaheuristic::guided_local_search::{
-    DynamicLambda, GuidedLocalSearch, PenalizationTrigger, heuristic_lambda,
+use std::time::Instant;
+use talos_ls::{
+    DynamicLambda, Engine, GuidedLocalSearch, Lambda, LocalSearchParameters, Metaheuristic,
+    NoMonitor, PenalizationTrigger, SearchLimits, heuristic_lambda,
 };
-use talos_ls::monitor::composite::CompositeLocalSearchMonitor;
-use talos_ls::monitor::nimpr::NoImprovementMonitor;
-use talos_ls::monitor::time::TimeLimitMonitor;
-use talos_ls::objective::Objective;
-use talos_ls::operator::{CompoundOperator, Neighborhood, NeighborhoodSelection};
-use talos_ls::parameters::MutableLocalSearchParams;
 use talos_model::Model;
 
 mod edf;
@@ -184,10 +179,6 @@ fn load_instance(path: &std::path::Path) -> Result<Model<i64>, ProblemLoaderErro
     loader.load_dbap_file(path)
 }
 
-fn build_full_operator() -> CompoundOperator {
-    CompoundOperator::new(&Neighborhood::ALL, NeighborhoodSelection::RoundRobin, 0)
-}
-
 fn run_benchmark(
     config: &InstanceBenchmarkConfig,
     data_dir: &std::path::Path,
@@ -217,64 +208,50 @@ fn run_benchmark(
         0.3,
     );
 
-    let mut engine = Engine::<i64>::new(model.num_vessels(), model.num_berths());
-    let mut gls = GuidedLocalSearch::new(model.num_vessels(), model.num_berths())
-        .with_lambda_strategy(DynamicLambda::new(
+    let guided_local_search = Metaheuristic::GuidedLocalSearch(GuidedLocalSearch {
+        lambda: Lambda::Dynamic(DynamicLambda::new(
             lambda_02, // Initial (Alpha 0.2)
             0.1,       // Increase step
             0.1,       // Decay step
             lambda_01, // Min (Alpha 0.1)
             lambda_03, // Max (Alpha 0.3)
-        ))
-        .with_trigger(PenalizationTrigger::OnExhaustion);
-    let mut operator = build_full_operator();
-    let monitor = TimeLimitMonitor::new(config.first_run_time_limit);
+        )),
+        trigger: PenalizationTrigger::OnExhaustion,
+        ..GuidedLocalSearch::default()
+    });
+    let mut engine = Engine::<i64>::new();
 
-    let params = MutableLocalSearchParams {
-        model: &model,
-        operator: &mut operator,
-        metaheuristic: &mut gls,
-        monitor,
-        berths: initial.assigned_berths(),
-        start_times: initial.start_times(),
-        objective_value: greedy_obj,
+    let parameters = LocalSearchParameters {
+        metaheuristic: guided_local_search,
+        limits: SearchLimits {
+            time: Some(config.first_run_time_limit),
+            ..SearchLimits::default()
+        },
+        ..LocalSearchParameters::default()
     };
-    let outcome = engine.run(params, Objective::WeightedTurnaroundTime, |_| {});
-    let (first_sol, _first_reason, first_stats) = outcome.into_inner();
-    let first_obj = first_sol.objective_value();
-    let first_time = first_stats.time_total;
+    let started = Instant::now();
+    let outcome = engine
+        .run(&model, initial.as_view(), &parameters, &mut NoMonitor)
+        .expect("the EDF schedule should be a feasible schedule of the model");
+    let first_time = started.elapsed();
+    let first_obj = outcome.solution.objective_value();
     let first_improvement = (1.0 - first_obj as f64 / greedy_obj as f64) * 100.0;
 
-    let mut gls = GuidedLocalSearch::new(model.num_vessels(), model.num_berths())
-        .with_lambda_strategy(DynamicLambda::new(
-            lambda_02, // Initial (Alpha 0.2)
-            0.1,       // Increase step
-            0.1,       // Decay step
-            lambda_01, // Min (Alpha 0.1)
-            lambda_03, // Max (Alpha 0.3)
-        ))
-        .with_trigger(PenalizationTrigger::OnExhaustion);
-    let mut operator = build_full_operator();
-
-    let mut composite = CompositeLocalSearchMonitor::with_capacity(2);
-    composite.add_monitor(TimeLimitMonitor::new(config.second_run_time_limit));
-    composite.add_monitor(NoImprovementMonitor::with_duration_patience(
-        config.non_improving_time_limit,
-    ));
-
-    let params = MutableLocalSearchParams {
-        model: &model,
-        operator: &mut operator,
-        metaheuristic: &mut gls,
-        monitor: composite,
-        berths: initial.assigned_berths(),
-        start_times: initial.start_times(),
-        objective_value: greedy_obj,
+    let parameters = LocalSearchParameters {
+        metaheuristic: guided_local_search,
+        limits: SearchLimits {
+            time: Some(config.second_run_time_limit),
+            non_improving_time: Some(config.non_improving_time_limit),
+            ..SearchLimits::default()
+        },
+        ..LocalSearchParameters::default()
     };
-    let outcome = engine.run(params, Objective::WeightedTurnaroundTime, |_| {});
-    let (second_sol, _second_reason, second_stats) = outcome.into_inner();
-    let second_obj = second_sol.objective_value();
-    let second_time = second_stats.time_total;
+    let started = Instant::now();
+    let outcome = engine
+        .run(&model, initial.as_view(), &parameters, &mut NoMonitor)
+        .expect("the EDF schedule should be a feasible schedule of the model");
+    let second_time = started.elapsed();
+    let second_obj = outcome.solution.objective_value();
     let second_improvement = (1.0 - second_obj as f64 / greedy_obj as f64) * 100.0;
 
     println!(

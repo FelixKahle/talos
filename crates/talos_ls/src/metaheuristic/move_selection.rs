@@ -1,25 +1,13 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/// Controls how the search selects among admissible moves in a
-/// neighbourhood scan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SelectionStrategy {
-    /// Evaluate the full neighbourhood, buffer every admissible move,
-    /// and commit the best one. This is the standard Tabu Search
-    /// behaviour from the literature.
+/// Which of the improving moves of a scan a descent takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum MoveSelection {
+    /// Scan the whole neighbourhood, keep the best improving move aside, and take it once the scan is exhausted:
+    /// steepest descent.
     BestImprovement,
-
-    /// Accept the first admissible move encountered and skip the
-    /// rest of the neighbourhood.
+    /// Take the first improving move the scan finds.
+    #[default]
     FirstImprovement,
-}
-
-impl std::fmt::Display for SelectionStrategy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SelectionStrategy::BestImprovement => write!(f, "BestImprovement"),
-            SelectionStrategy::FirstImprovement => write!(f, "FirstImprovement"),
-        }
-    }
 }

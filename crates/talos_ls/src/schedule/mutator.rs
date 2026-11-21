@@ -66,6 +66,13 @@ impl<const N: usize> LinkSnapshot<N> {
 
 /// A safe move of a [`Mutator`], as its refusal names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+    )
+)]
 enum Move {
     SwapVessels,
     SwapSegments,
@@ -227,6 +234,13 @@ impl Mutator {
     /// Panics with the refusal of `step` if one of `vessels` or `berths` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     fn check<const V: usize, const B: usize>(
         &self,
         step: Move,
@@ -251,6 +265,13 @@ impl Mutator {
     /// Panics if any of `a` and `b` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn swap_vessels(&mut self, a: VesselIndex, b: VesselIndex) {
         self.check(Move::SwapVessels, [a, b], []);
         // SAFETY: `a` and `b` are the graph's, as the check above found.
@@ -326,6 +347,13 @@ impl Mutator {
     /// Panics if any of `a_first`, `a_last`, `b_first` and `b_last` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn swap_segments(
         &mut self,
         a_first: VesselIndex,
@@ -349,6 +377,13 @@ impl Mutator {
     /// `a_first`, `a_last`, `b_first` and `b_last` must be the graph's, the condition
     /// [`swap_segments`](Self::swap_segments) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn swap_segments_unchecked(
         &mut self,
         a_first: VesselIndex,
@@ -434,6 +469,13 @@ impl Mutator {
     /// Panics if any of `first` and `last` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
         self.check(Move::ReverseSegment, [first, last], []);
         // SAFETY: `first` and `last` are the graph's, as the check above found.
@@ -450,6 +492,13 @@ impl Mutator {
     ///
     /// `first` and `last` must be the graph's, the condition [`reverse_segment`](Self::reverse_segment) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn reverse_segment_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
         debug_assert!(
             first.index() < self.graph.num_vessels() && last.index() < self.graph.num_vessels(),
@@ -504,6 +553,13 @@ impl Mutator {
     /// Panics if any of `vessel` and `anchor` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn relocate_after(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
         self.check(Move::RelocateAfter, [vessel, anchor], []);
         // SAFETY: `vessel` and `anchor` are the graph's, as the check above found.
@@ -570,6 +626,13 @@ impl Mutator {
     /// Panics if any of `vessel` and `reference` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn relocate_before(&mut self, vessel: VesselIndex, reference: VesselIndex) {
         self.check(Move::RelocateBefore, [vessel, reference], []);
         // SAFETY: `vessel` and `reference` are the graph's, as the check above found.
@@ -582,6 +645,13 @@ impl Mutator {
     ///
     /// `vessel` and `reference` must be the graph's, the condition [`relocate_before`](Self::relocate_before) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn relocate_before_unchecked(
         &mut self,
         vessel: VesselIndex,
@@ -645,6 +715,13 @@ impl Mutator {
     /// Panics if any of `vessel` and `berth` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         self.check(Move::RelocateToHead, [vessel], [berth]);
         // SAFETY: `vessel` and `berth` are the graph's, as the check above found.
@@ -657,6 +734,13 @@ impl Mutator {
     ///
     /// `vessel` and `berth` must be the graph's, the condition [`relocate_to_head`](Self::relocate_to_head) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn relocate_to_head_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         debug_assert!(
             vessel.index() < self.graph.num_vessels() && berth.index() < self.graph.num_berths(),
@@ -702,6 +786,13 @@ impl Mutator {
     /// Panics if any of `vessel` and `berth` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn relocate_to_tail(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         self.check(Move::RelocateToTail, [vessel], [berth]);
         // SAFETY: `vessel` and `berth` are the graph's, as the check above found.
@@ -714,6 +805,13 @@ impl Mutator {
     ///
     /// `vessel` and `berth` must be the graph's, the condition [`relocate_to_tail`](Self::relocate_to_tail) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn relocate_to_tail_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
         debug_assert!(
             vessel.index() < self.graph.num_vessels() && berth.index() < self.graph.num_berths(),
@@ -769,6 +867,13 @@ impl Mutator {
     /// Panics if any of `first`, `last` and `anchor` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn relocate_segment_after(
         &mut self,
         first: VesselIndex,
@@ -792,6 +897,13 @@ impl Mutator {
     /// `first`, `last` and `anchor` must be the graph's, the condition
     /// [`relocate_segment_after`](Self::relocate_segment_after) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn relocate_segment_after_unchecked(
         &mut self,
         first: VesselIndex,
@@ -856,6 +968,13 @@ impl Mutator {
     /// Panics if any of `first`, `last` and `reference` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn relocate_segment_before(
         &mut self,
         first: VesselIndex,
@@ -879,6 +998,13 @@ impl Mutator {
     /// `first`, `last` and `reference` must be the graph's, the condition
     /// [`relocate_segment_before`](Self::relocate_segment_before) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn relocate_segment_before_unchecked(
         &mut self,
         first: VesselIndex,
@@ -948,6 +1074,13 @@ impl Mutator {
     /// Panics if any of `first`, `last` and `berth` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn relocate_segment_to_head(
         &mut self,
         first: VesselIndex,
@@ -971,6 +1104,13 @@ impl Mutator {
     /// `first`, `last` and `berth` must be the graph's, the condition
     /// [`relocate_segment_to_head`](Self::relocate_segment_to_head) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn relocate_segment_to_head_unchecked(
         &mut self,
         first: VesselIndex,
@@ -1026,6 +1166,13 @@ impl Mutator {
     /// Panics if any of `first`, `last` and `berth` is not one of the graph's.
     #[inline]
     #[track_caller]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub fn relocate_segment_to_tail(
         &mut self,
         first: VesselIndex,
@@ -1049,6 +1196,13 @@ impl Mutator {
     /// `first`, `last` and `berth` must be the graph's, the condition
     /// [`relocate_segment_to_tail`](Self::relocate_segment_to_tail) checks.
     #[inline]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub unsafe fn relocate_segment_to_tail_unchecked(
         &mut self,
         first: VesselIndex,
@@ -1147,6 +1301,13 @@ impl Mutator {
     ///
     /// `first` and `last` must be the graph's.
     #[inline(always)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     unsafe fn record_reversal_unchecked(
         &mut self,
         first: VesselIndex,

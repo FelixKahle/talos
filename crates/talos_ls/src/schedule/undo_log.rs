@@ -24,6 +24,13 @@ enum UndoInstruction {
     },
 
     /// Reverts a swap between two segments by swapping them back.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     SwapSegments {
         a_first: VesselIndex,
         a_last: VesselIndex,
@@ -33,6 +40,13 @@ enum UndoInstruction {
 
     /// Reverts a segment reversal by reversing again.
     /// Boundaries are the *original* first and last, which are inverted after the forward pass.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     ReverseSegment {
         original_first: VesselIndex,
         original_last: VesselIndex,
@@ -128,50 +142,64 @@ impl UndoInstruction {
                 graph.swap_vessels_unchecked(vessel_a, vessel_b);
             },
             // The segments trade places again: `b` now stands where `a` stood.
-            // SAFETY: the four vessels are the graph's, the precondition of this function.
             Self::SwapSegments {
                 a_first,
                 a_last,
                 b_first,
                 b_last,
-            } => unsafe {
-                graph.swap_segments_unchecked(b_first, b_last, a_first, a_last);
-            },
+            } => {
+                // SAFETY: the four vessels are the graph's, the precondition of this function.
+                unsafe {
+                    graph.swap_segments_unchecked(b_first, b_last, a_first, a_last);
+                }
+            }
             // The reversal left the original last vessel first; reversing that segment restores the order.
-            // SAFETY: both vessels are the graph's, the precondition of this function.
             Self::ReverseSegment {
                 original_first,
                 original_last,
-            } => unsafe {
-                graph.reverse_segment_unchecked(original_last, original_first);
-            },
-            // SAFETY: both vessels are the graph's, the precondition of this function.
+            } => {
+                // SAFETY: both vessels are the graph's, the precondition of this function.
+                unsafe {
+                    graph.reverse_segment_unchecked(original_last, original_first);
+                }
+            }
             Self::RelocateAfterVessel {
                 vessel,
                 predecessor,
-            } => unsafe {
-                graph.relocate_after_unchecked(vessel, predecessor);
-            },
+            } => {
+                // SAFETY: both vessels are the graph's, the precondition of this function.
+                unsafe {
+                    graph.relocate_after_unchecked(vessel, predecessor);
+                }
+            }
             // SAFETY: the vessel and the berth are the graph's, the precondition of this function.
             Self::RelocateToHead { vessel, berth } => unsafe {
                 graph.relocate_to_head_unchecked(vessel, berth);
             },
-            // SAFETY: the three vessels are the graph's, the precondition of this function.
             Self::RelocateSegmentAfterVessel {
                 segment_first,
                 segment_last,
                 predecessor,
-            } => unsafe {
-                graph.relocate_segment_after_unchecked(segment_first, segment_last, predecessor);
-            },
-            // SAFETY: both vessels and the berth are the graph's, the precondition of this function.
+            } => {
+                // SAFETY: the three vessels are the graph's, the precondition of this function.
+                unsafe {
+                    graph.relocate_segment_after_unchecked(
+                        segment_first,
+                        segment_last,
+                        predecessor,
+                    );
+                }
+            }
             Self::RelocateSegmentToHead {
                 segment_first,
                 segment_last,
                 berth,
-            } => unsafe {
-                graph.relocate_segment_to_head_unchecked(segment_first, segment_last, berth);
-            },
+            } => {
+                // SAFETY: both vessels and the berth are the graph's, the precondition of this function.
+                unsafe {
+                    graph.relocate_segment_to_head_unchecked(segment_first, segment_last, berth);
+                }
+            }
         }
     }
 }
@@ -295,6 +323,13 @@ impl ScheduleGraphUndoLog {
     /// Records that the segments `a_first ..= a_last` and `b_first ..= b_last` were swapped; swapping them back
     /// is the inverse.
     #[inline(always)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub(super) fn push_swap_segments(
         &mut self,
         a_first: VesselIndex,
@@ -312,6 +347,13 @@ impl ScheduleGraphUndoLog {
 
     /// Records that the segment `first ..= last` was reversed; reversing `last ..= first` is the inverse.
     #[inline(always)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a move of the schedule no neighbourhood makes yet; its tests keep it sound"
+        )
+    )]
     pub(super) fn push_reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
         self.stack.push(UndoInstruction::ReverseSegment {
             original_first: first,

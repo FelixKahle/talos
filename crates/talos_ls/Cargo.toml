@@ -21,10 +21,5 @@ typed-index-collections = { workspace = true }
 criterion = { workspace = true }
 proptest = { workspace = true }
 
-[[bench]]
-name = "mutation_cycle_bench"
-harness = false
-path = "benches/mutation_cycle_bench.rs"
-
-# This crate is not yet brought in line with the workspace lints; it opts in with `workspace = true` once it is.
 [lints]
+workspace = true

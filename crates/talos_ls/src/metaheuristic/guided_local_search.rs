@@ -1,2116 +1,1234 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Guided Local Search (GLS) metaheuristic for local search.
+//! Guided local search: a descent on the objective augmented by penalties of the features of the schedules it
+//! stands in when it gets stuck.
 //!
-//! GLS augments a local search by adding penalties to the objective function,
-//! guiding the search away from previously visited local optima. When the
-//! underlying local search reaches a local optimum, GLS inspects the current
-//! solution's features, identifies the one with the highest *utility*, and
-//! increments its penalty counter. The augmented objective pushes the search
-//! into unexplored regions of the solution space.
+//! The features of a schedule are its links (a vessel next to a vessel or to the boundary of its berth, with the
+//! boundaries of all berths taken as one) and its assignments (a vessel on a berth). The search accepts a move when
+//! it lowers `objective + lambda * penalties`, the penalties of the features of the schedule summed. When the
+//! trigger fires, it adds one penalty to every feature of the accepted schedule of the largest utility
+//! `1 / (1 + penalty)`, which pushes the search out of the basin it stands in.
 
-use crate::{
-    metaheuristic::acceptance::{AcceptanceOutcome, Metaheuristic, NeighborhoodExhaustionOutcome},
-    schedule::{LinkEnd, ScheduleGraph, ScheduleGraphDiff},
-    termination::SearchCommand,
-};
-use num_traits::ToPrimitive;
+use super::acceptance::{AcceptanceOutcome, AcceptanceRule, NeighborhoodExhaustionOutcome};
+use crate::schedule::{LinkEnd, ScheduleGraph, ScheduleGraphDiff};
 use talos_core::SolverNumeric;
-use talos_model::{BerthIndex, Model, SolutionView, VesselIndex};
+use talos_model::{BerthIndex, VesselIndex};
 
-// ----------------------------------------------------------------
-// Feature Cost
-// ----------------------------------------------------------------
-
-/// Computes the cost contribution of a single feature.
-///
-/// GLS maximizes the *utility* of penalized features. The utility of a
-/// feature $f$ present in the current solution is:
-///
-/// $$\text{utility}(f) = \frac{c_f}{1 + p_f}$$
-///
-/// where $c_f$ is the cost returned by this trait and $p_f$ is the
-/// current penalty count. Features with high cost and low penalty
-/// are penalized first.
-pub trait FeatureCost: std::fmt::Debug {
-    /// Returns the cost of an edge feature, the link from `a` to `b`.
-    /// Either end may be a vessel or the boundary of a berth.
-    fn edge_cost(&self, a: LinkEnd, b: LinkEnd) -> f64;
-
-    /// Returns the cost of a berth-assignment feature (vessel `v` assigned
-    /// to berth `b`).
-    fn berth_cost(&self, v: VesselIndex, b: BerthIndex) -> f64;
+/// The settings of a guided local search: how the penalty weight evolves, how penalties decay, and when the
+/// search penalizes.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GuidedLocalSearch {
+    /// The weight of the penalties in the augmented objective, and how it evolves.
+    pub lambda: Lambda,
+    /// How the penalties erode over the run.
+    pub decay: PenaltyDecay,
+    /// When the search penalizes the features of the accepted schedule.
+    pub trigger: PenalizationTrigger,
 }
 
-/// Assigns a uniform cost of 1.0 to every feature.
-///
-/// This is the simplest cost model and works well when per-feature cost
-/// estimates are not available.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct UniformCost;
+/// The weight `lambda` of the penalties in the augmented objective, and how it evolves over a run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Lambda {
+    /// A weight that never changes.
+    Static(StaticLambda),
+    /// A weight multiplied up at each penalization and down at each new best.
+    Dynamic(DynamicLambda),
+    /// A weight stepped up at each penalization and down at each new best.
+    AdditiveDynamic(AdditiveDynamicLambda),
+}
 
-impl FeatureCost for UniformCost {
-    #[inline]
-    fn edge_cost(&self, _a: LinkEnd, _b: LinkEnd) -> f64 {
-        1.0
-    }
-
-    #[inline]
-    fn berth_cost(&self, _v: VesselIndex, _b: BerthIndex) -> f64 {
-        1.0
+impl Default for Lambda {
+    /// A static weight of one.
+    fn default() -> Self {
+        Self::Static(StaticLambda::new(1.0))
     }
 }
 
-// ----------------------------------------------------------------
-// Penalization Strategy
-// ----------------------------------------------------------------
-
-/// Controls which features are penalized when the search reaches a local
-/// optimum.
-pub trait PenalizationStrategy: std::fmt::Debug {
-    /// Inspects the current solution and increments penalty counters in
-    /// `memory` for the features deemed most responsible for the local
-    /// optimum.
-    ///
-    /// # Arguments
-    ///
-    /// * `memory` — The penalty memory to update.
-    /// * `graph` — The current schedule graph (for iterating features).
-    /// * `cost` — The feature cost model.
-    fn penalize(
-        &mut self,
-        memory: &mut PenaltyMemory,
-        graph: &ScheduleGraph,
-        cost: &dyn FeatureCost,
-    );
+/// A penalty weight that never changes: positive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StaticLambda {
+    value: f64,
 }
 
-/// Penalizes the feature(s) with the highest utility in the current
-/// solution.
-///
-/// Utility is defined as $c_f / (1 + p_f)$. If multiple features tie for
-/// the maximum utility, all of them are penalized.
-///
-/// Maintains a reusable scratch buffer to avoid heap allocations on every
-/// penalization call.
-#[derive(Debug, Clone, Default)]
-pub struct MaxUtilityPenalization {
-    /// Reusable scratch buffer for collecting winning features.
-    /// Entries are `(is_edge, flat_index)`.
-    buf: Vec<(bool, usize)>,
+impl StaticLambda {
+    /// The weight `value`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `value` is not positive.
+    pub fn new(value: f64) -> Self {
+        assert!(
+            value > 0.0,
+            "called `StaticLambda::new` with {value}, which is not positive"
+        );
+        Self { value }
+    }
+
+    /// The weight.
+    pub fn value(self) -> f64 {
+        self.value
+    }
 }
 
-impl PenalizationStrategy for MaxUtilityPenalization {
-    fn penalize(
-        &mut self,
-        memory: &mut PenaltyMemory,
-        graph: &ScheduleGraph,
-        cost: &dyn FeatureCost,
-    ) {
-        let num_vessels = graph.num_vessels();
-        let num_berths = graph.num_berths();
+/// A penalty weight that grows by a factor at each penalization and shrinks by a factor at each new best, kept
+/// within its bounds.
+///
+/// The weight starts at `initial` clamped to `[min, max]`; a penalization multiplies it by `1 + increase`, and a
+/// new best multiplies it by `1 - decrease` or, with `reset_on_best`, sets it back to its start.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynamicLambda {
+    initial: f64,
+    increase: f64,
+    decrease: f64,
+    min: f64,
+    max: f64,
+    reset_on_best: bool,
+}
 
-        let mut best_utility = f64::NEG_INFINITY;
-        self.buf.clear();
-
-        // Relative tolerance: two utilities are "equal" when they differ
-        // by less than this fraction of the larger magnitude. 1e-12 is
-        // tight enough to avoid false ties on well-separated values but
-        // loose enough to absorb FP rounding.
-        const REL_TOL: f64 = 1e-12;
-
-        let mut evaluate_feature = |is_edge: bool, idx: usize, cost_val: f64, penalty: f64| {
-            if cost_val > 0.0 {
-                let utility = cost_val / (1.0 + penalty);
-
-                let diff = utility - best_utility;
-                let scale = utility.abs().max(best_utility.abs()).max(1.0);
-
-                if best_utility == f64::NEG_INFINITY || diff > REL_TOL * scale {
-                    best_utility = utility;
-                    self.buf.clear();
-                    self.buf.push((is_edge, idx));
-                } else if diff.abs() <= REL_TOL * scale {
-                    self.buf.push((is_edge, idx));
-                }
-            }
-        };
-
-        for berth in graph.berths() {
-            let topo_iter = graph.berth_topology_iter(berth);
-
-            for (prev_end, next_end) in topo_iter.clone().zip(topo_iter.skip(1)) {
-                if is_feature(prev_end, next_end) {
-                    let c = cost.edge_cost(prev_end, next_end);
-                    let idx = edge_flat_index(prev_end, next_end, num_vessels);
-
-                    debug_assert!(idx < memory.edge.len());
-                    let p = unsafe { *memory.edge.get_unchecked(idx) } as f64;
-
-                    evaluate_feature(true, idx, c, p);
-                }
-            }
-
-            for vessel in graph.vessel_sequence_iter(berth) {
-                let c = cost.berth_cost(vessel, berth);
-                let idx = vessel.index() * num_berths + berth.index();
-
-                debug_assert!(idx < memory.berth.len());
-                let p = unsafe { *memory.berth.get_unchecked(idx) } as f64;
-
-                evaluate_feature(false, idx, c, p);
-            }
-        }
-
-        for &(is_edge, idx) in &self.buf {
-            debug_assert!(if is_edge {
-                idx < memory.edge.len()
-            } else {
-                idx < memory.berth.len()
-            });
-
-            unsafe {
-                if is_edge {
-                    let p = memory.edge.get_unchecked_mut(idx);
-                    *p = p.saturating_add(1);
-                } else {
-                    let p = memory.berth.get_unchecked_mut(idx);
-                    *p = p.saturating_add(1);
-                }
-            }
+impl DynamicLambda {
+    /// The weight that starts at `initial` and is kept in `[min, max]`, grows by the factor `1 + increase` at each
+    /// penalization and shrinks by the factor `1 - decrease` at each new best.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `initial`, `increase` or `min` is not positive, if `decrease` is not in `(0, 1)`, or if `max` is
+    /// below `min`.
+    pub fn new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Self {
+        assert!(
+            initial > 0.0 && increase > 0.0 && min > 0.0,
+            "called `DynamicLambda::new` with initial {initial}, increase {increase} or min {min} not positive"
+        );
+        assert!(
+            decrease > 0.0 && decrease < 1.0,
+            "called `DynamicLambda::new` with decrease {decrease}, outside (0, 1)"
+        );
+        assert!(
+            max >= min,
+            "called `DynamicLambda::new` with max {max} below min {min}"
+        );
+        Self {
+            initial,
+            increase,
+            decrease,
+            min,
+            max,
+            reset_on_best: false,
         }
     }
+
+    /// The same weight, which at a new best is set back to its start if `reset` holds, or shrinks otherwise.
+    pub fn with_reset_on_best(mut self, reset: bool) -> Self {
+        self.reset_on_best = reset;
+        self
+    }
 }
 
-// ----------------------------------------------------------------
-// Penalty Memory
-// ----------------------------------------------------------------
-
-/// Long-term memory tracking how often each feature has been penalized.
+/// A penalty weight that grows by a step at each penalization and shrinks by a step at each new best, kept within
+/// its bounds.
 ///
-/// Stores penalty counts for two feature classes:
-/// - **Edge**: vessel-to-vessel sequence links.
-/// - **Berth**: vessel-to-berth assignments.
-///
-/// All operations are $O(1)$ array lookups.
-#[derive(Debug, Clone)]
-pub struct PenaltyMemory {
-    /// Flat `(num_vessels + 1) * (num_vessels + 1)` array.
-    /// `edge[a * (num_vessels + 1) + b]` stores the penalty count for
-    /// the edge feature $a \to b$. Index `num_vessels` represents the
-    /// sentinel (berth boundary).
-    edge: Vec<u64>,
-
-    /// Flat `num_vessels * num_berths` array.
-    /// `berth[v * num_berths + b]` stores the penalty count for
-    /// assigning vessel $v$ to berth $b$.
-    berth: Vec<u64>,
-
-    num_vessels: usize,
-    num_berths: usize,
+/// The weight starts at `initial` clamped to `[min, max]`; a penalization adds `increase`, and a new best subtracts
+/// `decrease` or, with `reset_on_best`, sets it back to its start.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdditiveDynamicLambda {
+    initial: f64,
+    increase: f64,
+    decrease: f64,
+    min: f64,
+    max: f64,
+    reset_on_best: bool,
 }
 
-/// Whether the link `from -> to` is an edge feature: one of its ends is a vessel. The link from the head to the
+impl AdditiveDynamicLambda {
+    /// The weight that starts at `initial` and is kept in `[min, max]`, grows by `increase` at each penalization
+    /// and shrinks by `decrease` at each new best.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `initial`, `increase`, `decrease` or `min` is not positive, or if `max` is below `min`.
+    pub fn new(initial: f64, increase: f64, decrease: f64, min: f64, max: f64) -> Self {
+        assert!(
+            initial > 0.0 && increase > 0.0 && decrease > 0.0 && min > 0.0,
+            "called `AdditiveDynamicLambda::new` with initial {initial}, increase {increase}, decrease {decrease} \
+             or min {min} not positive"
+        );
+        assert!(
+            max >= min,
+            "called `AdditiveDynamicLambda::new` with max {max} below min {min}"
+        );
+        Self {
+            initial,
+            increase,
+            decrease,
+            min,
+            max,
+            reset_on_best: false,
+        }
+    }
+
+    /// The same weight, which at a new best is set back to its start if `reset` holds, or shrinks otherwise.
+    pub fn with_reset_on_best(mut self, reset: bool) -> Self {
+        self.reset_on_best = reset;
+        self
+    }
+}
+
+/// How the penalties erode over a run.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum PenaltyDecay {
+    /// The penalties never erode.
+    #[default]
+    None,
+    /// Every penalty is scaled down by a factor at every so many penalizations.
+    Geometric(GeometricDecay),
+}
+
+/// A decay that multiplies every penalty by `factor`, rounding toward zero, at every `period`-th penalization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeometricDecay {
+    factor: f64,
+    period: u64,
+}
+
+impl GeometricDecay {
+    /// The decay by `factor` at every `period`-th penalization.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `factor` is not in `(0, 1)` or `period` is zero.
+    pub fn new(factor: f64, period: u64) -> Self {
+        assert!(
+            factor > 0.0 && factor < 1.0,
+            "called `GeometricDecay::new` with factor {factor}, outside (0, 1)"
+        );
+        assert!(
+            period >= 1,
+            "called `GeometricDecay::new` with a period of zero"
+        );
+        Self { factor, period }
+    }
+}
+
+/// When the search penalizes the features of the accepted schedule.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum PenalizationTrigger {
+    /// When a scan finds no move that lowers the augmented objective: the classic guided local search.
+    #[default]
+    OnExhaustion,
+    /// After this many steps in a row without a new best, each candidate and each exhausted scan a step.
+    AfterNonImprovements(u64),
+    /// After every this many accepted moves.
+    AfterMoves(u64),
+}
+
+impl std::fmt::Display for PenalizationTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OnExhaustion => write!(f, "on exhaustion"),
+            Self::AfterNonImprovements(steps) => write!(f, "after {steps} non-improving steps"),
+            Self::AfterMoves(moves) => write!(f, "after {moves} accepted moves"),
+        }
+    }
+}
+
+/// A penalty weight from the objective of the initial schedule: `alpha * |objective| / features`, at least the
+/// machine epsilon so that the penalties always count.
+///
+/// `features` is the number of features penalties may fall on, at least one; `alpha` is the share of the
+/// objective, typically 0.1 to 0.5, that one penalty of every feature would add.
+///
+/// ```
+/// # use talos_ls::heuristic_lambda;
+/// let lambda = heuristic_lambda(1000.0, 50, 0.3);
+/// assert!((lambda - 6.0).abs() < f64::EPSILON);
+/// ```
+#[expect(
+    clippy::as_conversions,
+    reason = "a count of features stays far below 2^53, where every count is an exact `f64`"
+)]
+pub fn heuristic_lambda(objective: f64, features: usize, alpha: f64) -> f64 {
+    let features = features.max(1) as f64;
+    (alpha * objective.abs() / features).max(f64::EPSILON)
+}
+
+/// A feature of a schedule, by its place in the tables of a penalty memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Feature {
+    /// The link at this index of the table of links.
+    Link(usize),
+    /// The assignment at this index of the table of assignments.
+    Assignment(usize),
+}
+
+/// Where a feature's utility stands against the best utility found so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UtilityRank {
+    Better,
+    Tie,
+    Worse,
+}
+
+/// Where `utility` stands against `best`: a tie when they differ by at most a relative `1e-12` of the larger
+/// magnitude, or of one where both are smaller.
+///
+/// The tolerance absorbs the rounding of `1 / (1 + penalty)` while keeping utilities of different penalties apart,
+/// which differ by far more.
+fn rank_utility(utility: f64, best: f64) -> UtilityRank {
+    const RELATIVE_TOLERANCE: f64 = 1e-12;
+    let difference = utility - best;
+    let scale = utility.abs().max(best.abs()).max(1.0);
+    if best == f64::NEG_INFINITY || difference > RELATIVE_TOLERANCE * scale {
+        UtilityRank::Better
+    } else if difference.abs() <= RELATIVE_TOLERANCE * scale {
+        UtilityRank::Tie
+    } else {
+        UtilityRank::Worse
+    }
+}
+
+/// The row or column of `end` in the table of links: a vessel's own index, and `num_vessels` for the boundary of
+/// every berth, which all share one row and one column.
+///
+/// `end` is a boundary or a vessel below `num_vessels`.
+#[inline(always)]
+fn end_index(end: LinkEnd, num_vessels: usize) -> usize {
+    match end {
+        LinkEnd::Vessel(vessel) => {
+            debug_assert!(
+                vessel.index() < num_vessels,
+                "called `end_index` with {vessel}, outside a table of {num_vessels} vessels"
+            );
+            vessel.index()
+        }
+        LinkEnd::Berth(_) => num_vessels,
+    }
+}
+
+/// The index of the link from `from` to `to` in a table of links of `num_vessels` vessels, below
+/// `(num_vessels + 1)^2`.
+///
+/// `from` and `to` are boundaries or vessels below `num_vessels`.
+#[inline(always)]
+fn link_index(from: LinkEnd, to: LinkEnd, num_vessels: usize) -> usize {
+    end_index(from, num_vessels) * (num_vessels + 1) + end_index(to, num_vessels)
+}
+
+/// Whether the link from `from` to `to` is a feature: one of its ends is a vessel. The link from the head to the
 /// tail of an empty berth is none.
 #[inline(always)]
 fn is_feature(from: LinkEnd, to: LinkEnd) -> bool {
     matches!(from, LinkEnd::Vessel(_)) || matches!(to, LinkEnd::Vessel(_))
 }
 
-/// The row or column of `end` in the table of edge features: a vessel's own index, and `num_vessels` for the
-/// boundary of every berth.
+/// The penalty count of every feature of the schedules of one instance, zero at the start of a run.
 ///
-/// A vessel at or beyond `num_vessels`, which no graph of that many vessels names, takes the row of the
-/// boundaries, so that the index stays inside the table.
-#[inline(always)]
-fn end_index(end: LinkEnd, num_vessels: usize) -> usize {
-    match end {
-        LinkEnd::Vessel(vessel) => vessel.index().min(num_vessels),
-        LinkEnd::Berth(_) => num_vessels,
-    }
-}
-
-/// Computes the flat index for an edge feature.
-///
-/// **Boundary collapsing**: The boundaries of all berths are mapped to
-/// the single row/column `num_vessels`. This means edges involving
-/// *different* berth boundaries share the same penalty counter. This is
-/// intentional — the sequence penalty tracks "vessel near a boundary",
-/// not "vessel near berth-3's boundary specifically".
-///
-/// The resulting index is guaranteed to be less than
-/// $(\text{num\_vessels} + 1)^2$ — the allocation size of
-/// `PenaltyMemory::edge`.
-#[inline(always)]
-fn edge_flat_index(from: LinkEnd, to: LinkEnd, num_vessels: usize) -> usize {
-    let a = end_index(from, num_vessels);
-    let b = end_index(to, num_vessels);
-    a * (num_vessels + 1) + b
+/// The table of links has `(num_vessels + 1)^2` entries, the row and column `num_vessels` standing for the
+/// boundaries of all berths; the table of assignments has `num_vessels * num_berths`, by vessel and then berth.
+#[derive(Debug, Clone, Default)]
+struct PenaltyMemory {
+    links: Vec<u64>,
+    assignments: Vec<u64>,
+    num_vessels: usize,
+    num_berths: usize,
 }
 
 impl PenaltyMemory {
-    /// Creates a new penalty memory for the given problem dimensions.
-    ///
-    /// Allocates two flat arrays:
-    /// - `edge`: $(\text{num\_vessels} + 1)^2$ entries for sequence features
-    ///   (including berth sentinels).
-    /// - `berth`: $\text{num\_vessels} \times \text{num\_berths}$ entries for
-    ///   assignment features.
-    ///
-    /// All counters are initialised to zero.
-    #[inline]
-    pub fn new(num_vessels: usize, num_berths: usize) -> Self {
-        Self {
-            edge: vec![0; (num_vessels + 1) * (num_vessels + 1)],
-            berth: vec![0; num_vessels * num_berths],
-            num_vessels,
-            num_berths,
-        }
-    }
-
-    /// Sizes the memory for `num_vessels` vessels and `num_berths` berths, with every penalty counter zero.
-    pub fn reset(&mut self, num_vessels: usize, num_berths: usize) {
-        self.edge.clear();
-        self.edge.resize((num_vessels + 1) * (num_vessels + 1), 0);
-        self.berth.clear();
-        self.berth.resize(num_vessels * num_berths, 0);
+    /// Sizes the memory for `num_vessels` vessels and `num_berths` berths, with every count zero.
+    fn reset(&mut self, num_vessels: usize, num_berths: usize) {
+        self.links.clear();
+        self.links.resize((num_vessels + 1) * (num_vessels + 1), 0);
+        self.assignments.clear();
+        self.assignments.resize(num_vessels * num_berths, 0);
         self.num_vessels = num_vessels;
         self.num_berths = num_berths;
     }
 
-    /// Resets all penalty counters to zero.
-    #[inline]
-    pub fn clear(&mut self) {
-        self.edge.fill(0);
-        self.berth.fill(0);
+    /// The index of the assignment of `vessel` to `berth`.
+    ///
+    /// `vessel` and `berth` are the memory's.
+    #[inline(always)]
+    fn assignment_index(&self, vessel: VesselIndex, berth: BerthIndex) -> usize {
+        debug_assert!(
+            vessel.index() < self.num_vessels && berth.index() < self.num_berths,
+            "called `PenaltyMemory::assignment_index` with {vessel} or {berth}, outside the memory"
+        );
+        vessel.index() * self.num_berths + berth.index()
     }
 
-    /// Returns the number of vessels.
-    #[inline]
-    pub fn num_vessels(&self) -> usize {
-        self.num_vessels
+    /// The count of the feature at `feature`.
+    ///
+    /// # Safety
+    ///
+    /// The index of `feature` must be below the length of its table.
+    #[inline(always)]
+    unsafe fn count_unchecked(&self, feature: Feature) -> u64 {
+        match feature {
+            Feature::Link(index) => {
+                debug_assert!(index < self.links.len());
+                // SAFETY: the index is below the length of the table of links, the precondition of this function.
+                unsafe { *self.links.get_unchecked(index) }
+            }
+            Feature::Assignment(index) => {
+                debug_assert!(index < self.assignments.len());
+                // SAFETY: the index is below the length of the table of assignments, the precondition of this
+                // function.
+                unsafe { *self.assignments.get_unchecked(index) }
+            }
+        }
     }
 
-    /// Returns the number of berths.
-    #[inline]
-    pub fn num_berths(&self) -> usize {
-        self.num_berths
-    }
-
-    /// The penalty count of the edge feature from `from` to `to`, each a vessel or the boundary of a berth.
+    /// The count of the link from `from` to `to`.
     ///
     /// # Panics
     ///
     /// Panics if `from` or `to` is a vessel outside the memory.
-    #[inline]
-    pub fn edge_penalty(&self, from: LinkEnd, to: LinkEnd) -> u64 {
+    #[cfg(test)]
+    fn link_penalty(&self, from: LinkEnd, to: LinkEnd) -> u64 {
         let inside = |end: LinkEnd| match end {
             LinkEnd::Vessel(vessel) => vessel.index() < self.num_vessels,
             LinkEnd::Berth(_) => true,
         };
         assert!(
             inside(from) && inside(to),
-            "called `PenaltyMemory::edge_penalty` with a link outside a memory of {} vessels",
+            "called `PenaltyMemory::link_penalty` with a link outside a memory of {} vessels",
             self.num_vessels
         );
-        let idx = edge_flat_index(from, to, self.num_vessels);
-        debug_assert!(idx < self.edge.len());
-        // SAFETY: both ends are vessels of the memory or boundaries, as the check above found, so `edge_flat_index`
-        // yields less than `(num_vessels + 1)^2`, the length of `edge`.
-        unsafe { *self.edge.get_unchecked(idx) }
+        self.links[link_index(from, to, self.num_vessels)]
     }
 
-    /// The penalty count of the feature that assigns `vessel` to `berth`.
+    /// The count of the assignment of `vessel` to `berth`.
     ///
     /// # Panics
     ///
     /// Panics if `vessel` or `berth` is outside the memory.
-    #[inline]
-    pub fn berth_penalty(&self, vessel: VesselIndex, berth: BerthIndex) -> u64 {
+    #[cfg(test)]
+    fn assignment_penalty(&self, vessel: VesselIndex, berth: BerthIndex) -> u64 {
         assert!(
             vessel.index() < self.num_vessels && berth.index() < self.num_berths,
-            "called `PenaltyMemory::berth_penalty` with vessel {} and berth {}, outside a memory of {} vessels and {} \
-             berths",
-            vessel.index(),
-            berth.index(),
+            "called `PenaltyMemory::assignment_penalty` with {vessel} and {berth}, outside a memory of {} vessels \
+             and {} berths",
             self.num_vessels,
             self.num_berths
         );
-        let idx = vessel.index() * self.num_berths + berth.index();
-        debug_assert!(idx < self.berth.len());
-        // SAFETY: `vessel` and `berth` are the memory's, as the check above found, so the index is below
-        // `num_vessels * num_berths`, the length of `berth`.
-        unsafe { *self.berth.get_unchecked(idx) }
+        self.assignments[self.assignment_index(vessel, berth)]
     }
 
-    /// Computes the augmented penalty delta for a candidate move described
-    /// by `diff`.
+    /// The change in the sum of penalties that the moves of `diff` make: the counts of the links they made and
+    /// the assignments they reached, less those of the links they broke and the assignments they left.
     ///
-    /// The delta is: penalties gained from *created* edges and *new* berth
-    /// assignments minus penalties lost from *broken* edges and *old* berth
-    /// assignments.
+    /// It costs one read per entry of the diff.
     ///
-    /// Because a single move typically touches only 2–6 diff entries, this
-    /// runs in $O(|\text{diff}|)$ — far cheaper than recomputing the full
-    /// penalty sum from scratch.
+    /// # Safety
     ///
-    /// # Arguments
-    ///
-    /// * `diff` — The schedule-graph diff describing the candidate move.
-    #[inline]
-    pub fn penalty_delta(&self, diff: &ScheduleGraphDiff) -> i64 {
+    /// Every vessel and berth `diff` names must be the memory's.
+    #[expect(
+        clippy::as_conversions,
+        reason = "a penalty count grows by one per penalization, far below 2^63, so it is an exact `i64`"
+    )]
+    unsafe fn penalty_delta_unchecked(&self, diff: &ScheduleGraphDiff) -> i64 {
         let mut delta: i64 = 0;
-
-        // SAFETY: all flat indices are bounded by allocation sizes.
-        // Edge indices < (num_vessels+1)^2, berth indices < num_vessels*num_berths.
-        unsafe {
-            // Subtract penalties for broken edges.
-            for edge in diff.broken_links() {
-                let idx = edge_flat_index(edge.from, edge.to, self.num_vessels);
-                debug_assert!(idx < self.edge.len());
-
-                delta -= *self.edge.get_unchecked(idx) as i64;
-            }
-
-            // Add penalties for created edges.
-            for edge in diff.created_links() {
-                let idx = edge_flat_index(edge.from, edge.to, self.num_vessels);
-                debug_assert!(idx < self.edge.len());
-
-                delta += *self.edge.get_unchecked(idx) as i64;
-            }
-
-            // Subtract penalties for old berth assignments, add for new.
-            for reallocation in diff.reallocations() {
-                let vessel = reallocation.vessel;
-                let old_idx = vessel.index() * self.num_berths + reallocation.from.index();
-                let new_idx = vessel.index() * self.num_berths + reallocation.to.index();
-                debug_assert!(
-                    old_idx < self.berth.len(),
-                    "penalty_delta old berth: index {old_idx} out of bounds (len {})",
-                    self.berth.len()
-                );
-                debug_assert!(
-                    new_idx < self.berth.len(),
-                    "penalty_delta new berth: index {new_idx} out of bounds (len {})",
-                    self.berth.len()
-                );
-                delta -= *self.berth.get_unchecked(old_idx) as i64;
-                delta += *self.berth.get_unchecked(new_idx) as i64;
-            }
+        for link in diff.broken_links() {
+            let index = link_index(link.from, link.to, self.num_vessels);
+            // SAFETY: both ends are boundaries or vessels of the memory, the precondition of this function, so
+            // the index is below `(num_vessels + 1)^2`, the length of the table of links.
+            delta -= unsafe { self.count_unchecked(Feature::Link(index)) } as i64;
         }
-
+        for link in diff.created_links() {
+            let index = link_index(link.from, link.to, self.num_vessels);
+            // SAFETY: as for the broken links.
+            delta += unsafe { self.count_unchecked(Feature::Link(index)) } as i64;
+        }
+        for reallocation in diff.reallocations() {
+            let left = self.assignment_index(reallocation.vessel, reallocation.from);
+            let reached = self.assignment_index(reallocation.vessel, reallocation.to);
+            // SAFETY: the vessel and both berths are the memory's, the precondition of this function, so both
+            // indices are below `num_vessels * num_berths`, the length of the table of assignments.
+            let (left, reached) = unsafe {
+                (
+                    self.count_unchecked(Feature::Assignment(left)),
+                    self.count_unchecked(Feature::Assignment(reached)),
+                )
+            };
+            delta -= left as i64;
+            delta += reached as i64;
+        }
         delta
     }
 
-    /// Multiplies all penalty counters by `factor`, truncating toward zero.
-    ///
-    /// This implements "forgetfulness" — old penalties gradually erode,
-    /// allowing the search to revisit previously penalized regions.
-    ///
-    /// # Arguments
-    ///
-    /// * `factor` — Multiplicative decay factor (e.g. 0.9). Must be in `[0, 1]`.
-    pub fn decay(&mut self, factor: f64) {
-        debug_assert!(
-            (0.0..=1.0).contains(&factor),
-            "PenaltyMemory::decay: factor must be in [0, 1], got {factor}"
-        );
-        for p in &mut self.edge {
-            *p = (*p as f64 * factor) as u64;
-        }
-        for p in &mut self.berth {
-            *p = (*p as f64 * factor) as u64;
-        }
-    }
-}
-
-// ----------------------------------------------------------------
-// Penalization Trigger
-// ----------------------------------------------------------------
-
-/// Controls *when* GLS applies its penalization step.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PenalizationTrigger {
-    /// Penalize when the neighbourhood is exhausted (classic GLS).
-    OnExhaustion,
-
-    /// Penalize after `n` consecutive iterations without a new global best.
-    AfterNonImprovements(u64),
-
-    /// Penalize every `n` accepted moves.
-    AfterMoves(u64),
-}
-
-impl Default for PenalizationTrigger {
-    #[inline]
-    fn default() -> Self {
-        Self::OnExhaustion
-    }
-}
-
-impl std::fmt::Display for PenalizationTrigger {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PenalizationTrigger::OnExhaustion => write!(f, "OnExhaustion"),
-            PenalizationTrigger::AfterNonImprovements(n) => {
-                write!(f, "AfterNonImprovements({})", n)
-            }
-            PenalizationTrigger::AfterMoves(n) => write!(f, "AfterMoves({})", n),
-        }
-    }
-}
-
-// ----------------------------------------------------------------
-// Penalty Decay
-// ----------------------------------------------------------------
-
-/// Controls how penalty counters decay over time.
-///
-/// Penalty decay implements "forgetfulness" — periodically eroding
-/// old penalties so the search can revisit previously penalized regions
-/// after it has explored elsewhere.
-///
-/// The decay hook is called after each penalization step.
-pub trait PenaltyDecay: std::fmt::Debug {
-    /// Called after each penalization step. May modify penalty counters.
-    fn after_penalization(&mut self, memory: &mut PenaltyMemory);
-}
-
-/// No decay — penalty counters are never eroded.
-///
-/// This is the default and matches classic GLS behaviour.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct NoDecay;
-
-impl PenaltyDecay for NoDecay {
-    #[inline]
-    fn after_penalization(&mut self, _memory: &mut PenaltyMemory) {}
-}
-
-/// Geometric (multiplicative) decay applied every `period` penalizations.
-///
-/// Every `period` penalization steps, all penalty counters are multiplied
-/// by `factor` (e.g. 0.9), truncating toward zero. This gradually erodes
-/// old penalties, allowing the search to revisit previously sealed regions.
-///
-/// A period of 1 means decay fires on every penalization.
-#[derive(Debug, Clone)]
-pub struct GeometricDecay {
-    factor: f64,
-    period: u64,
-    counter: u64,
-}
-
-impl GeometricDecay {
-    /// Creates a new geometric decay strategy.
-    ///
-    /// # Arguments
-    ///
-    /// * `factor` — Multiplicative decay factor (e.g. 0.9). Must be in `(0, 1)`.
-    /// * `period` — Apply decay every `period` penalization steps. Must be ≥ 1.
-    pub fn new(factor: f64, period: u64) -> Self {
-        assert!(
-            factor > 0.0 && factor < 1.0,
-            "GeometricDecay: factor must be in (0, 1), got {factor}"
-        );
-        assert!(period >= 1, "GeometricDecay: period must be >= 1");
-        Self {
-            factor,
-            period,
-            counter: 0,
-        }
-    }
-}
-
-impl PenaltyDecay for GeometricDecay {
-    fn after_penalization(&mut self, memory: &mut PenaltyMemory) {
-        self.counter += 1;
-        if self.counter >= self.period {
-            self.counter = 0;
-            memory.decay(self.factor);
-        }
-    }
-}
-
-/// Computes a heuristic $\lambda$ from the initial objective.
-///
-/// $$\lambda = \alpha \cdot \frac{f(s_0)}{|F_0|}$$
-///
-/// where $|F_0|$ is the number of features present in the initial
-/// solution and $\alpha$ is a scaling factor (typically 0.1–0.5).
-///
-/// The result is clamped to at least [`f64::EPSILON`] to avoid a
-/// zero penalty weight, which would disable GLS entirely.
-///
-/// # Arguments
-///
-/// * `objective` — The initial solution's objective value.
-/// * `num_features` — The number of features in the initial solution
-///   (e.g., `num_vessels + num_edges`). Clamped to at least 1.
-/// * `alpha` — Scaling factor (e.g., 0.3).
-///
-/// # Examples
-///
-/// ```
-/// # use talos_ls::metaheuristic::guided_local_search::heuristic_lambda;
-/// let lambda = heuristic_lambda(1000.0, 50, 0.3);
-/// assert!((lambda - 6.0).abs() < f64::EPSILON);
-/// ```
-#[inline(always)]
-pub fn heuristic_lambda(objective: f64, num_features: usize, alpha: f64) -> f64 {
-    let nf = num_features.max(1) as f64;
-    (alpha * objective.abs() / nf).max(f64::EPSILON)
-}
-
-// ----------------------------------------------------------------
-// Lambda Strategy
-// ----------------------------------------------------------------
-
-/// Controls how the penalty weight $\lambda$ evolves during search.
-///
-/// Lifecycle hooks are called by GLS at the appropriate moments:
-/// - `on_start` — once, when the search begins.
-/// - `on_accept` — after each accepted move.
-/// - `on_new_best` — when a new global best is found.
-/// - `on_penalization` — after each penalization step.
-pub trait LambdaStrategy: std::fmt::Debug {
-    /// Returns the current penalty weight $\lambda$.
-    fn lambda(&self) -> f64;
-
-    /// Called once when the search starts.
-    fn on_start(&mut self, _initial_objective: f64) {}
-
-    /// Called after an accepted move.
-    fn on_accept(&mut self, _new_objective: f64) {}
-
-    /// Called when a new global best solution is found.
-    fn on_new_best(&mut self, _new_best_objective: f64) {}
-
-    /// Called after the penalization step fires.
-    fn on_penalization(&mut self) {}
-}
-
-/// A constant $\lambda$ that never changes.
-///
-/// This is the simplest strategy and the default for
-/// `GuidedLocalSearch`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct StaticLambda(pub f64);
-
-impl LambdaStrategy for StaticLambda {
-    #[inline]
-    fn lambda(&self) -> f64 {
-        self.0
-    }
-}
-
-/// A reactive $\lambda$ that adjusts asymmetrically based on search progress.
-#[derive(Debug, Clone)]
-pub struct DynamicLambda {
-    current: f64,
-    initial: f64,
-    inc_step: f64,
-    dec_step: f64,
-    min_lambda: f64,
-    max_lambda: f64,
-    reset_on_best: bool,
-}
-
-impl DynamicLambda {
-    /// Creates a new dynamic lambda strategy with asymmetric scaling.
-    ///
-    /// # Arguments
-    ///
-    /// * `initial` — Starting $\lambda$ value.
-    /// * `inc_step` — Multiplicative increase factor when stuck (e.g. 0.05 for +5%).
-    /// * `dec_step` — Multiplicative decrease factor on new best (e.g. 0.25 for -25%).
-    /// * `min_lambda` — Lower clamp bound.
-    /// * `max_lambda` — Upper clamp bound.
-    pub fn new(
-        initial: f64,
-        inc_step: f64,
-        dec_step: f64,
-        min_lambda: f64,
-        max_lambda: f64,
-    ) -> Self {
-        assert!(initial > 0.0, "DynamicLambda: initial must be > 0.0");
-        assert!(inc_step > 0.0, "DynamicLambda: inc_step must be > 0.0");
-        assert!(
-            dec_step > 0.0 && dec_step < 1.0,
-            "DynamicLambda: dec_step must be in (0, 1)"
-        );
-        assert!(min_lambda > 0.0, "DynamicLambda: min_lambda must be > 0.0");
-        assert!(
-            max_lambda >= min_lambda,
-            "DynamicLambda: max_lambda must be >= min_lambda"
-        );
-
-        Self {
-            current: initial.clamp(min_lambda, max_lambda),
-            initial,
-            inc_step,
-            dec_step,
-            min_lambda,
-            max_lambda,
-            reset_on_best: false,
-        }
-    }
-
-    #[inline]
-    pub fn with_reset_on_best(mut self, reset: bool) -> Self {
-        self.reset_on_best = reset;
-        self
-    }
-}
-
-impl LambdaStrategy for DynamicLambda {
-    #[inline]
-    fn lambda(&self) -> f64 {
-        self.current
-    }
-
-    fn on_start(&mut self, _initial_objective: f64) {
-        self.current = self.initial.clamp(self.min_lambda, self.max_lambda);
-    }
-
-    fn on_new_best(&mut self, _new_best_objective: f64) {
-        if self.reset_on_best {
-            self.current = self.initial.clamp(self.min_lambda, self.max_lambda);
-        } else {
-            // Intensify: Rapid drop using dec_step
-            self.current =
-                (self.current * (1.0 - self.dec_step)).clamp(self.min_lambda, self.max_lambda);
-        }
-    }
-
-    fn on_penalization(&mut self) {
-        // Diversify: Gradual climb using inc_step
-        self.current =
-            (self.current * (1.0 + self.inc_step)).clamp(self.min_lambda, self.max_lambda);
-    }
-}
-
-/// A reactive $\lambda$ that adjusts by fixed additive steps.
-#[derive(Debug, Clone)]
-pub struct AdditiveDynamicLambda {
-    current: f64,
-    initial: f64,
-    inc_step: f64,
-    dec_step: f64,
-    min_lambda: f64,
-    max_lambda: f64,
-    reset_on_best: bool,
-}
-
-impl AdditiveDynamicLambda {
-    /// Creates a new additive dynamic lambda strategy with asymmetric scaling.
-    ///
-    /// # Arguments
-    ///
-    /// * `initial` — Starting $\lambda$ value.
-    /// * `inc_step` — Constant additive increase (e.g. 0.05).
-    /// * `dec_step` — Constant additive decrease (e.g. 0.25).
-    /// * `min_lambda` — Lower clamp bound.
-    /// * `max_lambda` — Upper clamp bound.
-    pub fn new(
-        initial: f64,
-        inc_step: f64,
-        dec_step: f64,
-        min_lambda: f64,
-        max_lambda: f64,
-    ) -> Self {
-        assert!(
-            initial > 0.0,
-            "AdditiveDynamicLambda: initial must be > 0.0"
-        );
-        assert!(
-            inc_step > 0.0,
-            "AdditiveDynamicLambda: inc_step must be > 0.0"
-        );
-        assert!(
-            dec_step > 0.0,
-            "AdditiveDynamicLambda: dec_step must be > 0.0"
-        );
-        assert!(
-            min_lambda > 0.0,
-            "AdditiveDynamicLambda: min_lambda must be > 0.0"
-        );
-        assert!(
-            max_lambda >= min_lambda,
-            "AdditiveDynamicLambda: max_lambda must be >= min_lambda"
-        );
-
-        Self {
-            current: initial.clamp(min_lambda, max_lambda),
-            initial,
-            inc_step,
-            dec_step,
-            min_lambda,
-            max_lambda,
-            reset_on_best: false,
-        }
-    }
-
-    #[inline]
-    pub fn with_reset_on_best(mut self, reset: bool) -> Self {
-        self.reset_on_best = reset;
-        self
-    }
-}
-
-impl LambdaStrategy for AdditiveDynamicLambda {
-    #[inline]
-    fn lambda(&self) -> f64 {
-        self.current
-    }
-
-    fn on_start(&mut self, _initial_objective: f64) {
-        self.current = self.initial.clamp(self.min_lambda, self.max_lambda);
-    }
-
-    fn on_new_best(&mut self, _new_best_objective: f64) {
-        if self.reset_on_best {
-            self.current = self.initial.clamp(self.min_lambda, self.max_lambda);
-        } else {
-            // Intensify: drop by a fixed step.
-            self.current = (self.current - self.dec_step).clamp(self.min_lambda, self.max_lambda);
-        }
-    }
-
-    fn on_penalization(&mut self) {
-        // Diversify: increase by a fixed step.
-        self.current = (self.current + self.inc_step).clamp(self.min_lambda, self.max_lambda);
-    }
-}
-
-// ----------------------------------------------------------------
-// Guided Local Search
-// ----------------------------------------------------------------
-
-/// Guided Local Search (GLS) metaheuristic implementation.
-///
-/// GLS augments a local search by adding penalties to the objective function,
-/// guiding the search away from previously visited local optima. When the
-/// underlying local search reaches a local optimum, GLS inspects the current
-/// solution's features, identifies the one with the highest *utility*, and
-/// increments its penalty counter. The augmented objective pushes the search
-/// into unexplored regions of the solution space.
-pub struct GuidedLocalSearch<
-    P = MaxUtilityPenalization,
-    F = UniformCost,
-    L = StaticLambda,
-    D = NoDecay,
-> {
-    penalization: P,
-    feature_cost: F,
-    lambda_strategy: L,
-    decay: D,
-    memory: PenaltyMemory,
-    current_penalty_sum: i64,
-    trigger: PenalizationTrigger,
-    trigger_counter: u64,
-    last_best_obj: f64,
-}
-
-impl<P: std::fmt::Debug, F: std::fmt::Debug, L: std::fmt::Debug, D: std::fmt::Debug> std::fmt::Debug
-    for GuidedLocalSearch<P, F, L, D>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GuidedLocalSearch")
-            .field("penalization", &self.penalization)
-            .field("feature_cost", &self.feature_cost)
-            .field("lambda_strategy", &self.lambda_strategy)
-            .field("decay", &self.decay)
-            .field("current_penalty_sum", &self.current_penalty_sum)
-            .field("trigger", &self.trigger)
-            .field("trigger_counter", &self.trigger_counter)
-            .field("last_best_obj", &self.last_best_obj)
-            .finish()
-    }
-}
-
-impl GuidedLocalSearch<MaxUtilityPenalization, UniformCost, StaticLambda> {
-    /// Creates a new GLS with all default strategies.
-    ///
-    /// Defaults to `MaxUtilityPenalization`, `UniformCost`,
-    /// `StaticLambda(1.0)`, and `NoDecay`. Use the `.with_*()` builder
-    /// methods to customise:
-    ///
-    /// ```ignore
-    /// let gls = GuidedLocalSearch::new(num_vessels, num_berths)
-    ///     .with_lambda_strategy(DynamicLambda::new(base, 0.1, lo, hi))
-    ///     .with_decay(GeometricDecay::new(0.9, 10))
-    ///     .with_trigger(PenalizationTrigger::AfterMoves(100));
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `num_vessels` — Number of vessels in the problem.
-    /// * `num_berths` — Number of berths in the problem.
-    #[inline]
-    pub fn new(num_vessels: usize, num_berths: usize) -> Self {
-        Self {
-            penalization: MaxUtilityPenalization::default(),
-            feature_cost: UniformCost,
-            lambda_strategy: StaticLambda(1.0),
-            decay: NoDecay,
-            memory: PenaltyMemory::new(num_vessels, num_berths),
-            current_penalty_sum: 0,
-            trigger: PenalizationTrigger::OnExhaustion,
-            trigger_counter: 0,
-            last_best_obj: f64::INFINITY,
-        }
-    }
-
-    /// Sets a static (constant) lambda value.
-    ///
-    /// Shorthand for `.with_lambda_strategy(StaticLambda(lambda))`.
+    /// The sum of the penalties of every feature of `graph`.
     ///
     /// # Panics
     ///
-    /// Panics if `lambda` is not positive.
-    #[inline]
-    pub fn with_lambda(mut self, lambda: f64) -> Self {
-        assert!(
-            lambda > 0.0,
-            "GuidedLocalSearch: lambda must be > 0.0, got {}",
-            lambda
-        );
-        self.lambda_strategy = StaticLambda(lambda);
-        self
-    }
-}
-
-impl<P, F, L> GuidedLocalSearch<P, F, L, NoDecay>
-where
-    P: PenalizationStrategy,
-    F: FeatureCost,
-    L: LambdaStrategy,
-{
-    /// Creates a new GLS with fully custom strategies (no penalty decay).
-    ///
-    /// Use `.with_decay()` to add a decay
-    /// strategy afterwards.
-    ///
-    /// # Arguments
-    ///
-    /// * `penalization` — The penalization strategy.
-    /// * `feature_cost` — The feature cost model.
-    /// * `lambda_strategy` — The lambda strategy controlling the penalty weight.
-    /// * `num_vessels` — Number of vessels in the problem.
-    /// * `num_berths` — Number of berths in the problem.
-    #[inline]
-    pub fn with_strategies(
-        penalization: P,
-        feature_cost: F,
-        lambda_strategy: L,
-        num_vessels: usize,
-        num_berths: usize,
-    ) -> Self {
-        Self {
-            penalization,
-            feature_cost,
-            lambda_strategy,
-            decay: NoDecay,
-            memory: PenaltyMemory::new(num_vessels, num_berths),
-            current_penalty_sum: 0,
-            trigger: PenalizationTrigger::OnExhaustion,
-            trigger_counter: 0,
-            last_best_obj: f64::INFINITY,
-        }
-    }
-}
-
-impl<P, F, L, D> GuidedLocalSearch<P, F, L, D>
-where
-    P: PenalizationStrategy,
-    F: FeatureCost,
-    L: LambdaStrategy,
-    D: PenaltyDecay,
-{
-    /// Replaces the penalization strategy.
-    #[inline]
-    pub fn with_penalization<P2: PenalizationStrategy>(
-        self,
-        penalization: P2,
-    ) -> GuidedLocalSearch<P2, F, L, D> {
-        GuidedLocalSearch {
-            penalization,
-            feature_cost: self.feature_cost,
-            lambda_strategy: self.lambda_strategy,
-            decay: self.decay,
-            memory: self.memory,
-            current_penalty_sum: self.current_penalty_sum,
-            trigger: self.trigger,
-            trigger_counter: self.trigger_counter,
-            last_best_obj: self.last_best_obj,
-        }
-    }
-
-    /// Replaces the feature cost model.
-    #[inline]
-    pub fn with_feature_cost<F2: FeatureCost>(
-        self,
-        feature_cost: F2,
-    ) -> GuidedLocalSearch<P, F2, L, D> {
-        GuidedLocalSearch {
-            penalization: self.penalization,
-            feature_cost,
-            lambda_strategy: self.lambda_strategy,
-            decay: self.decay,
-            memory: self.memory,
-            current_penalty_sum: self.current_penalty_sum,
-            trigger: self.trigger,
-            trigger_counter: self.trigger_counter,
-            last_best_obj: self.last_best_obj,
-        }
-    }
-
-    /// Replaces the lambda strategy.
-    #[inline]
-    pub fn with_lambda_strategy<L2: LambdaStrategy>(
-        self,
-        lambda_strategy: L2,
-    ) -> GuidedLocalSearch<P, F, L2, D> {
-        GuidedLocalSearch {
-            penalization: self.penalization,
-            feature_cost: self.feature_cost,
-            lambda_strategy,
-            decay: self.decay,
-            memory: self.memory,
-            current_penalty_sum: self.current_penalty_sum,
-            trigger: self.trigger,
-            trigger_counter: self.trigger_counter,
-            last_best_obj: self.last_best_obj,
-        }
-    }
-
-    /// Replaces the penalty decay strategy.
-    #[inline]
-    pub fn with_decay<D2: PenaltyDecay>(self, decay: D2) -> GuidedLocalSearch<P, F, L, D2> {
-        GuidedLocalSearch {
-            penalization: self.penalization,
-            feature_cost: self.feature_cost,
-            lambda_strategy: self.lambda_strategy,
-            decay,
-            memory: self.memory,
-            current_penalty_sum: self.current_penalty_sum,
-            trigger: self.trigger,
-            trigger_counter: self.trigger_counter,
-            last_best_obj: self.last_best_obj,
-        }
-    }
-
-    /// Returns the current penalty weight $\lambda$.
-    #[inline]
-    pub fn lambda(&self) -> f64 {
-        self.lambda_strategy.lambda()
-    }
-
-    /// Returns a reference to the lambda strategy.
-    #[inline]
-    pub fn lambda_strategy(&self) -> &L {
-        &self.lambda_strategy
-    }
-
-    /// Returns a mutable reference to the lambda strategy.
-    #[inline]
-    pub fn lambda_strategy_mut(&mut self) -> &mut L {
-        &mut self.lambda_strategy
-    }
-
-    /// Returns a reference to the penalization strategy.
-    #[inline]
-    pub fn penalization(&self) -> &P {
-        &self.penalization
-    }
-
-    /// Returns a mutable reference to the penalization strategy.
-    #[inline]
-    pub fn penalization_mut(&mut self) -> &mut P {
-        &mut self.penalization
-    }
-
-    /// Returns a reference to the feature cost model.
-    #[inline]
-    pub fn feature_cost(&self) -> &F {
-        &self.feature_cost
-    }
-
-    /// Returns a mutable reference to the feature cost model.
-    #[inline]
-    pub fn feature_cost_mut(&mut self) -> &mut F {
-        &mut self.feature_cost
-    }
-
-    /// Returns a reference to the penalty decay strategy.
-    #[inline]
-    pub fn decay(&self) -> &D {
-        &self.decay
-    }
-
-    /// Returns a mutable reference to the penalty decay strategy.
-    #[inline]
-    pub fn decay_mut(&mut self) -> &mut D {
-        &mut self.decay
-    }
-
-    /// Returns a reference to the penalty memory.
-    #[inline]
-    pub fn memory(&self) -> &PenaltyMemory {
-        &self.memory
-    }
-
-    /// Sets the penalization trigger.
-    ///
-    /// The default is `PenalizationTrigger::OnExhaustion` — the classic
-    /// GLS behaviour from the literature.
-    #[inline]
-    pub fn with_trigger(mut self, trigger: PenalizationTrigger) -> Self {
-        self.trigger = trigger;
-        self
-    }
-
-    /// Returns the current penalization trigger.
-    #[inline]
-    pub fn trigger(&self) -> PenalizationTrigger {
-        self.trigger
-    }
-
-    /// Computes the full penalty sum for the current solution by scanning
-    /// the schedule graph.
-    ///
-    /// This traverses every berth chain and every vessel assignment,
-    /// summing up the corresponding penalty counters. Used to bootstrap
-    /// the cached `current_penalty_sum` after a penalization step or at
-    /// search start.
-    fn compute_penalty_sum(&self, graph: &ScheduleGraph) -> i64 {
-        let num_vessels = graph.num_vessels();
-        let num_berths = graph.num_berths();
+    /// Panics if `graph` does not count the vessels and berths of the memory.
+    #[expect(
+        clippy::as_conversions,
+        reason = "a penalty count grows by one per penalization, far below 2^63, so it is an exact `i64`"
+    )]
+    fn penalty_sum(&self, graph: &ScheduleGraph) -> i64 {
+        self.assert_counts_of(graph);
         let mut sum: i64 = 0;
-
         for berth in graph.berths() {
-            let topo_iter = graph.berth_topology_iter(berth);
-            for (prev_end, next_end) in topo_iter.clone().zip(topo_iter.skip(1)) {
-                if is_feature(prev_end, next_end) {
-                    let idx = edge_flat_index(prev_end, next_end, num_vessels);
-                    debug_assert!(idx < self.memory.edge.len());
-
-                    // SAFETY: idx < (num_vessels+1)^2, the edge allocation size.
-                    sum += unsafe { *self.memory.edge.get_unchecked(idx) } as i64;
+            let ends = graph.berth_topology_iter(berth);
+            for (from, to) in ends.clone().zip(ends.skip(1)) {
+                if is_feature(from, to) {
+                    let index = link_index(from, to, self.num_vessels);
+                    // SAFETY: both ends are boundaries or vessels of the graph, which counts the memory's
+                    // vessels, as checked above.
+                    sum += unsafe { self.count_unchecked(Feature::Link(index)) } as i64;
                 }
             }
         }
-
         for vessel in graph.vessels() {
-            let berth = graph.vessel_berth(vessel);
-            let idx = vessel.index() * num_berths + berth.index();
-            debug_assert!(idx < self.memory.berth.len());
-
-            // SAFETY: v < num_vessels and berth < num_berths.
-            sum += unsafe { *self.memory.berth.get_unchecked(idx) } as i64;
+            let index = self.assignment_index(vessel, graph.vessel_berth(vessel));
+            // SAFETY: the vessel and its berth are the graph's, which counts the memory's vessels and berths, as
+            // checked above.
+            sum += unsafe { self.count_unchecked(Feature::Assignment(index)) } as i64;
         }
-
         sum
     }
 
-    /// Applies the penalization strategy and recomputes the cached
-    /// penalty sum.
+    /// Adds one penalty to every feature of `graph` of the largest utility `1 / (1 + penalty)`, collecting them
+    /// in `winners`.
     ///
-    /// This is the core "kick" step of GLS: after identifying and
-    /// incrementing penalties for the highest-utility features, the
-    /// cached penalty sum is fully recomputed to stay consistent.
-    fn penalize_and_recompute(&mut self, graph: &ScheduleGraph) {
-        self.penalization
-            .penalize(&mut self.memory, graph, &self.feature_cost);
-        self.decay.after_penalization(&mut self.memory);
-        self.current_penalty_sum = self.compute_penalty_sum(graph);
-        self.lambda_strategy.on_penalization();
+    /// # Panics
+    ///
+    /// Panics if `graph` does not count the vessels and berths of the memory.
+    #[expect(
+        clippy::as_conversions,
+        reason = "a penalty count grows by one per penalization, far below 2^53, so it is an exact `f64`"
+    )]
+    fn penalize(&mut self, graph: &ScheduleGraph, winners: &mut Vec<Feature>) {
+        self.assert_counts_of(graph);
+        winners.clear();
+        let mut best_utility = f64::NEG_INFINITY;
+        let mut consider = |feature: Feature, penalty: u64| {
+            let utility = 1.0 / (1.0 + penalty as f64);
+            match rank_utility(utility, best_utility) {
+                UtilityRank::Better => {
+                    best_utility = utility;
+                    winners.clear();
+                    winners.push(feature);
+                }
+                UtilityRank::Tie => winners.push(feature),
+                UtilityRank::Worse => {}
+            }
+        };
+        for berth in graph.berths() {
+            let ends = graph.berth_topology_iter(berth);
+            for (from, to) in ends.clone().zip(ends.skip(1)) {
+                if is_feature(from, to) {
+                    let feature = Feature::Link(link_index(from, to, self.num_vessels));
+                    // SAFETY: both ends are boundaries or vessels of the graph, which counts the memory's
+                    // vessels, as checked above.
+                    consider(feature, unsafe { self.count_unchecked(feature) });
+                }
+            }
+            for vessel in graph.vessel_sequence_iter(berth) {
+                let feature = Feature::Assignment(self.assignment_index(vessel, berth));
+                // SAFETY: the vessel and the berth are the graph's, which counts the memory's vessels and berths,
+                // as checked above.
+                consider(feature, unsafe { self.count_unchecked(feature) });
+            }
+        }
+        for &feature in winners.iter() {
+            let count = match feature {
+                Feature::Link(index) => &mut self.links[index],
+                Feature::Assignment(index) => &mut self.assignments[index],
+            };
+            *count = count.saturating_add(1);
+        }
+    }
+
+    /// Multiplies every count by `factor`, rounding toward zero.
+    ///
+    /// `factor` is in `[0, 1]`.
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "the product of a count and a factor in [0, 1] lies in [0, count], and rounding it toward zero is \
+                  the decay"
+    )]
+    fn decay(&mut self, factor: f64) {
+        debug_assert!(
+            (0.0..=1.0).contains(&factor),
+            "called `PenaltyMemory::decay` with factor {factor}, outside [0, 1]"
+        );
+        for count in self.links.iter_mut().chain(self.assignments.iter_mut()) {
+            *count = (*count as f64 * factor) as u64;
+        }
+    }
+
+    /// Panics unless `graph` counts the vessels and berths of the memory, which every unchecked read through the
+    /// features of `graph` rests on.
+    fn assert_counts_of(&self, graph: &ScheduleGraph) {
+        assert!(
+            graph.num_vessels() == self.num_vessels && graph.num_berths() == self.num_berths,
+            "the graph of {} vessels and {} berths should have the counts of the penalty memory, {} and {}",
+            graph.num_vessels(),
+            graph.num_berths(),
+            self.num_vessels,
+            self.num_berths
+        );
     }
 }
 
-impl<T, P, F, L, D> Metaheuristic<T> for GuidedLocalSearch<P, F, L, D>
-where
-    T: SolverNumeric + ToPrimitive,
-    P: PenalizationStrategy,
-    F: FeatureCost,
-    L: LambdaStrategy,
-    D: PenaltyDecay,
-{
-    fn name(&self) -> &str {
-        "GuidedLocalSearch"
+/// The penalty weight of a run as it evolves under its [`Lambda`].
+#[derive(Debug, Clone, Copy)]
+struct LambdaSchedule {
+    rule: Lambda,
+    current: f64,
+}
+
+impl LambdaSchedule {
+    /// The schedule of `rule`, at its start.
+    fn new(rule: Lambda) -> Self {
+        let mut schedule = Self { rule, current: 0.0 };
+        schedule.restart();
+        schedule
     }
 
-    fn on_start(
-        &mut self,
-        _model: &Model<T>,
-        _initial_solution: SolutionView<T>,
-        graph: &ScheduleGraph,
-    ) {
-        self.memory.reset(graph.num_vessels(), graph.num_berths());
-        self.current_penalty_sum = self.compute_penalty_sum(graph);
-        self.trigger_counter = 0;
-        let obj = _initial_solution.objective_value().to_f64().unwrap_or(0.0);
-        self.last_best_obj = obj;
-        self.lambda_strategy.on_start(obj);
+    /// Sets the weight to its start.
+    fn restart(&mut self) {
+        self.current = match self.rule {
+            Lambda::Static(lambda) => lambda.value,
+            Lambda::Dynamic(lambda) => lambda.initial.clamp(lambda.min, lambda.max),
+            Lambda::AdditiveDynamic(lambda) => lambda.initial.clamp(lambda.min, lambda.max),
+        };
     }
 
-    fn on_end(
-        &mut self,
-        _model: &Model<T>,
-        _final_solution: SolutionView<T>,
-        _graph: &ScheduleGraph,
-    ) {
-    }
-
-    /// Penalizes features in the current solution and restarts the search.
-    ///
-    /// This is the core GLS mechanism: when the local search is stuck,
-    /// the penalty landscape is modified to push the search away from
-    /// the current basin.
-    fn on_neighbourhood_exhausted(
-        &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        graph: &ScheduleGraph,
-    ) -> NeighborhoodExhaustionOutcome {
-        if self.trigger == PenalizationTrigger::OnExhaustion {
-            self.penalize_and_recompute(graph);
+    /// Lowers the weight at a new best, or sets it to its start where the rule says so.
+    fn on_new_best(&mut self) {
+        match self.rule {
+            Lambda::Static(_) => {}
+            Lambda::Dynamic(lambda) if lambda.reset_on_best => self.restart(),
+            Lambda::Dynamic(lambda) => {
+                self.current =
+                    (self.current * (1.0 - lambda.decrease)).clamp(lambda.min, lambda.max);
+            }
+            Lambda::AdditiveDynamic(lambda) if lambda.reset_on_best => self.restart(),
+            Lambda::AdditiveDynamic(lambda) => {
+                self.current = (self.current - lambda.decrease).clamp(lambda.min, lambda.max);
+            }
         }
-        NeighborhoodExhaustionOutcome::Restart
     }
 
-    /// GLS is a first-improvement strategy. Never buffers.
-    fn should_commit_buffered(
-        &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _layout: &ScheduleGraph,
-        _buffer_layout: &ScheduleGraph,
-    ) -> bool {
-        false
+    /// Raises the weight after a penalization.
+    fn on_penalization(&mut self) {
+        match self.rule {
+            Lambda::Static(_) => {}
+            Lambda::Dynamic(lambda) => {
+                self.current =
+                    (self.current * (1.0 + lambda.increase)).clamp(lambda.min, lambda.max);
+            }
+            Lambda::AdditiveDynamic(lambda) => {
+                self.current = (self.current + lambda.increase).clamp(lambda.min, lambda.max);
+            }
+        }
+    }
+}
+
+/// The decay of the penalties of a run, with the penalizations counted since it last fired.
+#[derive(Debug, Clone, Copy)]
+struct DecaySchedule {
+    rule: PenaltyDecay,
+    penalizations: u64,
+}
+
+impl DecaySchedule {
+    /// Counts a penalization, and decays `memory` at every period of the rule.
+    fn after_penalization(&mut self, memory: &mut PenaltyMemory) {
+        if let PenaltyDecay::Geometric(decay) = self.rule {
+            self.penalizations += 1;
+            if self.penalizations >= decay.period {
+                self.penalizations = 0;
+                memory.decay(decay.factor);
+            }
+        }
+    }
+}
+
+/// A guided local search under way: its settings, its penalty memory, and the sum of the penalties of the
+/// accepted schedule.
+///
+/// The penalty memory counts the vessels and berths of the graph the run searches from its start on, and the
+/// penalty sum is that of the accepted schedule after every step.
+#[derive(Debug, Clone)]
+pub struct GuidedLocalSearchRule {
+    memory: PenaltyMemory,
+    winners: Vec<Feature>,
+    lambda: LambdaSchedule,
+    decay: DecaySchedule,
+    trigger: PenalizationTrigger,
+    /// The steps or accepted moves counted toward the trigger.
+    trigger_counter: u64,
+    /// The best objective the trigger has seen, for [`PenalizationTrigger::AfterNonImprovements`].
+    last_best_objective: f64,
+    penalty_sum: i64,
+}
+
+impl GuidedLocalSearchRule {
+    /// The search of `settings`, which starts with the run.
+    pub fn new(settings: &GuidedLocalSearch) -> Self {
+        Self {
+            memory: PenaltyMemory::default(),
+            winners: Vec::new(),
+            lambda: LambdaSchedule::new(settings.lambda),
+            decay: DecaySchedule {
+                rule: settings.decay,
+                penalizations: 0,
+            },
+            trigger: settings.trigger,
+            trigger_counter: 0,
+            last_best_objective: f64::INFINITY,
+            penalty_sum: 0,
+        }
     }
 
-    fn search_command(
-        &mut self,
-        _iteration: u64,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-    ) -> SearchCommand {
-        SearchCommand::Continue
+    /// Penalizes the features of `graph`, the accepted schedule, of the largest utility, decays the penalties as
+    /// the rule says, and raises the weight.
+    fn penalize(&mut self, graph: &ScheduleGraph) {
+        self.memory.penalize(graph, &mut self.winners);
+        self.decay.after_penalization(&mut self.memory);
+        self.penalty_sum = self.memory.penalty_sum(graph);
+        self.lambda.on_penalization();
+    }
+}
+
+impl<T> AcceptanceRule<T> for GuidedLocalSearchRule
+where
+    T: SolverNumeric,
+{
+    fn on_start(&mut self, graph: &ScheduleGraph, initial_objective: T) {
+        self.memory.reset(graph.num_vessels(), graph.num_berths());
+        self.penalty_sum = self.memory.penalty_sum(graph);
+        self.trigger_counter = 0;
+        self.decay.penalizations = 0;
+        self.last_best_objective = initial_objective.to_f64().unwrap_or(0.0);
+        self.lambda.restart();
     }
 
-    /// Decides the fate of a candidate move using the augmented objective.
-    ///
-    /// The augmented objective is:
-    ///
-    /// $$f_{\text{aug}}(s') = f(s') + \lambda \cdot P(s')$$
-    ///
-    /// where $P(s')$ is the total penalty of the candidate solution.
-    /// Thanks to the diff, we compute $P(s') = P(s) + \Delta P$ in
-    /// $O(|\text{diff}|)$.
-    ///
-    /// The move is accepted (first-improvement) if the augmented
-    /// candidate objective is strictly less than the augmented current
-    /// objective.
-    #[allow(clippy::too_many_arguments)]
-    fn decide_fate(
+    #[expect(
+        clippy::as_conversions,
+        reason = "a sum of penalty counts stays far below 2^53, so it is an exact `f64`"
+    )]
+    unsafe fn decide_unchecked(
         &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
+        accepted_objective: T,
+        _buffered_objective: Option<T>,
         candidate_objective: T,
-        _graph: &ScheduleGraph,
-        graph_diff: &ScheduleGraphDiff,
+        diff: &ScheduleGraphDiff,
     ) -> AcceptanceOutcome {
-        let current_objective = accepted_solution.objective_value();
-
-        let cand_f64 = match candidate_objective.to_f64() {
-            Some(v) if v.is_finite() => v,
-            _ => return AcceptanceOutcome::Reject,
+        let (Some(candidate), Some(accepted)) =
+            (candidate_objective.to_f64(), accepted_objective.to_f64())
+        else {
+            return AcceptanceOutcome::Reject;
         };
-        let curr_f64 = match current_objective.to_f64() {
-            Some(v) if v.is_finite() => v,
-            _ => return AcceptanceOutcome::Reject,
-        };
-
-        let penalty_delta = self.memory.penalty_delta(graph_diff);
-        let candidate_penalty_sum = self.current_penalty_sum + penalty_delta;
-
-        let lambda = self.lambda_strategy.lambda();
-        let aug_candidate = cand_f64 + lambda * candidate_penalty_sum as f64;
-        let aug_current = curr_f64 + lambda * self.current_penalty_sum as f64;
-
-        if aug_candidate < aug_current {
+        if !candidate.is_finite() || !accepted.is_finite() {
+            return AcceptanceOutcome::Reject;
+        }
+        // SAFETY: the diff names only vessels and berths of the graph the run searches, which the memory counts
+        // from the start of the run on, the precondition of this function.
+        let candidate_penalty_sum =
+            self.penalty_sum + unsafe { self.memory.penalty_delta_unchecked(diff) };
+        let lambda = self.lambda.current;
+        let augmented_candidate = candidate + lambda * candidate_penalty_sum as f64;
+        let augmented_accepted = accepted + lambda * self.penalty_sum as f64;
+        if augmented_candidate < augmented_accepted {
             AcceptanceOutcome::Accept
         } else {
             AcceptanceOutcome::Reject
         }
     }
 
-    /// Updates the cached penalty sum when a move is accepted and, if
-    /// using `AfterMoves`, checks whether to penalize.
-    fn on_accept(
+    unsafe fn on_accept_unchecked(
         &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _new_accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
+        _accepted_objective: T,
         graph: &ScheduleGraph,
-        graph_diff: &ScheduleGraphDiff,
+        diff: &ScheduleGraphDiff,
     ) {
-        let penalty_delta = self.memory.penalty_delta(graph_diff);
-        self.current_penalty_sum += penalty_delta;
-
-        let obj = _new_accepted_solution
-            .objective_value()
-            .to_f64()
-            .unwrap_or(0.0);
-        self.lambda_strategy.on_accept(obj);
-
-        if let PenalizationTrigger::AfterMoves(n) = self.trigger {
+        // SAFETY: the diff names only vessels and berths of the graph the run searches, which the memory counts
+        // from the start of the run on, the precondition of this function.
+        self.penalty_sum += unsafe { self.memory.penalty_delta_unchecked(diff) };
+        if let PenalizationTrigger::AfterMoves(moves) = self.trigger {
             self.trigger_counter += 1;
-            if self.trigger_counter >= n {
+            if self.trigger_counter >= moves {
                 self.trigger_counter = 0;
-                self.penalize_and_recompute(graph);
+                self.penalize(graph);
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn on_reject(
-        &mut self,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _new_accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        _candidate_objective: T,
-        _graph: &ScheduleGraph,
-        _graph_diff: &ScheduleGraphDiff,
-    ) {
-        // No-op.
+    fn on_new_best(&mut self, _best_objective: T) {
+        self.lambda.on_new_best();
     }
 
-    fn on_new_best(
-        &mut self,
-        _model: &Model<T>,
-        _new_best: SolutionView<T>,
-        _graph: &ScheduleGraph,
-        _graph_diff: &ScheduleGraphDiff,
-    ) {
-        let obj = _new_best.objective_value().to_f64().unwrap_or(0.0);
-        self.lambda_strategy.on_new_best(obj);
-    }
-
-    /// Advances the non-improvement counter and, if it reaches the
-    /// threshold, fires penalization.
-    fn on_iteration(
-        &mut self,
-        _iteration: u64,
-        _model: &Model<T>,
-        _best_solution: SolutionView<'_, T>,
-        _new_accepted_solution: SolutionView<'_, T>,
-        _buffered_solution: Option<SolutionView<'_, T>>,
-        graph: &ScheduleGraph,
-    ) {
-        if let PenalizationTrigger::AfterNonImprovements(n) = self.trigger {
-            let best_obj = _best_solution.objective_value().to_f64().unwrap_or(0.0);
-            if best_obj < self.last_best_obj {
+    fn after_step(&mut self, best_objective: T, graph: &ScheduleGraph) {
+        if let PenalizationTrigger::AfterNonImprovements(steps) = self.trigger {
+            let best = best_objective.to_f64().unwrap_or(0.0);
+            if best < self.last_best_objective {
                 self.trigger_counter = 0;
-                self.last_best_obj = best_obj;
+                self.last_best_objective = best;
             } else {
                 self.trigger_counter += 1;
-                if self.trigger_counter >= n {
+                if self.trigger_counter >= steps {
                     self.trigger_counter = 0;
-                    self.penalize_and_recompute(graph);
+                    self.penalize(graph);
                 }
             }
         }
     }
-}
 
-// ----------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------
+    fn commits_buffered(&mut self) -> bool {
+        false
+    }
+
+    fn on_neighborhood_exhausted(
+        &mut self,
+        graph: &ScheduleGraph,
+    ) -> NeighborhoodExhaustionOutcome {
+        if self.trigger == PenalizationTrigger::OnExhaustion {
+            self.penalize(graph);
+        }
+        NeighborhoodExhaustionOutcome::Restart
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schedule::Mutator;
 
-    /// The link end that node `index` of a graph of `num_vessels` vessels stands for: the vessel below the count,
-    /// and the boundary of berth `index - num_vessels` from it on.
-    fn end(index: usize, num_vessels: usize) -> LinkEnd {
-        if index < num_vessels {
-            LinkEnd::Vessel(VesselIndex::new(index))
-        } else {
-            LinkEnd::Berth(BerthIndex::new(index - num_vessels))
+    fn vessel(index: usize) -> VesselIndex {
+        VesselIndex::new(index)
+    }
+
+    /// The memory of `num_vessels` vessels and `num_berths` berths, every count zero.
+    fn memory(num_vessels: usize, num_berths: usize) -> PenaltyMemory {
+        let mut memory = PenaltyMemory::default();
+        memory.reset(num_vessels, num_berths);
+        memory
+    }
+
+    fn berth(index: usize) -> BerthIndex {
+        BerthIndex::new(index)
+    }
+
+    /// V0 and V1 on B0 in that order, V2 on B1.
+    fn three_vessels_on_two_berths() -> ScheduleGraph {
+        ScheduleGraph::from_slices(&[berth(0), berth(0), berth(1)], &[0_i64, 1, 0], 2)
+    }
+
+    fn started(settings: GuidedLocalSearch, graph: &ScheduleGraph) -> GuidedLocalSearchRule {
+        let mut rule = GuidedLocalSearchRule::new(&settings);
+        AcceptanceRule::<i64>::on_start(&mut rule, graph, 100);
+        rule
+    }
+
+    #[test]
+    fn test_rank_utility_ties_within_the_relative_tolerance_and_ranks_the_rest() {
+        assert_eq!(rank_utility(0.5, f64::NEG_INFINITY), UtilityRank::Better);
+        assert_eq!(rank_utility(1e8 + 1e-6, 1e8), UtilityRank::Tie);
+        assert_eq!(rank_utility(0.5, 0.5 + 1e-13), UtilityRank::Tie);
+        assert_eq!(rank_utility(1.0, 0.5), UtilityRank::Better);
+        assert_eq!(rank_utility(0.5, 1.0), UtilityRank::Worse);
+    }
+
+    #[test]
+    fn test_link_index_gives_every_boundary_one_row_and_column() {
+        let boundary = |index| LinkEnd::Berth(berth(index));
+        let first = LinkEnd::Vessel(vessel(1));
+        assert_eq!(link_index(first, LinkEnd::Vessel(vessel(2)), 4), 7);
+        assert_eq!(
+            link_index(boundary(0), first, 4),
+            link_index(boundary(3), first, 4)
+        );
+        assert_eq!(link_index(first, boundary(0), 4), 9);
+        assert_eq!(link_index(boundary(0), boundary(1), 4), 24);
+    }
+
+    #[test]
+    fn test_link_index_stays_inside_the_table() {
+        let num_vessels = 5;
+        let ends: Vec<LinkEnd> = (0..num_vessels)
+            .map(|v| LinkEnd::Vessel(vessel(v)))
+            .chain([LinkEnd::Berth(berth(7))])
+            .collect();
+        for &from in &ends {
+            for &to in &ends {
+                assert!(link_index(from, to, num_vessels) < (num_vessels + 1) * (num_vessels + 1));
+            }
         }
     }
 
-    // A search of two vessels on two berths, guided by a search made for one vessel on one berth: the penalties of
-    // the run must be counted per vessel and berth of the graph it searches, or a move of the second vessel reads
-    // past the tables.
     #[test]
-    fn test_gls_counts_the_penalties_of_the_graph_it_searches() {
-        use crate::schedule::Mutator;
-        use talos_core::ClosedOpenInterval;
-        let model = Model::new(
-            vec![0_i64, 0],
-            vec![100, 100],
-            vec![1, 1],
-            vec![Some(5), Some(5), Some(5), Some(5)],
-            vec![
-                vec![ClosedOpenInterval::new(0, 200)],
-                vec![ClosedOpenInterval::new(0, 200)],
-            ],
-        );
-        let berths = [BerthIndex::new(0), BerthIndex::new(1)];
-        let starts = [0_i64, 0];
-        let view = SolutionView::new(&berths, &starts, 0);
-        let mut mutator = Mutator::new(ScheduleGraph::from_slices(&berths, &starts, 2));
-        let mut gls = GuidedLocalSearch::new(1, 1);
-        Metaheuristic::<i64>::on_start(&mut gls, &model, view, mutator.graph());
-        mutator.swap_vessels(VesselIndex::new(0), VesselIndex::new(1));
-        let outcome = gls.decide_fate(&model, view, view, None, 0, mutator.graph(), mutator.diff());
-        assert_eq!(outcome, AcceptanceOutcome::Reject);
-        assert_eq!(gls.memory().num_vessels(), 2);
-        assert_eq!(gls.memory().num_berths(), 2);
+    fn test_penalty_memory_starts_at_zero_and_resets_to_new_counts() {
+        let mut memory = memory(3, 2);
+        assert_eq!(memory.links.len(), 16);
+        assert_eq!(memory.assignments.len(), 6);
+        memory.links[5] = 3;
+        memory.reset(4, 1);
+        assert_eq!(memory.links, vec![0; 25]);
+        assert_eq!(memory.assignments, vec![0; 4]);
+    }
+
+    #[test]
+    fn test_penalty_memory_reads_the_counts_of_links_and_assignments() {
+        let mut memory = memory(3, 2);
+        let (from, to) = (LinkEnd::Vessel(vessel(0)), LinkEnd::Vessel(vessel(2)));
+        memory.links[link_index(from, to, 3)] = 7;
+        let index = memory.assignment_index(vessel(2), berth(1));
+        memory.assignments[index] = 4;
+        assert_eq!(memory.link_penalty(from, to), 7);
+        assert_eq!(memory.link_penalty(to, from), 0);
+        assert_eq!(memory.assignment_penalty(vessel(2), berth(1)), 4);
+        assert_eq!(memory.assignment_penalty(vessel(1), berth(1)), 0);
     }
 
     // A berth beyond the memory must be refused, not read as another vessel's row.
     #[test]
     #[should_panic(
-        expected = "called `PenaltyMemory::berth_penalty` with vessel 0 and berth 3, outside a memory of 2 vessels \
-                    and 2 berths"
+        expected = "called `PenaltyMemory::assignment_penalty` with Vessel 0 and Berth 3, outside a memory of 2 \
+                    vessels and 2 berths"
     )]
-    fn test_penalty_memory_berth_penalty_refuses_a_berth_outside() {
-        let _ = PenaltyMemory::new(2, 2).berth_penalty(VesselIndex::new(0), BerthIndex::new(3));
+    fn test_penalty_memory_assignment_penalty_refuses_a_berth_outside() {
+        let _ = memory(2, 2).assignment_penalty(vessel(0), berth(3));
     }
 
     // A vessel beyond the memory must be refused, not read as the boundary of a berth.
     #[test]
     #[should_panic(
-        expected = "called `PenaltyMemory::edge_penalty` with a link outside a memory of 2 vessels"
+        expected = "called `PenaltyMemory::link_penalty` with a link outside a memory of 2 vessels"
     )]
-    fn test_penalty_memory_edge_penalty_refuses_a_vessel_outside() {
-        let outside = LinkEnd::Vessel(VesselIndex::new(2));
-        let _ =
-            PenaltyMemory::new(2, 2).edge_penalty(outside, LinkEnd::Vessel(VesselIndex::new(0)));
+    fn test_penalty_memory_link_penalty_refuses_a_vessel_outside() {
+        let _ = memory(2, 2).link_penalty(LinkEnd::Vessel(vessel(2)), LinkEnd::Vessel(vessel(0)));
     }
 
     #[test]
-    fn test_penalty_memory_new_zeroed() {
-        let mem = PenaltyMemory::new(3, 2);
-        assert_eq!(mem.num_vessels(), 3);
-        assert_eq!(mem.num_berths(), 2);
-        assert!(mem.edge.iter().all(|&p| p == 0));
-        assert!(mem.berth.iter().all(|&p| p == 0));
+    #[should_panic(
+        expected = "the graph of 3 vessels and 2 berths should have the counts of the penalty memory"
+    )]
+    fn test_penalty_sum_refuses_a_graph_of_other_counts() {
+        let _ = memory(2, 2).penalty_sum(&three_vessels_on_two_berths());
     }
 
     #[test]
-    fn test_penalty_memory_clear() {
-        let mut mem = PenaltyMemory::new(2, 2);
-        mem.edge[0] = 5;
-        mem.berth[1] = 3;
-        mem.clear();
-        assert!(mem.edge.iter().all(|&p| p == 0));
-        assert!(mem.berth.iter().all(|&p| p == 0));
+    fn test_penalty_delta_counts_made_and_reached_less_broken_and_left() {
+        let graph = three_vessels_on_two_berths();
+        let mut memory = memory(3, 2);
+        for count in memory.links.iter_mut() {
+            *count = 1;
+        }
+        let index = memory.assignment_index(vessel(1), berth(0));
+        memory.assignments[index] = 5;
+        let index = memory.assignment_index(vessel(1), berth(1));
+        memory.assignments[index] = 2;
+        let mut mutator = Mutator::new(graph);
+        // V1 moves from after V0 on B0 to after V2 on B1: it breaks V0-V1 and V1-tail and V2-tail, and makes
+        // V0-tail, V2-V1 and V1-tail: as many links, each of count one.
+        mutator.relocate_after(vessel(1), vessel(2));
+        // SAFETY: the diff names vessels and berths of a graph of the memory's counts.
+        let delta = unsafe { memory.penalty_delta_unchecked(mutator.diff()) };
+        assert_eq!(delta, 2 - 5);
     }
 
     #[test]
-    fn test_penalty_memory_edge_lookup() {
-        let mut mem = PenaltyMemory::new(3, 2);
-        let a = end(0, 3);
-        let b = end(1, 3);
-        assert_eq!(mem.edge_penalty(a, b), 0);
-        let idx = edge_flat_index(a, b, 3);
-        mem.edge[idx] = 7;
-        assert_eq!(mem.edge_penalty(a, b), 7);
+    fn test_penalty_sum_counts_every_link_with_a_vessel_and_every_assignment() {
+        let graph = three_vessels_on_two_berths();
+        let mut memory = memory(3, 2);
+        for count in memory.links.iter_mut().chain(memory.assignments.iter_mut()) {
+            *count = 1;
+        }
+        // B0: head-V0, V0-V1, V1-tail; B1: head-V2, V2-tail; and three assignments.
+        assert_eq!(memory.penalty_sum(&graph), 5 + 3);
     }
 
     #[test]
-    fn test_penalty_memory_berth_lookup() {
-        let mut mem = PenaltyMemory::new(3, 2);
-        let v = VesselIndex::new(1);
-        let b = BerthIndex::new(0);
-        assert_eq!(mem.berth_penalty(v, b), 0);
-        mem.berth[2] = 4;
-        assert_eq!(mem.berth_penalty(v, b), 4);
-    }
-
-    #[test]
-    fn test_penalty_memory_sentinel_edge() {
-        let mem = PenaltyMemory::new(3, 2);
-        // Sentinel -> vessel edge uses index num_vessels for the sentinel.
-        let sentinel = end(3, 3); // the boundary of berth 0
-        let v = end(2, 3);
-        let idx = edge_flat_index(sentinel, v, 3);
-        // Should map to row=3, col=2 -> 3*4+2 = 14
-        assert_eq!(idx, 14);
-        assert_eq!(mem.edge_penalty(sentinel, v), 0);
-    }
-
-    #[test]
-    fn test_uniform_cost_always_one() {
-        let cost = UniformCost;
-        assert_eq!(cost.edge_cost(end(0, 3), end(1, 3)), 1.0);
-        assert_eq!(cost.edge_cost(end(3, 3), end(0, 3)), 1.0);
+    fn test_penalize_raises_every_feature_of_the_largest_utility() {
+        let graph = three_vessels_on_two_berths();
+        let mut memory = memory(3, 2);
+        let mut winners = Vec::new();
+        memory.penalize(&graph, &mut winners);
+        // Every feature is unpenalized: all eight tie and all are raised.
+        assert_eq!(winners.len(), 8);
+        assert_eq!(memory.penalty_sum(&graph), 8);
+        // Now the assignment of V2 alone is lower than the rest.
+        let index = memory.assignment_index(vessel(2), berth(1));
+        memory.assignments[index] = 0;
+        memory.penalize(&graph, &mut winners);
         assert_eq!(
-            cost.berth_cost(VesselIndex::new(0), BerthIndex::new(0)),
-            1.0
+            winners,
+            [Feature::Assignment(
+                memory.assignment_index(vessel(2), berth(1))
+            )]
         );
+        assert_eq!(memory.assignment_penalty(vessel(2), berth(1)), 1);
     }
 
     #[test]
-    fn test_edge_flat_index_vessel_to_vessel() {
-        let a = end(1, 4);
-        let b = end(2, 4);
-        // With num_vessels=4, stride = 5. Index = 1*5 + 2 = 7.
-        assert_eq!(edge_flat_index(a, b, 4), 7);
+    fn test_decay_rounds_every_count_toward_zero() {
+        let mut memory = memory(1, 1);
+        memory.links[0] = 10;
+        memory.links[1] = 3;
+        memory.assignments[0] = 1;
+        memory.decay(0.5);
+        assert_eq!(memory.links[..2], [5, 1]);
+        assert_eq!(memory.assignments[0], 0);
     }
 
     #[test]
-    fn test_edge_flat_index_sentinel_to_vessel() {
-        let sentinel = end(3, 3); // the boundary of berth 0
-        let b = end(0, 3);
-        // Sentinel maps to 3. Index = 3 * 4 + 0 = 12.
-        assert_eq!(edge_flat_index(sentinel, b, 3), 12);
+    fn test_decay_by_one_keeps_a_count_below_two_to_the_fifty_third() {
+        let mut memory = memory(1, 1);
+        memory.links[0] = (1_u64 << 53) - 1;
+        memory.decay(1.0);
+        assert_eq!(memory.links[0], (1_u64 << 53) - 1);
     }
 
     #[test]
-    fn test_edge_flat_index_vessel_to_sentinel() {
-        let a = end(0, 3);
-        let sentinel = end(3, 3); // the boundary of berth 0
-        // Sentinel maps to 3. Index = 0 * 4 + 3 = 3.
-        assert_eq!(edge_flat_index(a, sentinel, 3), 3);
+    fn test_heuristic_lambda_shares_the_objective_among_the_features() {
+        assert!((heuristic_lambda(1000.0, 50, 0.3) - 6.0).abs() < 1e-12);
+        assert!((heuristic_lambda(-1000.0, 0, 0.3) - 300.0).abs() < 1e-12);
+        assert_eq!(heuristic_lambda(0.0, 10, 0.3), f64::EPSILON);
     }
 
     #[test]
-    fn test_gls_new() {
-        let gls = GuidedLocalSearch::new(10, 3).with_lambda(0.5);
-        assert_eq!(gls.lambda(), 0.5);
-        assert_eq!(gls.memory().num_vessels(), 10);
-        assert_eq!(gls.memory().num_berths(), 3);
+    #[should_panic(expected = "called `StaticLambda::new` with 0, which is not positive")]
+    fn test_static_lambda_refuses_zero() {
+        let _ = StaticLambda::new(0.0);
     }
 
     #[test]
-    #[should_panic(expected = "lambda must be > 0.0")]
-    fn test_gls_zero_lambda_panics() {
-        let _ = GuidedLocalSearch::new(5, 2).with_lambda(0.0);
+    #[should_panic(expected = "called `DynamicLambda::new` with decrease 1, outside (0, 1)")]
+    fn test_dynamic_lambda_refuses_a_decrease_of_one() {
+        let _ = DynamicLambda::new(1.0, 0.1, 1.0, 0.5, 2.0);
     }
 
     #[test]
-    #[should_panic(expected = "lambda must be > 0.0")]
-    fn test_gls_negative_lambda_panics() {
-        let _ = GuidedLocalSearch::new(5, 2).with_lambda(-1.0);
+    #[should_panic(expected = "called `AdditiveDynamicLambda::new` with max 1 below min 2")]
+    fn test_additive_dynamic_lambda_refuses_max_below_min() {
+        let _ = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 2.0, 1.0);
     }
 
     #[test]
-    fn test_heuristic_lambda_basic() {
-        let lambda = heuristic_lambda(1000.0, 50, 0.3);
-        // 0.3 * 1000.0 / 50 = 6.0
-        assert!((lambda - 6.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_heuristic_lambda_zero_features() {
-        let lambda = heuristic_lambda(1000.0, 0, 0.3);
-        // num_features clamped to 1: 0.3 * 1000.0 / 1 = 300.0
-        assert!((lambda - 300.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_penalty_delta_empty_diff() {
-        let mem = PenaltyMemory::new(3, 2);
-        let diff = ScheduleGraphDiff::new();
-        assert_eq!(mem.penalty_delta(&diff), 0);
-    }
-
-    #[test]
-    fn test_trigger_default_is_on_exhaustion() {
-        assert_eq!(
-            PenalizationTrigger::default(),
-            PenalizationTrigger::OnExhaustion
-        );
-    }
-
-    #[test]
-    fn test_trigger_display() {
-        assert_eq!(
-            PenalizationTrigger::OnExhaustion.to_string(),
-            "OnExhaustion"
-        );
-        assert_eq!(
-            PenalizationTrigger::AfterNonImprovements(50).to_string(),
-            "AfterNonImprovements(50)"
-        );
-        assert_eq!(
-            PenalizationTrigger::AfterMoves(10).to_string(),
-            "AfterMoves(10)"
-        );
-    }
-
-    #[test]
-    fn test_gls_with_trigger() {
-        let gls = GuidedLocalSearch::new(5, 2)
-            .with_lambda(0.5)
-            .with_trigger(PenalizationTrigger::AfterMoves(20));
-        assert_eq!(gls.trigger(), PenalizationTrigger::AfterMoves(20));
-    }
-
-    #[test]
-    fn test_gls_default_trigger_is_on_exhaustion() {
-        let gls = GuidedLocalSearch::new(5, 2);
-        assert_eq!(gls.trigger(), PenalizationTrigger::OnExhaustion);
-    }
-
-    // ---- LambdaStrategy tests -----------------------------------------
-
-    #[test]
-    fn test_static_lambda_constant() {
-        let s = StaticLambda(0.42);
-        assert_eq!(s.lambda(), 0.42);
-    }
-
-    #[test]
-    fn test_dynamic_lambda_decreases_on_new_best() {
-        let mut d = DynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0);
-        assert!((d.lambda() - 1.0).abs() < f64::EPSILON);
-        d.on_new_best(100.0);
-        // 1.0 * (1 - 0.1) = 0.9
-        assert!((d.lambda() - 0.9).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_dynamic_lambda_increases_on_penalization() {
-        let mut d = DynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0);
-        d.on_penalization();
-        // 1.0 * (1 + 0.1) = 1.1
-        assert!((d.lambda() - 1.1).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_dynamic_lambda_clamps() {
-        let mut d = DynamicLambda::new(0.02, 0.5, 0.9, 0.01, 10.0);
-        d.on_new_best(100.0); // 0.02 * (1 - 0.9) = 0.002 → clamped at min 0.01
-        assert!((d.lambda() - 0.01).abs() < f64::EPSILON);
-
-        let mut d2 = DynamicLambda::new(9.0, 0.5, 0.1, 0.01, 10.0);
-        d2.on_penalization(); // 9.0 * 1.5 = 13.5 → clamped at 10.0
-        assert!((d2.lambda() - 10.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_dynamic_lambda_resets_on_start() {
-        let mut d = DynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0);
-        d.on_penalization();
-        d.on_penalization();
-        assert!(d.lambda() > 1.0);
-        d.on_start(500.0);
-        assert!((d.lambda() - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_gls_with_lambda_strategy() {
-        let gls = GuidedLocalSearch::new(5, 2).with_lambda_strategy(StaticLambda(0.5));
-        assert!((gls.lambda() - 0.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_additive_dynamic_lambda_decreases_on_new_best() {
-        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0);
-        assert!((a.lambda() - 1.0).abs() < f64::EPSILON);
-        a.on_new_best(100.0);
-        // 1.0 - 0.1 = 0.9
-        assert!((a.lambda() - 0.9).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_additive_dynamic_lambda_increases_on_penalization() {
-        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0);
-        a.on_penalization();
-        // 1.0 + 0.1 = 1.1
-        assert!((a.lambda() - 1.1).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_additive_dynamic_lambda_clamps() {
-        let mut a = AdditiveDynamicLambda::new(0.05, 0.1, 0.1, 0.01, 10.0);
-        a.on_new_best(100.0); // 0.05 - 0.1 = -0.05 → clamped at 0.01
-        assert!((a.lambda() - 0.01).abs() < f64::EPSILON);
-
-        let mut a2 = AdditiveDynamicLambda::new(9.95, 0.1, 0.1, 0.01, 10.0);
-        a2.on_penalization(); // 9.95 + 0.1 = 10.05 → clamped at 10.0
-        assert!((a2.lambda() - 10.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_additive_dynamic_lambda_resets_on_start() {
-        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0);
-        a.on_penalization();
-        a.on_penalization();
-        assert!(a.lambda() > 1.0);
-        a.on_start(500.0);
-        assert!((a.lambda() - 1.0).abs() < f64::EPSILON);
-    }
-
-    // ---- PenaltyDecay tests -------------------------------------------
-
-    #[test]
-    fn test_penalty_memory_decay() {
-        let mut mem = PenaltyMemory::new(2, 2);
-        mem.edge[0] = 100;
-        mem.edge[1] = 50;
-        mem.berth[0] = 80;
-        mem.decay(0.9);
-        assert_eq!(mem.edge[0], 90); // 100 * 0.9 = 90
-        assert_eq!(mem.edge[1], 45); // 50 * 0.9 = 45
-        assert_eq!(mem.berth[0], 72); // 80 * 0.9 = 72
-    }
-
-    #[test]
-    fn test_penalty_memory_decay_truncates() {
-        let mut mem = PenaltyMemory::new(1, 1);
-        mem.edge[0] = 1;
-        mem.decay(0.9);
-        // 1 * 0.9 = 0.9 → truncated to 0
-        assert_eq!(mem.edge[0], 0);
-    }
-
-    #[test]
-    fn test_no_decay_is_noop() {
-        let mut mem = PenaltyMemory::new(2, 2);
-        mem.edge[0] = 10;
-        mem.berth[1] = 5;
-        let mut d = NoDecay;
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 10);
-        assert_eq!(mem.berth[1], 5);
-    }
-
-    #[test]
-    fn test_geometric_decay_fires_on_period() {
-        let mut mem = PenaltyMemory::new(2, 1);
-        mem.edge[0] = 100;
-        let mut d = GeometricDecay::new(0.5, 3);
-
-        // First two calls: no decay.
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 100);
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 100);
-        // Third call: decay fires.
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 50); // 100 * 0.5
-
-        // Counter resets, next decay after 3 more calls.
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 50);
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 50);
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 25); // 50 * 0.5
-    }
-
-    #[test]
-    fn test_geometric_decay_period_one() {
-        let mut mem = PenaltyMemory::new(1, 1);
-        mem.edge[0] = 100;
-        let mut d = GeometricDecay::new(0.9, 1);
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 90);
-        d.after_penalization(&mut mem);
-        assert_eq!(mem.edge[0], 81); // 90 * 0.9
-    }
-
-    #[test]
-    #[should_panic(expected = "factor must be in (0, 1)")]
-    fn test_geometric_decay_invalid_factor_panics() {
+    #[should_panic(expected = "called `GeometricDecay::new` with factor 1, outside (0, 1)")]
+    fn test_geometric_decay_refuses_a_factor_of_one() {
         let _ = GeometricDecay::new(1.0, 1);
     }
 
     #[test]
-    fn test_gls_with_decay() {
-        let gls = GuidedLocalSearch::new(5, 2).with_decay(GeometricDecay::new(0.9, 10));
-        // Just verify it compiles and the accessor works.
-        assert!((gls.decay().factor - 0.9).abs() < f64::EPSILON);
-    }
-
-    // ---- Lambda Reset on Best tests -----------------------------------
-
-    #[test]
-    fn test_dynamic_lambda_reset_on_best() {
-        let mut d = DynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0).with_reset_on_best(true);
-        // Drive lambda up via penalization.
-        d.on_penalization(); // 1.0 * 1.1 = 1.1
-        d.on_penalization(); // 1.1 * 1.1 = 1.21
-        assert!(d.lambda() > 1.0);
-        // New best should reset to initial (1.0), not scale down.
-        d.on_new_best(50.0);
-        assert!((d.lambda() - 1.0).abs() < f64::EPSILON);
+    fn test_static_lambda_never_changes() {
+        let mut schedule = LambdaSchedule::new(Lambda::Static(StaticLambda::new(2.5)));
+        schedule.on_penalization();
+        schedule.on_new_best();
+        assert_eq!(schedule.current, 2.5);
     }
 
     #[test]
-    fn test_dynamic_lambda_no_reset_on_best_default() {
-        let mut d = DynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0);
-        d.on_new_best(100.0);
-        // Default: scale down, not reset.
-        assert!((d.lambda() - 0.9).abs() < f64::EPSILON);
+    fn test_dynamic_lambda_multiplies_within_its_bounds() {
+        let mut schedule =
+            LambdaSchedule::new(Lambda::Dynamic(DynamicLambda::new(1.0, 0.5, 0.5, 0.4, 2.0)));
+        schedule.on_penalization();
+        assert_eq!(schedule.current, 1.5);
+        schedule.on_penalization();
+        assert_eq!(schedule.current, 2.0);
+        schedule.on_new_best();
+        assert_eq!(schedule.current, 1.0);
+        schedule.on_new_best();
+        schedule.on_new_best();
+        assert_eq!(schedule.current, 0.4);
+        schedule.restart();
+        assert_eq!(schedule.current, 1.0);
     }
 
     #[test]
-    fn test_additive_dynamic_lambda_reset_on_best() {
-        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0).with_reset_on_best(true);
-        a.on_penalization(); // 1.1
-        a.on_penalization(); // 1.2
-        assert!(a.lambda() > 1.0);
-        a.on_new_best(50.0);
-        assert!((a.lambda() - 1.0).abs() < f64::EPSILON);
+    fn test_dynamic_lambda_starts_clamped_and_resets_on_best_where_asked() {
+        let lambda = DynamicLambda::new(5.0, 0.5, 0.5, 0.4, 2.0).with_reset_on_best(true);
+        let mut schedule = LambdaSchedule::new(Lambda::Dynamic(lambda));
+        assert_eq!(schedule.current, 2.0);
+        schedule.current = 0.5;
+        schedule.on_new_best();
+        assert_eq!(schedule.current, 2.0);
     }
 
     #[test]
-    fn test_additive_dynamic_lambda_no_reset_on_best_default() {
-        let mut a = AdditiveDynamicLambda::new(1.0, 0.1, 0.1, 0.01, 10.0);
-        a.on_new_best(100.0);
-        assert!((a.lambda() - 0.9).abs() < f64::EPSILON);
+    fn test_additive_dynamic_lambda_steps_within_its_bounds() {
+        let mut schedule = LambdaSchedule::new(Lambda::AdditiveDynamic(
+            AdditiveDynamicLambda::new(1.0, 0.25, 0.5, 0.5, 1.5),
+        ));
+        schedule.on_penalization();
+        assert_eq!(schedule.current, 1.25);
+        schedule.on_penalization();
+        schedule.on_penalization();
+        assert_eq!(schedule.current, 1.5);
+        schedule.on_new_best();
+        schedule.on_new_best();
+        schedule.on_new_best();
+        assert_eq!(schedule.current, 0.5);
     }
 
     #[test]
-    fn test_edge_flat_index_sentinels_collapse() {
-        let num_vessels = 3;
-        let sentinel_berth0 = end(3, num_vessels); // the boundary of berth 0
-        let sentinel_berth1 = end(4, num_vessels); // the boundary of berth 1
-        let vessel = end(0, num_vessels);
-
-        // Both sentinels must map to the same flat index.
-        let idx0 = edge_flat_index(sentinel_berth0, vessel, num_vessels);
-        let idx1 = edge_flat_index(sentinel_berth1, vessel, num_vessels);
-        assert_eq!(
-            idx0, idx1,
-            "different sentinels must collapse to same index"
-        );
-
-        // Reverse direction too.
-        let idx0r = edge_flat_index(vessel, sentinel_berth0, num_vessels);
-        let idx1r = edge_flat_index(vessel, sentinel_berth1, num_vessels);
-        assert_eq!(idx0r, idx1r);
-    }
-
-    #[test]
-    fn test_edge_flat_index_sentinel_to_sentinel_collapse() {
-        let num_vessels = 4;
-        let s0 = end(4, num_vessels);
-        let s1 = end(5, num_vessels);
-        let s2 = end(99, num_vessels); // wildly out of range berth
-
-        let idx_s0s0 = edge_flat_index(s0, s0, num_vessels);
-        let idx_s1s2 = edge_flat_index(s1, s2, num_vessels);
-        assert_eq!(idx_s0s0, idx_s1s2, "all sentinel×sentinel pairs collapse");
-    }
-
-    #[test]
-    fn test_edge_flat_index_upper_bound() {
-        let num_vessels = 5;
-        let max_alloc = (num_vessels + 1) * (num_vessels + 1);
-
-        // Exhaustively verify every possible pair stays in bounds.
-        for a in 0..=(num_vessels + 3) {
-            for b in 0..=(num_vessels + 3) {
-                let idx = edge_flat_index(end(a, num_vessels), end(b, num_vessels), num_vessels);
-                assert!(
-                    idx < max_alloc,
-                    "index {idx} out of bounds for a={a}, b={b}"
-                );
-                // A vessel beyond the count, which no graph of that many vessels names, stays inside too.
-                let (vessel_a, vessel_b) = (
-                    LinkEnd::Vessel(VesselIndex::new(a)),
-                    LinkEnd::Vessel(VesselIndex::new(b)),
-                );
-                let idx = edge_flat_index(vessel_a, vessel_b, num_vessels);
-                assert!(
-                    idx < max_alloc,
-                    "index {idx} out of bounds for vessels a={a}, b={b}"
-                );
-            }
-        }
-    }
-
-    // The following tests exercise the tolerance logic directly on
-    // PenaltyMemory without needing a full ScheduleGraph. They test
-    // the *evaluate_feature* closure's behaviour by constructing
-    // scenarios where f64::EPSILON would fail.
-
-    #[test]
-    fn test_utility_tie_breaking_large_values() {
-        // Two features with utilities that differ by less than REL_TOL
-        // relative to their magnitude should tie.
-        //
-        // Feature A: cost = 1e8, penalty = 0  → utility = 1e8
-        // Feature B: cost = 1e8 + 1e-6, penalty = 0 → utility ≈ 1e8
-        //
-        // The old f64::EPSILON tolerance (≈2.2e-16) would NOT consider
-        // these a tie (diff ≈ 1e-6 >> EPSILON). The new REL_TOL = 1e-12
-        // relative to scale 1e8 gives threshold 1e-4, so 1e-6 < 1e-4 → tie.
-        //
-        // This is a unit-level logic test; we verify the formula directly.
-        let a_utility: f64 = 1e8;
-        let b_utility: f64 = 1e8 + 1e-6;
-        let rel_tol: f64 = 1e-12;
-
-        let diff = (b_utility - a_utility).abs();
-        let scale = a_utility.abs().max(b_utility.abs()).max(1.0);
-
-        assert!(
-            diff <= rel_tol * scale,
-            "large near-equal utilities must tie: diff={diff}, threshold={}",
-            rel_tol * scale
-        );
-    }
-
-    #[test]
-    fn test_utility_no_false_tie_on_distinct_values() {
-        // Two features with clearly different utilities must not tie.
-        // Feature A: utility = 1.0
-        // Feature B: utility = 2.0
-        let a_utility: f64 = 1.0;
-        let b_utility: f64 = 2.0;
-        let rel_tol: f64 = 1e-12;
-
-        let diff = b_utility - a_utility;
-        let scale = a_utility.abs().max(b_utility.abs()).max(1.0);
-
-        assert!(
-            diff > rel_tol * scale,
-            "clearly distinct utilities must not tie"
-        );
-    }
-
-    #[test]
-    fn test_utility_tie_at_small_scale() {
-        // Near-zero utilities: scale floors at 1.0 so absolute
-        // tolerance is REL_TOL * 1.0 = 1e-12.
-        let a: f64 = 1e-14;
-        let b: f64 = 2e-14;
-        let rel_tol: f64 = 1e-12;
-
-        let diff = (b - a).abs();
-        let scale = a.abs().max(b.abs()).max(1.0);
-
-        assert!(
-            diff <= rel_tol * scale,
-            "tiny near-equal utilities must tie when scale floors at 1.0"
-        );
-    }
-
-    // ---- AfterNonImprovements flag correctness ------------------------
-
-    /// Simulates the hook call sequence for one iteration to verify
-    /// the best_seen_this_iter flag prevents double-counting.
-    ///
-    /// These are pure state-machine tests on the trigger counter;
-    /// they don't need a ScheduleGraph.
-
-    #[test]
-    fn test_non_improvement_counter_skips_best_iteration() {
-        // Threshold = 3. Simulate:
-        //   iter 0: no best  → counter = 1
-        //   iter 1: NEW BEST → counter stays 0 (not 1)
-        //   iter 2: no best  → counter = 1
-        //   iter 3: no best  → counter = 2
-        //   iter 4: no best  → counter = 3 → fires
-
-        // We can't call the real Metaheuristic hooks without the full
-        // engine, but we can replicate the state machine:
-        let trigger = PenalizationTrigger::AfterNonImprovements(3);
-        let mut counter: u64 = 0;
-        let mut best_seen: bool = false;
-        let mut penalization_fired = false;
-
-        let simulate_on_new_best = |counter: &mut u64, flag: &mut bool| {
-            *counter = 0;
-            *flag = true;
+    fn test_geometric_decay_fires_at_every_period() {
+        let mut memory = memory(1, 1);
+        memory.links[0] = 100;
+        let mut decay = DecaySchedule {
+            rule: PenaltyDecay::Geometric(GeometricDecay::new(0.5, 3)),
+            penalizations: 0,
         };
+        decay.after_penalization(&mut memory);
+        decay.after_penalization(&mut memory);
+        assert_eq!(memory.links[0], 100);
+        decay.after_penalization(&mut memory);
+        assert_eq!(memory.links[0], 50);
+        decay.after_penalization(&mut memory);
+        decay.after_penalization(&mut memory);
+        decay.after_penalization(&mut memory);
+        assert_eq!(memory.links[0], 25);
+    }
 
-        let simulate_on_iteration =
-            |counter: &mut u64, flag: &mut bool, fired: &mut bool, n: u64| {
-                if *flag {
-                    *flag = false;
-                } else {
-                    *counter += 1;
-                    if *counter >= n {
-                        *counter = 0;
-                        *fired = true;
-                    }
-                }
+    #[test]
+    fn test_no_decay_keeps_the_counts() {
+        let mut memory = memory(1, 1);
+        memory.links[0] = 100;
+        let mut decay = DecaySchedule {
+            rule: PenaltyDecay::None,
+            penalizations: 0,
+        };
+        decay.after_penalization(&mut memory);
+        assert_eq!(memory.links[0], 100);
+    }
+
+    // A search of three vessels on two berths, set up for nothing smaller: its memory must count the graph it
+    // searches, or a move of the last vessel reads past the tables.
+    #[test]
+    fn test_start_sizes_the_memory_for_the_graph_searched() {
+        let graph = three_vessels_on_two_berths();
+        let rule = started(GuidedLocalSearch::default(), &graph);
+        assert_eq!((rule.memory.num_vessels, rule.memory.num_berths), (3, 2));
+        assert_eq!(rule.penalty_sum, 0);
+    }
+
+    #[test]
+    fn test_decide_accepts_only_a_lower_augmented_objective() {
+        let graph = three_vessels_on_two_berths();
+        let settings = GuidedLocalSearch {
+            lambda: Lambda::Static(StaticLambda::new(10.0)),
+            ..GuidedLocalSearch::default()
+        };
+        let mut rule = started(settings, &graph);
+        let mut mutator = Mutator::new(graph);
+        mutator.relocate_after(vessel(1), vessel(2));
+        let decide =
+            |rule: &mut GuidedLocalSearchRule, candidate: i64, diff: &ScheduleGraphDiff| {
+                // SAFETY: the diff names vessels and berths of the graph the rule started on.
+                unsafe { AcceptanceRule::<i64>::decide_unchecked(rule, 100, None, candidate, diff) }
             };
-
-        let n = match trigger {
-            PenalizationTrigger::AfterNonImprovements(n) => n,
-            _ => unreachable!(),
-        };
-
-        // iter 0: no best
-        simulate_on_iteration(&mut counter, &mut best_seen, &mut penalization_fired, n);
-        assert_eq!(counter, 1);
-        assert!(!penalization_fired);
-
-        // iter 1: new best found
-        simulate_on_new_best(&mut counter, &mut best_seen);
-        simulate_on_iteration(&mut counter, &mut best_seen, &mut penalization_fired, n);
-        assert_eq!(counter, 0, "counter must stay 0 on best-iteration");
-        assert!(!penalization_fired);
-
-        // iter 2: no best
-        simulate_on_iteration(&mut counter, &mut best_seen, &mut penalization_fired, n);
-        assert_eq!(counter, 1);
-
-        // iter 3: no best
-        simulate_on_iteration(&mut counter, &mut best_seen, &mut penalization_fired, n);
-        assert_eq!(counter, 2);
-
-        // iter 4: no best → fires at 3
-        simulate_on_iteration(&mut counter, &mut best_seen, &mut penalization_fired, n);
-        assert!(
-            penalization_fired,
-            "penalization must fire after 3 non-improvements"
-        );
-        assert_eq!(counter, 0, "counter resets after firing");
-    }
-
-    #[test]
-    fn test_non_improvement_counter_consecutive_bests_never_fire() {
-        let n: u64 = 2;
-        let mut counter: u64 = 0;
-        let mut best_seen: bool = false;
-        let mut fired = false;
-
-        let on_best = |c: &mut u64, f: &mut bool| {
-            *c = 0;
-            *f = true;
-        };
-        let on_iter = |c: &mut u64, f: &mut bool, fired: &mut bool, n: u64| {
-            if *f {
-                *f = false;
-            } else {
-                *c += 1;
-                if *c >= n {
-                    *c = 0;
-                    *fired = true;
-                }
-            }
-        };
-
-        // 10 consecutive iterations each producing a new best.
-        for _ in 0..10 {
-            on_best(&mut counter, &mut best_seen);
-            on_iter(&mut counter, &mut best_seen, &mut fired, n);
-        }
-
-        assert!(
-            !fired,
-            "penalization must never fire if every iteration finds a new best"
-        );
-        assert_eq!(counter, 0);
-    }
-
-    #[test]
-    fn test_non_improvement_fires_exactly_at_threshold() {
-        let n: u64 = 5;
-        let mut counter: u64 = 0;
-        let mut best_seen: bool = false;
-        let mut fire_count: u64 = 0;
-
-        let on_iter = |c: &mut u64, f: &mut bool, fc: &mut u64, n: u64| {
-            if *f {
-                *f = false;
-            } else {
-                *c += 1;
-                if *c >= n {
-                    *c = 0;
-                    *fc += 1;
-                }
-            }
-        };
-
-        // Exactly n-1 non-improvements: should not fire.
-        for _ in 0..(n - 1) {
-            on_iter(&mut counter, &mut best_seen, &mut fire_count, n);
-        }
-        assert_eq!(fire_count, 0);
-        assert_eq!(counter, n - 1);
-
-        // The n-th: should fire exactly once.
-        on_iter(&mut counter, &mut best_seen, &mut fire_count, n);
-        assert_eq!(fire_count, 1);
-        assert_eq!(counter, 0);
-    }
-
-    // ---- AfterMoves trigger (existing, just hardening) ----------------
-
-    #[test]
-    fn test_after_moves_counter_increments_only_on_accept() {
-        // Verify the counter doesn't increment on reject.
-        // The on_reject hook is a no-op, so the counter stays put.
-        // This is a contract test: if someone adds logic to on_reject,
-        // it must not touch the trigger counter.
-        let n: u64 = 3;
-        let mut counter: u64 = 0;
-        let mut fired = false;
-
-        // Simulate 10 rejects: counter stays 0.
-        // (on_reject is a no-op, nothing to simulate.)
-
-        // Now 3 accepts.
-        for _ in 0..n {
-            counter += 1;
-            if counter >= n {
-                counter = 0;
-                fired = true;
-            }
-        }
-        assert!(fired);
-    }
-
-    // ---- Decay precision (informational) ------------------------------
-
-    #[test]
-    fn test_decay_precision_below_2_53() {
-        // Values below 2^53 round-trip through f64 exactly.
-        let mut mem = PenaltyMemory::new(1, 1);
-        let val: u64 = (1u64 << 53) - 1; // max exact u64 in f64
-        mem.edge[0] = val;
-        mem.decay(1.0); // identity decay: should not change the value
-
-        // NOTE: factor=1.0 is outside the assert range in GeometricDecay::new,
-        // but PenaltyMemory::decay itself allows [0,1]. This tests the
-        // cast fidelity directly.
         assert_eq!(
-            mem.edge[0], val,
-            "values below 2^53 must survive f64 round-trip"
+            decide(&mut rule, 99, mutator.diff()),
+            AcceptanceOutcome::Accept
+        );
+        assert_eq!(
+            decide(&mut rule, 100, mutator.diff()),
+            AcceptanceOutcome::Reject
+        );
+        // One penalty on the assignment V1 reaches weighs 10: the move must now gain more than 10.
+        let index = rule.memory.assignment_index(vessel(1), berth(1));
+        rule.memory.assignments[index] = 1;
+        assert_eq!(
+            decide(&mut rule, 91, mutator.diff()),
+            AcceptanceOutcome::Reject
+        );
+        assert_eq!(
+            decide(&mut rule, 89, mutator.diff()),
+            AcceptanceOutcome::Accept
         );
     }
 
     #[test]
-    fn test_decay_precision_above_2_53_lossy() {
-        // Values above 2^53 lose precision in f64. Document this.
-        let mut mem = PenaltyMemory::new(1, 1);
-        let val: u64 = (1u64 << 53) + 1; // NOT exactly representable in f64
-        mem.edge[0] = val;
-        mem.decay(1.0);
+    fn test_on_exhaustion_trigger_penalizes_and_restarts() {
+        let graph = three_vessels_on_two_berths();
+        let mut rule = started(GuidedLocalSearch::default(), &graph);
+        let outcome = AcceptanceRule::<i64>::on_neighborhood_exhausted(&mut rule, &graph);
+        assert_eq!(outcome, NeighborhoodExhaustionOutcome::Restart);
+        assert_eq!(rule.penalty_sum, 8);
+    }
 
-        // The round-tripped value may differ. We just assert it doesn't panic
-        // and document that precision loss is expected.
-        // In practice, penalty counters never reach 2^53.
-        let _ = mem.edge[0];
+    #[test]
+    fn test_non_improvement_trigger_fires_after_steps_without_a_new_best() {
+        let graph = three_vessels_on_two_berths();
+        let settings = GuidedLocalSearch {
+            trigger: PenalizationTrigger::AfterNonImprovements(3),
+            ..GuidedLocalSearch::default()
+        };
+        let mut rule = started(settings, &graph);
+        let step = |rule: &mut GuidedLocalSearchRule, best: i64| {
+            AcceptanceRule::<i64>::after_step(rule, best, &graph)
+        };
+        step(&mut rule, 100);
+        step(&mut rule, 100);
+        // A new best resets the count.
+        step(&mut rule, 90);
+        step(&mut rule, 90);
+        step(&mut rule, 90);
+        assert_eq!(rule.penalty_sum, 0);
+        step(&mut rule, 90);
+        assert_eq!(rule.penalty_sum, 8);
+        assert_eq!(rule.trigger_counter, 0);
+        // Exhaustion does not penalize under this trigger.
+        let _ = AcceptanceRule::<i64>::on_neighborhood_exhausted(&mut rule, &graph);
+        assert_eq!(rule.penalty_sum, 8);
+    }
+
+    #[test]
+    fn test_moves_trigger_fires_at_every_so_many_accepted_moves() {
+        let graph = three_vessels_on_two_berths();
+        let settings = GuidedLocalSearch {
+            trigger: PenalizationTrigger::AfterMoves(2),
+            ..GuidedLocalSearch::default()
+        };
+        let mut rule = started(settings, &graph);
+        let empty = ScheduleGraphDiff::new();
+        // SAFETY: an empty diff names no vessel or berth.
+        unsafe { AcceptanceRule::<i64>::on_accept_unchecked(&mut rule, 90, &graph, &empty) };
+        assert_eq!(rule.penalty_sum, 0);
+        // SAFETY: as above.
+        unsafe { AcceptanceRule::<i64>::on_accept_unchecked(&mut rule, 80, &graph, &empty) };
+        assert_eq!(rule.penalty_sum, 8);
+    }
+
+    #[test]
+    fn test_accepting_a_move_adds_its_penalty_delta() {
+        let graph = three_vessels_on_two_berths();
+        let mut rule = started(GuidedLocalSearch::default(), &graph);
+        let index = rule.memory.assignment_index(vessel(1), berth(1));
+        rule.memory.assignments[index] = 4;
+        let mut mutator = Mutator::new(graph);
+        mutator.relocate_after(vessel(1), vessel(2));
+        mutator.accept();
+        // SAFETY: the diff names vessels and berths of the graph the rule started on.
+        unsafe {
+            AcceptanceRule::<i64>::on_accept_unchecked(
+                &mut rule,
+                90,
+                mutator.graph(),
+                mutator.diff(),
+            )
+        };
+        assert_eq!(rule.penalty_sum, 4);
+        assert_eq!(rule.penalty_sum, rule.memory.penalty_sum(mutator.graph()));
+    }
+
+    #[test]
+    fn test_trigger_display_names_the_rule() {
+        assert_eq!(
+            PenalizationTrigger::OnExhaustion.to_string(),
+            "on exhaustion"
+        );
+        assert_eq!(
+            PenalizationTrigger::AfterNonImprovements(5).to_string(),
+            "after 5 non-improving steps"
+        );
+        assert_eq!(
+            PenalizationTrigger::AfterMoves(3).to_string(),
+            "after 3 accepted moves"
+        );
     }
 }
