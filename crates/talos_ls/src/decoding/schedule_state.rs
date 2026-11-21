@@ -303,7 +303,7 @@ where
     ///
     /// Afterwards the state is `candidate` on the touched berths and as it was on the others: each vessel of a
     /// touched berth of `graph` is served at that berth from its start in `candidate`. The cost is the number of
-    /// berths plus the vessels of the touched ones.
+    /// touched berths plus the vessels on them.
     ///
     /// # Safety
     ///
