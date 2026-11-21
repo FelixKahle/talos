@@ -22,7 +22,7 @@
 //! - Set operations: `intersection`, `union`, `difference`, `gap`, `split_at`.
 //! - Measurements: `len`, `midpoint`.
 //! - Iteration: `iter()` yields a `ClosedOpenIntervalIterator<T>` supporting
-//!   `Iterator`, `DoubleEndedIterator`, `ExactSizeIterator`, and `FusedIterator`.
+//!   `Iterator`, `DoubleEndedIterator` and `FusedIterator`.
 //! - Conversions & Traits: `BitAnd`/`BitOr` sugar for intersection/union,
 //!   `RangeBounds`, `IntoIterator` (by value and by reference), and conversions
 //!   to/from `std::ops::Range<T>`.
@@ -103,6 +103,18 @@ where
             None
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // A count that `T` or `usize` cannot hold is only bounded below, as for std's ranges.
+        match self
+            .end_exclusive
+            .checked_sub(&self.current)
+            .and_then(|count| count.to_usize())
+        {
+            Some(count) => (count, Some(count)),
+            None => (usize::MAX, None),
+        }
+    }
 }
 
 impl<T> DoubleEndedIterator for ClosedOpenIntervalIterator<T>
@@ -116,20 +128,6 @@ where
         } else {
             None
         }
-    }
-}
-
-impl<T> ExactSizeIterator for ClosedOpenIntervalIterator<T>
-where
-    T: PrimInt,
-{
-    fn len(&self) -> usize {
-        let dist = self.end_exclusive - self.current;
-        if dist <= T::zero() {
-            return 0;
-        }
-        dist.to_usize()
-            .expect("ClosedOpenIntervalIterator: remaining length exceeds usize::MAX")
     }
 }
 
@@ -952,5 +950,13 @@ mod tests {
     fn test_midpoint_of_the_widest_interval_does_not_overflow() {
         let widest = ClosedOpenInterval::new(i64::MIN, i64::MAX);
         assert_eq!(widest.midpoint(), -1);
+    }
+
+    #[test]
+    fn test_iterator_size_hint_counts_the_points_left() {
+        let mut points = ClosedOpenInterval::new(1, 4).iter();
+        assert_eq!(points.size_hint(), (3, Some(3)));
+        points.next_back();
+        assert_eq!(points.size_hint(), (2, Some(2)));
     }
 }
