@@ -917,7 +917,8 @@ impl Mutator {
         unsafe { self.relocate_recorded_unchecked(first, last, from, to, links, step) };
     }
 
-    /// Moves the segment `first ..= last` to the head of `berth`.
+    /// Moves the segment `first ..= last` to the head of `berth`; the graph stays as it is if the segment already
+    /// heads `berth`, and the move is then recorded in the undo log and the touched berths all the same.
     ///
     /// ```text
     /// before:  ... prev -> [first ... last] -> next ...      sentinel -> old_head ...
@@ -926,8 +927,8 @@ impl Mutator {
     ///
     /// # Preconditions
     ///
-    /// `last` follows `first` on its berth, and `berth` is not the segment's own berth with the segment at its head. Otherwise the order breaks, though no access leaves the
-    /// graph; a debug build checks it.
+    /// `last` follows `first` on its berth. Otherwise the order breaks, though no access leaves the graph; a debug
+    /// build checks it.
     ///
     /// # Panics
     ///
@@ -991,7 +992,8 @@ impl Mutator {
         unsafe { self.relocate_recorded_unchecked(first, last, from, to, links, step) };
     }
 
-    /// Moves the segment `first ..= last` to the tail of `berth`.
+    /// Moves the segment `first ..= last` to the tail of `berth`; the graph stays as it is if the segment already
+    /// ends `berth`, and the move is then recorded in the undo log and the touched berths all the same.
     ///
     /// ```text
     /// before:  ... prev -> [first ... last] -> next ...      ... old_tail -> sentinel
@@ -1000,8 +1002,8 @@ impl Mutator {
     ///
     /// # Preconditions
     ///
-    /// `last` follows `first` on its berth. Otherwise the order breaks, though no access leaves the
-    /// graph; a debug build checks it.
+    /// `last` follows `first` on its berth. Otherwise the order breaks, though no access leaves the graph; a debug
+    /// build checks it.
     ///
     /// # Panics
     ///

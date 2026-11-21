@@ -1393,7 +1393,7 @@ impl ScheduleGraph {
         }
     }
 
-    /// Moves the segment `first ..= last` to the head of `berth`.
+    /// Moves the segment `first ..= last` to the head of `berth`; nothing changes if it already heads `berth`.
     ///
     /// # Preconditions
     ///
