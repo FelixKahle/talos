@@ -519,6 +519,8 @@ impl RingArena {
 
         if first_is_solo && second_is_solo {
             // Both are self-loops — swapping is a no-op.
+        } else if first_next == second && second_next == first {
+            // The two nodes form a ring of their own, whose cyclic order a swap does not change.
         } else if first_is_solo {
             self.next[second_prev.get()] = first;
             self.prev[first.get()] = second_prev;
@@ -599,6 +601,8 @@ impl RingArena {
 
         if first_is_solo && second_is_solo {
             // Both are self-loops — swapping is a no-op.
+        } else if first_next == second && second_next == first {
+            // The two nodes form a ring of their own, whose cyclic order a swap does not change.
         } else if first_is_solo {
             // First is a self-loop. Extract second from its ring, put first in second's
             // old position, make second a self-loop.
@@ -2229,5 +2233,27 @@ mod tests {
             &[Node::new(1), Node::new(0)],
             &[Node::new(1), Node::new(42)],
         );
+    }
+
+    #[test]
+    fn test_swap_nodes_in_two_node_ring_keeps_the_ring() {
+        let mut arena = RingArena::new(
+            [1, 0].map(Node::new).to_vec(),
+            [1, 0].map(Node::new).to_vec(),
+        );
+        arena.swap_nodes(Node::new(0), Node::new(1));
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1].map(Node::new));
+    }
+
+    #[test]
+    fn test_swap_nodes_unchecked_in_two_node_ring_keeps_the_ring() {
+        let mut arena = RingArena::new(
+            [1, 0].map(Node::new).to_vec(),
+            [1, 0].map(Node::new).to_vec(),
+        );
+        unsafe { arena.swap_nodes_unchecked(Node::new(1), Node::new(0)) };
+        verify_integrity(&arena);
+        assert_eq!(extract_ring(&arena, 0), [0, 1].map(Node::new));
     }
 }
