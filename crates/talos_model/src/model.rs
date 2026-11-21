@@ -418,6 +418,30 @@ where
 // Model
 // ----------------------------------------------------------------
 
+/// The union of `openings` as the fewest intervals: non-empty, ordered by start, and each separated from the next
+/// by a gap of at least one integer.
+fn union_of_openings<T>(openings: &[ClosedOpenInterval<T>]) -> Vec<ClosedOpenInterval<T>>
+where
+    T: SolverNumeric,
+{
+    let mut ordered: Vec<ClosedOpenInterval<T>> =
+        openings.iter().copied().filter(|opening| !opening.is_empty()).collect();
+    ordered.sort_unstable_by_key(ClosedOpenInterval::start);
+
+    let mut union: Vec<ClosedOpenInterval<T>> = Vec::with_capacity(ordered.len());
+    for opening in ordered {
+        // `last` starts no later than `opening`, so the two join exactly when `opening` starts by the end of `last`.
+        if let Some(last) = union.last_mut()
+            && let Some(joined) = last.union(opening)
+        {
+            *last = joined;
+        } else {
+            union.push(opening);
+        }
+    }
+    union
+}
+
 #[inline(always)]
 fn flatten_index(num_berths: usize, vessel_index: VesselIndex, berth_index: BerthIndex) -> usize {
     vessel_index.index() * num_berths + berth_index.index()
@@ -445,6 +469,9 @@ where
     /// - `arrival_times`, `latest_departure_times`, and `vessel_weights` must have length `num_vessels`.
     /// - `processing_times` must have length `num_vessels * num_berths`.
     /// - `opening_times` must have length `num_berths`.
+    ///
+    /// Each berth's openings are kept as their union: the model answers them ordered by start, without empty,
+    /// overlapping or touching intervals, whatever order and overlap they were given in.
     ///
     /// # Panics
     ///
@@ -502,8 +529,9 @@ where
         opening_offsets.push(current_offset);
 
         for berth_intervals in opening_times {
-            opening_intervals.extend_from_slice(&berth_intervals);
-            current_offset += berth_intervals.len();
+            let union = union_of_openings(&berth_intervals);
+            opening_intervals.extend_from_slice(&union);
+            current_offset += union.len();
             opening_offsets.push(current_offset);
         }
 
@@ -594,8 +622,9 @@ where
         self.opening_offsets.push(current_offset);
 
         for berth_intervals in opening_times {
-            self.opening_intervals.extend_from_slice(berth_intervals);
-            current_offset += berth_intervals.len();
+            let union = union_of_openings(berth_intervals);
+            self.opening_intervals.extend_from_slice(&union);
+            current_offset += union.len();
             self.opening_offsets.push(current_offset);
         }
     }
@@ -1121,6 +1150,53 @@ mod tests {
             assert!(model.vessel_allowed_on_berth_unchecked(vessel_index(1), berth_index(1)));
             // Some(8)
         }
+    }
+
+    fn model_with_openings_of_one_berth(openings: Vec<ClosedOpenInterval<i64>>) -> Model<i64> {
+        Model::new(
+            1,
+            1,
+            vec![0],
+            vec![100],
+            vec![1],
+            vec![ProcessingTime::some(5)],
+            vec![openings],
+        )
+    }
+
+    fn interval(start: i64, end: i64) -> ClosedOpenInterval<i64> {
+        ClosedOpenInterval::new(start, end)
+    }
+
+    // The engine places a vessel in the first opening, in order, that fits it; an opening listed before an earlier
+    // one would hide the earlier one.
+    #[test]
+    fn test_openings_out_of_order_are_kept_in_order() {
+        let model = model_with_openings_of_one_berth(vec![interval(20, 30), interval(0, 10)]);
+        assert_eq!(
+            model.berth_opening_times(berth_index(0)),
+            [interval(0, 10), interval(20, 30)]
+        );
+    }
+
+    // A berth open on [0, 10) and on [5, 20) is open on [0, 20): a vessel of length 15 fits at 0.
+    #[test]
+    fn test_overlapping_openings_are_kept_as_their_union() {
+        let model = model_with_openings_of_one_berth(vec![interval(5, 20), interval(0, 10)]);
+        assert_eq!(model.berth_opening_times(berth_index(0)), [interval(0, 20)]);
+    }
+
+    // A berth open on [0, 10) and on [10, 20) is open on [0, 20) without a break.
+    #[test]
+    fn test_touching_openings_are_kept_as_their_union() {
+        let model = model_with_openings_of_one_berth(vec![interval(0, 10), interval(10, 20)]);
+        assert_eq!(model.berth_opening_times(berth_index(0)), [interval(0, 20)]);
+    }
+
+    #[test]
+    fn test_empty_openings_are_dropped() {
+        let model = model_with_openings_of_one_berth(vec![interval(5, 5), interval(10, 20)]);
+        assert_eq!(model.berth_opening_times(berth_index(0)), [interval(10, 20)]);
     }
 
     #[test]
