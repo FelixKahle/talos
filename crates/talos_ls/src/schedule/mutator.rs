@@ -69,6 +69,7 @@ impl<const N: usize> LinkSnapshot<N> {
 enum Move {
     SwapVessels,
     RelocateAfter,
+    RelocateToHead,
 }
 
 #[cfg(test)]
@@ -77,6 +78,7 @@ impl std::fmt::Display for Move {
         let name = match self {
             Self::SwapVessels => "swap_vessels",
             Self::RelocateAfter => "relocate_after",
+            Self::RelocateToHead => "relocate_to_head",
         };
         write!(f, "`Mutator::{name}`")
     }
@@ -364,6 +366,71 @@ impl Mutator {
         unsafe { self.record_berth_change_unchecked(vessel, from) };
     }
 
+    /// Moves `vessel` to the head of `berth`, its own or another, empty or not; nothing changes and nothing is
+    /// recorded if `vessel` already heads `berth`.
+    ///
+    /// ```text
+    /// before:  ... prev -> vessel -> next ...      head(berth) -> old_head ...
+    /// after:   ... prev -> next ...                head(berth) -> vessel -> old_head ...
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if `vessel` or `berth` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    #[cfg(test)]
+    pub fn relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
+        self.check(Move::RelocateToHead, [vessel], [berth]);
+        // SAFETY: `vessel` and `berth` are the graph's, as the check above found.
+        unsafe { self.relocate_to_head_unchecked(vessel, berth) }
+    }
+
+    /// The move [`relocate_to_head`](Self::relocate_to_head) makes, for ids the caller knows to be the graph's.
+    ///
+    /// # Safety
+    ///
+    /// `vessel` and `berth` must be the graph's, the condition [`relocate_to_head`](Self::relocate_to_head) checks.
+    #[inline]
+    pub unsafe fn relocate_to_head_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
+        debug_assert!(
+            vessel.index() < self.graph.num_vessels() && berth.index() < self.graph.num_berths(),
+            "called `Mutator::relocate_to_head_unchecked` with {vessel} or {berth}, outside a graph of {} vessels \
+             and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
+        let (vessel_node, sentinel) = (
+            self.graph.vessel_node(vessel),
+            self.graph.sentinel_of(berth),
+        );
+        // SAFETY: `vessel` is the graph's, the precondition of this function, so its node lies in its arena
+        // (`ScheduleGraph`).
+        let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
+        if vessel_prev == sentinel {
+            return;
+        }
+        // SAFETY: `vessel` is the graph's, the precondition of this function.
+        let from = unsafe { self.graph.vessel_berth_unchecked(vessel) };
+        // SAFETY: the vessel's node and the berth's sentinel are the graph's, as the vessel and the berth are, and
+        // so is the node read from the graph's links (`ScheduleGraph`).
+        let links = unsafe {
+            LinkSnapshot::new_unchecked(&self.graph, [vessel_prev, vessel_node, sentinel])
+        };
+
+        // SAFETY: `from` was read from the graph's column of berths and `berth` is the graph's, the precondition of
+        // this function (`ScheduleGraph`).
+        unsafe { self.touch_both_unchecked(from, berth) };
+        // SAFETY: `vessel` is the graph's, the precondition of this function.
+        unsafe { self.record_position_unchecked(vessel) };
+        // SAFETY: the vessel and the berth are the graph's, the precondition of this function.
+        unsafe { self.graph.relocate_to_head_unchecked(vessel, berth) };
+        // SAFETY: the nodes of `links` are the graph's, read from it before the move, which keeps its counts.
+        unsafe { links.commit_unchecked(&self.graph, &mut self.diff) };
+        // SAFETY: `vessel` is the graph's, the precondition of this function.
+        unsafe { self.record_berth_change_unchecked(vessel, from) };
+    }
+
     /// Marks `a` and `b` touched.
     ///
     /// # Safety
@@ -553,11 +620,13 @@ mod tests {
         assert_eq!(mutator.touched().iter_touched_berths().count(), 2);
     }
 
-    /// A move of the reference test, its vessels named by numbers that `Harness::apply` reads modulo the count.
+    /// A move of the reference test, its vessels and berths named by numbers that `Harness::apply` reads modulo
+    /// their counts.
     #[derive(Clone, Copy, Debug)]
     enum Change {
         SwapVessels(usize, usize),
         After(usize, usize),
+        ToHead(usize, usize),
     }
 
     fn change() -> impl Strategy<Value = Change> {
@@ -565,6 +634,7 @@ mod tests {
         prop_oneof![
             (id(), id()).prop_map(|(a, b)| Change::SwapVessels(a, b)),
             (id(), id()).prop_map(|(a, b)| Change::After(a, b)),
+            (id(), id()).prop_map(|(a, berth)| Change::ToHead(a, berth)),
         ]
     }
 
@@ -639,7 +709,92 @@ mod tests {
                     // SAFETY: both vessels are below the count.
                     unsafe { unchecked.relocate_after_unchecked(v(a), v(c)) };
                 }
+                Change::ToHead(a, berth) => {
+                    let (a, berth) = (a % n, berth % reference.len());
+                    take(reference, a);
+                    reference[berth].insert(0, a);
+                    checked.relocate_to_head(v(a), b(berth));
+                    // SAFETY: the vessel and the berth are below their counts.
+                    unsafe { unchecked.relocate_to_head_unchecked(v(a), b(berth)) };
+                }
             }
+        }
+
+        /// Applies `change` after clearing the records, and checks the graphs against the reference: the order of
+        /// every berth, the touched berths, the vessels moved between berths, the links the diff records against
+        /// those that changed, and the unchecked records against the checked ones.
+        fn step(&mut self, change: Change) -> Result<(), TestCaseError> {
+            let before = order_of(self.checked.graph());
+            let links_before = links_of(self.checked.graph());
+            for mutator in [&mut self.checked, &mut self.unchecked] {
+                mutator.clear_diff();
+                mutator.touched.reset();
+            }
+            self.apply(change);
+            let after = order_of(self.checked.graph());
+            prop_assert_eq!(&after, &self.reference, "after {:?}", change);
+            prop_assert_eq!(
+                &order_of(self.unchecked.graph()),
+                &after,
+                "unchecked, after {:?}",
+                change
+            );
+            for berth in 0..after.len() {
+                if before[berth] != after[berth] {
+                    let touched = self.checked.touched().is_touched(b(berth));
+                    prop_assert!(touched, "{:?} changed berth {}", change, berth);
+                }
+            }
+            let moved: Vec<_> = self.checked.diff().reallocations().collect();
+            for vessel in 0..self.checked.graph().num_vessels() {
+                let (from, to) = (locate(&before, vessel).0, locate(&after, vessel).0);
+                let recorded: Vec<_> = moved
+                    .iter()
+                    .filter(|recorded| recorded.vessel == v(vessel))
+                    .map(|moved| (moved.from, moved.to))
+                    .collect();
+                let expected: Vec<_> = if from == to {
+                    vec![]
+                } else {
+                    vec![(b(from), b(to))]
+                };
+                prop_assert_eq!(recorded, expected, "{:?} and vessel {}", change, vessel);
+            }
+            prop_assert_eq!(
+                links_after_diff(links_before, self.checked.diff()),
+                links_of(self.checked.graph()),
+                "the links before {:?}, less the broken and with the created, should be those after",
+                change
+            );
+            prop_assert_eq!(
+                self.unchecked.diff(),
+                self.checked.diff(),
+                "after {:?}",
+                change
+            );
+            prop_assert_eq!(
+                &self.unchecked.undo,
+                &self.checked.undo,
+                "after {:?}",
+                change
+            );
+            prop_assert_eq!(
+                self.unchecked.touched(),
+                self.checked.touched(),
+                "after {:?}",
+                change
+            );
+            Ok(())
+        }
+
+        /// Rolls both mutators back and checks that each graph stands as `start`.
+        fn rollback_to(&mut self, start: &ScheduleGraph) -> Result<(), TestCaseError> {
+            self.checked.rollback();
+            self.unchecked.rollback();
+            prop_assert_eq!(self.checked.graph(), start);
+            prop_assert_eq!(self.unchecked.graph(), start);
+            prop_assert_eq!(&order_of(self.checked.graph()), &order_of(start));
+            Ok(())
         }
     }
 
@@ -723,47 +878,67 @@ mod tests {
         ) {
             let mut harness = Harness::new(&berths, num_berths);
             let start = harness.checked.graph().clone();
-            let start_order = order_of(&start);
             for &change in &changes {
-                let before = order_of(harness.checked.graph());
-                let links_before = links_of(harness.checked.graph());
-                for mutator in [&mut harness.checked, &mut harness.unchecked] {
-                    mutator.clear_diff();
-                    mutator.touched.reset();
-                }
-                harness.apply(change);
-                let after = order_of(harness.checked.graph());
-                prop_assert_eq!(&after, &harness.reference, "after {:?}", change);
-                prop_assert_eq!(&order_of(harness.unchecked.graph()), &after, "unchecked, after {:?}", change);
-                for berth in 0..num_berths {
-                    if before[berth] != after[berth] {
-                        let touched = harness.checked.touched().is_touched(b(berth));
-                        prop_assert!(touched, "{:?} changed berth {}", change, berth);
-                    }
-                }
-                let moved: Vec<_> = harness.checked.diff().reallocations().collect();
-                for vessel in 0..berths.len() {
-                    let (from, to) = (locate(&before, vessel).0, locate(&after, vessel).0);
-                    let recorded: Vec<_> = moved.iter().filter(|recorded| recorded.vessel == v(vessel)).collect();
-                    let expected: Vec<_> = if from == to { vec![] } else { vec![(b(from), b(to))] };
-                    let recorded: Vec<_> = recorded.iter().map(|moved| (moved.from, moved.to)).collect();
-                    prop_assert_eq!(recorded, expected, "{:?} and vessel {}", change, vessel);
-                }
-                prop_assert_eq!(
-                    links_after_diff(links_before, harness.checked.diff()),
-                    links_of(harness.checked.graph()),
-                    "the links before {:?}, less the broken and with the created, should be those after", change
-                );
-                prop_assert_eq!(harness.unchecked.diff(), harness.checked.diff(), "after {:?}", change);
-                prop_assert_eq!(&harness.unchecked.undo, &harness.checked.undo, "after {:?}", change);
-                prop_assert_eq!(harness.unchecked.touched(), harness.checked.touched(), "after {:?}", change);
+                harness.step(change)?;
             }
-            harness.checked.rollback();
-            harness.unchecked.rollback();
-            prop_assert_eq!(harness.checked.graph(), &start);
-            prop_assert_eq!(&order_of(harness.checked.graph()), &start_order);
-            prop_assert_eq!(&order_of(harness.unchecked.graph()), &start_order);
+            harness.rollback_to(&start)?;
         }
+    }
+
+    /// B0: V0 -> V1 -> V2, B1: V3, B2: (empty), B3: V4: a berth of several vessels, two of one and an empty one.
+    const MIXED_BERTHS: [usize; 5] = [0, 0, 0, 1, 3];
+
+    // Every move to a head, of every vessel to every berth: onto an empty berth, off a berth it leaves empty, to
+    // the head of its own berth from any place, and onto the head it already holds, which must record nothing.
+    #[test]
+    fn test_every_move_to_a_head_matches_the_model_and_undoes_to_the_start() {
+        for vessel in 0..MIXED_BERTHS.len() {
+            for berth in 0..4 {
+                let mut harness = Harness::new(&MIXED_BERTHS, 4);
+                let start = harness.checked.graph().clone();
+                let outcome = harness
+                    .step(Change::ToHead(vessel, berth))
+                    .and_then(|()| harness.rollback_to(&start));
+                if let Err(failure) = outcome {
+                    panic!("vessel {vessel} to the head of berth {berth}: {failure}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_relocate_to_head_onto_an_empty_berth_leaves_the_vessels_berth_and_links_it_to_both_ends()
+     {
+        let mut mutator = setup();
+        mutator.relocate_to_head(v(1), b(2));
+        assert_eq!(vessels_of(&mutator, 0), [v(0), v(2)]);
+        assert_eq!(vessels_of(&mutator, 2), [v(1)]);
+        assert_eq!(extract_reallocations(mutator.diff()), [(v(1), b(0), b(2))]);
+        let created: Vec<_> = mutator
+            .diff()
+            .created_links()
+            .map(|link| link.to_string())
+            .collect();
+        assert_eq!(
+            created,
+            [
+                "Vessel 0 -> Vessel 2",
+                "Vessel 1 -> the boundary of Berth 2",
+                "the boundary of Berth 2 -> Vessel 1"
+            ]
+        );
+        let touched: Vec<_> = mutator.touched().iter_touched_berths().collect();
+        assert_eq!(touched, [b(0), b(2)]);
+    }
+
+    #[test]
+    fn test_relocate_to_head_of_the_head_it_holds_records_nothing() {
+        let mut mutator = setup();
+        mutator.relocate_to_head(v(3), b(1));
+        assert_eq!(mutator.graph(), &setup_graph());
+        assert!(mutator.undo.is_empty());
+        assert_eq!(mutator.diff(), &ScheduleGraphDiff::new());
+        assert_eq!(mutator.touched().iter_touched_berths().count(), 0);
     }
 
     /// A safe move of the mutator, as the refusal test calls it.
@@ -771,17 +946,28 @@ mod tests {
     enum Call {
         SwapVessels,
         RelocateAfter,
+        RelocateToHead,
     }
 
     impl Call {
-        const ALL: [Self; 2] = [Self::SwapVessels, Self::RelocateAfter];
+        const ALL: [Self; 3] = [Self::SwapVessels, Self::RelocateAfter, Self::RelocateToHead];
 
-        /// Makes the move with `vessels`.
-        fn make(self, mutator: &mut Mutator, vessels: [VesselIndex; 2]) {
-            let [a, b] = vessels;
+        /// The number of vessels and of berths the move takes.
+        fn arity(self) -> (usize, usize) {
             match self {
-                Self::SwapVessels => mutator.swap_vessels(a, b),
-                Self::RelocateAfter => mutator.relocate_after(a, b),
+                Self::SwapVessels | Self::RelocateAfter => (2, 0),
+                Self::RelocateToHead => (1, 1),
+            }
+        }
+
+        /// Makes the move with the first vessels of `vessels` and the berth of `berths`.
+        fn make(self, mutator: &mut Mutator, vessels: [VesselIndex; 2], berths: [BerthIndex; 1]) {
+            let [a, c] = vessels;
+            let [berth] = berths;
+            match self {
+                Self::SwapVessels => mutator.swap_vessels(a, c),
+                Self::RelocateAfter => mutator.relocate_after(a, c),
+                Self::RelocateToHead => mutator.relocate_to_head(a, berth),
             }
         }
     }
@@ -805,15 +991,24 @@ mod tests {
         fn test_safe_moves_refuse_every_id_outside_and_record_nothing(
             call in proptest::sample::select(Call::ALL.to_vec()),
             inside in proptest::array::uniform2(0_usize..5),
+            berth_inside in 0_usize..3,
             place in 0_usize..2,
             beyond in 0_usize..32,
         ) {
+            let (num_vessels, num_berths) = call.arity();
+            let place = place % (num_vessels + num_berths);
             let mut vessels = inside.map(v);
-            vessels[place] = v(5 + beyond);
-            let outside = vessels[place].to_string();
+            let mut berths = [b(berth_inside)];
+            let outside = if place < num_vessels {
+                vessels[place] = v(5 + beyond);
+                vessels[place].to_string()
+            } else {
+                berths[0] = b(3 + beyond);
+                berths[0].to_string()
+            };
             let mut mutator = setup();
             let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                call.make(&mut mutator, vessels);
+                call.make(&mut mutator, vessels, berths);
             }));
             let message = message_of(refused.expect_err("the move should refuse an id outside").as_ref());
             prop_assert!(message.starts_with("called `Mutator::"), "{}", message);

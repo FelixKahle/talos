@@ -560,6 +560,58 @@ mod tests {
         assert_eq!(delta, 2 - 5);
     }
 
+    /// A memory of `num_vessels` vessels and `num_berths` berths whose every feature has a count of its own: the
+    /// link at index `i` counts `i + 1` and the assignment at index `i` counts `1000 * (i + 1)`. The link between
+    /// two boundaries is no feature and keeps zero, as no penalization raises it.
+    fn memory_of_distinct_counts(num_vessels: usize, num_berths: usize) -> PenaltyMemory {
+        let mut memory = memory(num_vessels, num_berths);
+        let boundary = link_index(
+            LinkEnd::Berth(berth(0)),
+            LinkEnd::Berth(berth(0)),
+            num_vessels,
+        );
+        let count_of =
+            |index: usize| u64::try_from(index + 1).expect("a small index should fit a u64");
+        for (index, count) in memory.links.iter_mut().enumerate() {
+            *count = if index == boundary {
+                0
+            } else {
+                count_of(index)
+            };
+        }
+        for (index, count) in memory.assignments.iter_mut().enumerate() {
+            *count = 1000 * count_of(index);
+        }
+        memory
+    }
+
+    // A move to the head of a berth breaks the link from the boundary to the old head and the links around the
+    // place the vessel leaves, and makes the boundary to the vessel, the vessel to the old head and the link that
+    // closes its old place. Whatever the berths hold, empty, of one vessel or of several, the delta of its diff must
+    // be the difference of the sums of the schedules before and after.
+    #[test]
+    fn test_penalty_delta_of_every_move_to_a_head_is_the_change_of_the_sum() {
+        // B0: V0 -> V1 -> V2, B1: V3, B2: empty, B3: V4.
+        let berths = [berth(0), berth(0), berth(0), berth(1), berth(3)];
+        let graph = ScheduleGraph::from_slices(&berths, &[0_i64, 1, 2, 0, 0], 4);
+        let memory = memory_of_distinct_counts(5, 4);
+        let before = memory.penalty_sum(&graph);
+        for moved in 0..5 {
+            for target in 0..4 {
+                let mut mutator = Mutator::new(graph.clone());
+                mutator.relocate_to_head(vessel(moved), berth(target));
+                // SAFETY: the diff names vessels and berths of a graph of the memory's counts.
+                let delta = unsafe { memory.penalty_delta_unchecked(mutator.diff()) };
+                let after = memory.penalty_sum(mutator.graph());
+                assert_eq!(
+                    delta,
+                    after - before,
+                    "vessel {moved} to the head of berth {target}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_penalty_sum_counts_every_link_with_a_vessel_and_every_assignment() {
         let graph = three_vessels_on_two_berths();
