@@ -1839,6 +1839,31 @@ mod tests {
         assert!(sol.objective_value() >= 0);
     }
 
+    // Best-improvement descent from a schedule whose only move worsens it stands at a local optimum: the first scan
+    // finds nothing to commit, and the search must end there instead of scanning again until a budget runs out.
+    #[test]
+    fn test_best_improvement_descent_ends_at_a_local_optimum() {
+        use crate::meta::{gd::GreedyDescent, selec::SelectionStrategy};
+        use crate::monitor::iteration::IterationLimitMonitor;
+        let model = build_test_model();
+        let berths = [BerthIndex::new(0), BerthIndex::new(0)];
+        let start_times = [0_i64, 5];
+        let mut descent = GreedyDescent::new().with_selection(SelectionStrategy::BestImprovement);
+        let params = MutableLocalSearchParams {
+            model: &model,
+            operator: &mut MockOperator::new(1),
+            metaheuristic: &mut descent,
+            monitor: IterationLimitMonitor::new(1000),
+            berths: TiSlice::from_ref(&berths),
+            start_times: TiSlice::from_ref(&start_times),
+            objective_value: 5,
+        };
+        let outcome = Engine::<i64>::new(2, 2).run(params, mock_evaluator, |_| {});
+        assert_eq!(outcome.termination_reason(), TerminationReason::NeighborhoodExhausted);
+        assert_eq!(outcome.stats().iterations, 1);
+        assert_eq!(outcome.solution().objective_value(), 5);
+    }
+
     #[test]
     fn test_engine_neighborhood_exhaustion_terminates() {
         // Operator produces only 1 move, accept-all meta, so cycle happens after 1 move.

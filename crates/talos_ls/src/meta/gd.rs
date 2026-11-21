@@ -75,6 +75,18 @@ pub struct GreedyDescent<B = KeepFirst> {
 
     /// Tie-breaking strategy for best-improvement mode.
     tie_breaking: B,
+
+    /// Whether the scan under way has committed a buffered move, in best-improvement mode.
+    scan: Scan,
+}
+
+/// What a scan of the neighbourhood has done so far, in best-improvement mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// No buffered move was committed: the scan found no improving move.
+    NothingCommitted,
+    /// The best improving move the scan buffered was committed.
+    Committed,
 }
 
 impl<B: std::fmt::Debug> std::fmt::Debug for GreedyDescent<B> {
@@ -82,6 +94,7 @@ impl<B: std::fmt::Debug> std::fmt::Debug for GreedyDescent<B> {
         f.debug_struct("GreedyDescent")
             .field("selection", &self.selection)
             .field("tie_breaking", &self.tie_breaking)
+            .field("scan", &self.scan)
             .finish()
     }
 }
@@ -94,6 +107,7 @@ impl GreedyDescent<KeepFirst> {
         Self {
             selection: SelectionStrategy::FirstImprovement,
             tie_breaking: KeepFirst,
+            scan: Scan::NothingCommitted,
         }
     }
 }
@@ -124,6 +138,7 @@ impl<B: TieBreakingStrategy> GreedyDescent<B> {
         GreedyDescent {
             selection: self.selection,
             tie_breaking,
+            scan: self.scan,
         }
     }
 
@@ -171,8 +186,9 @@ where
     ) {
     }
 
-    /// In best-improvement mode, exhaustion is the normal end of a
-    /// neighbourhood scan — the engine restarts for the next iteration.
+    /// In best-improvement mode, a scan that committed its best improving
+    /// move restarts for the next iteration, and a scan that found none
+    /// ends the search at a local optimum.
     ///
     /// In first-improvement mode, exhaustion means no improving move
     /// exists — the search has reached a local optimum and terminates.
@@ -184,9 +200,13 @@ where
         _buffered_solution: Option<SolutionView<'_, T>>,
         _graph: &ScheduleGraph,
     ) -> NeighborhoodExhaustionOutcome {
-        match self.selection {
-            SelectionStrategy::BestImprovement => NeighborhoodExhaustionOutcome::Restart,
-            SelectionStrategy::FirstImprovement => NeighborhoodExhaustionOutcome::Terminate,
+        match (self.selection, self.scan) {
+            (SelectionStrategy::BestImprovement, Scan::Committed) => {
+                self.scan = Scan::NothingCommitted;
+                NeighborhoodExhaustionOutcome::Restart
+            }
+            (SelectionStrategy::BestImprovement, Scan::NothingCommitted)
+            | (SelectionStrategy::FirstImprovement, _) => NeighborhoodExhaustionOutcome::Terminate,
         }
     }
 
@@ -202,7 +222,13 @@ where
         _layout: &ScheduleGraph,
         _buffer_layout: &ScheduleGraph,
     ) -> bool {
-        matches!(self.selection, SelectionStrategy::BestImprovement)
+        match self.selection {
+            SelectionStrategy::BestImprovement => {
+                self.scan = Scan::Committed;
+                true
+            }
+            SelectionStrategy::FirstImprovement => false,
+        }
     }
 
     fn search_command(
