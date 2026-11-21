@@ -31,7 +31,8 @@
 //! micro-tracker that snapshots up to four nodes' next pointers before a
 //! mutation and emits the net edge changes into the diff afterward.
 
-use super::graph::{ScheduleGraph, ScheduleGraphDiffTracker};
+use super::diff::ScheduleGraphDiffTracker;
+use super::graph::ScheduleGraph;
 use super::touched_berths::TouchedBerthsTracker;
 use super::undo_log::ScheduleGraphUndoTracker;
 use crate::ring_arena::Node;

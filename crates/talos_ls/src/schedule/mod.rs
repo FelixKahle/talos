@@ -10,16 +10,20 @@
 //! - [`TouchedBerths`] marks the berths whose order a sequence of moves changed.
 //! - [`Mutator`] makes the moves on a graph and records each in a diff, an undo log and the touched berths.
 
+mod diff;
 mod graph;
 mod touched_berths;
 mod undo_log;
 
 mod mutator;
 
+pub use diff::{
+    DiffEdgeIter, DiffReallocationIter, ScheduleGraphDiff, ScheduleGraphDiffEdge,
+    ScheduleGraphDiffTracker,
+};
 pub use graph::{
-    BerthEdgeIter, BerthTopologyIter, DiffEdgeIter, DiffReallocationIter, ScheduleGraph,
-    ScheduleGraphDiff, ScheduleGraphDiffEdge, ScheduleGraphDiffTracker, ScheduleGraphEdge,
-    VesselSequenceIter, VesselSequenceRevIter,
+    BerthEdgeIter, BerthTopologyIter, ScheduleGraph, ScheduleGraphEdge, VesselSequenceIter,
+    VesselSequenceRevIter,
 };
 pub use mutator::Mutator;
 pub use touched_berths::{
