@@ -40,6 +40,7 @@ pub struct SearchLimits {
 /// The limits of one run, with the marks they are measured from: the start, and the last new best.
 #[derive(Debug, Clone)]
 pub(super) struct LimitWatch {
+    /// The limits measured.
     limits: SearchLimits,
     /// When the run started, read only if it has a time limit.
     started: Option<Instant>,

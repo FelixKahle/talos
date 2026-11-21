@@ -13,6 +13,7 @@ use talos_model::{Model, VesselIndex};
 /// would follow, in increasing order of the vessel and then of the anchor.
 #[derive(Debug, Clone)]
 struct PlacementsIter {
+    /// The vessels of the graph.
     num_vessels: usize,
     /// The vessel of the next placement, or `num_vessels` once every placement is given.
     vessel: usize,

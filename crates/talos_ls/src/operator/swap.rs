@@ -13,6 +13,7 @@ use talos_model::{Model, VesselIndex};
 /// in increasing order of the first vessel and then of the second.
 #[derive(Debug, Clone)]
 struct VesselPairsIter {
+    /// The vessels of the graph.
     num_vessels: usize,
     /// The first vessel of the next pair.
     first: usize,

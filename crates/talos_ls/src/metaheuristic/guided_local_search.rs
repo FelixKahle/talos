@@ -290,7 +290,7 @@ fn rank_utility(utility: f64, best: f64) -> UtilityRank {
 /// every berth, which all share one row and one column.
 ///
 /// `end` is a boundary or a vessel below `num_vessels`.
-#[inline(always)]
+#[inline]
 fn end_index(end: LinkEnd, num_vessels: usize) -> usize {
     match end {
         LinkEnd::Vessel(vessel) => {
@@ -308,14 +308,14 @@ fn end_index(end: LinkEnd, num_vessels: usize) -> usize {
 /// `(num_vessels + 1)^2`.
 ///
 /// `from` and `to` are boundaries or vessels below `num_vessels`.
-#[inline(always)]
+#[inline]
 fn link_index(from: LinkEnd, to: LinkEnd, num_vessels: usize) -> usize {
     end_index(from, num_vessels) * (num_vessels + 1) + end_index(to, num_vessels)
 }
 
 /// Whether the link from `from` to `to` is a feature: one of its ends is a vessel. The link from the head to the
 /// tail of an empty berth is none.
-#[inline(always)]
+#[inline]
 fn is_feature(from: LinkEnd, to: LinkEnd) -> bool {
     matches!(from, LinkEnd::Vessel(_)) || matches!(to, LinkEnd::Vessel(_))
 }
@@ -346,7 +346,7 @@ impl PenaltyMemory {
     /// The index of the assignment of `vessel` to `berth`.
     ///
     /// `vessel` and `berth` are the memory's.
-    #[inline(always)]
+    #[inline]
     fn assignment_index(&self, vessel: VesselIndex, berth: BerthIndex) -> usize {
         debug_assert!(
             vessel.index() < self.num_vessels && berth.index() < self.num_berths,
@@ -360,7 +360,7 @@ impl PenaltyMemory {
     /// # Safety
     ///
     /// The index of `feature` must be below the length of its table.
-    #[inline(always)]
+    #[inline]
     unsafe fn count_unchecked(&self, feature: Feature) -> u64 {
         match feature {
             Feature::Link(index) => {
@@ -654,10 +654,15 @@ impl DecaySchedule {
 /// penalty sum is that of the accepted schedule after every step.
 #[derive(Debug, Clone)]
 pub struct GuidedLocalSearchRule {
+    /// The penalty of every feature.
     memory: PenaltyMemory,
+    /// The features the last penalization raised, kept for its memory.
     winners: Vec<Feature>,
+    /// The weight of the penalties.
     lambda: LambdaSchedule,
+    /// The decay of the penalties.
     decay: DecaySchedule,
+    /// When the search penalizes.
     trigger: PenalizationTrigger,
     /// The steps or accepted moves counted toward the trigger.
     trigger_counter: u64,

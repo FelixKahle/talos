@@ -211,6 +211,7 @@ impl RoundRobin {
 /// order from there, each until it is exhausted.
 #[derive(Debug, Clone)]
 struct RandomSelection {
+    /// The generator the neighbourhood that starts a scan is drawn from.
     generator: Xoshiro256PlusPlus,
     /// The neighbourhood that proposed the last move, where the next one is asked first.
     current: usize,
@@ -255,6 +256,7 @@ impl RandomSelection {
 /// the scan asks them in the order of the ranking.
 #[derive(Debug, Clone)]
 struct Bandit {
+    /// The memory and the exploration weight of the scores.
     settings: MultiArmedBandit,
     /// The moves each neighbourhood proposed, per neighbourhood.
     samples: Vec<u64>,

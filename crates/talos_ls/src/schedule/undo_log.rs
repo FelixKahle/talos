@@ -208,7 +208,7 @@ impl std::fmt::Display for UndoInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SwapVessels { vessel_a, vessel_b } => {
-                write!(f, "Swap V{} <-> V{}", vessel_a.index(), vessel_b.index())
+                write!(f, "swap {vessel_a} and {vessel_b} back")
             }
             Self::SwapSegments {
                 a_first,
@@ -217,46 +217,31 @@ impl std::fmt::Display for UndoInstruction {
                 b_last,
             } => write!(
                 f,
-                "Swap Segment(V{}..V{}) <-> Segment(V{}..V{})",
-                a_first.index(),
-                a_last.index(),
-                b_first.index(),
-                b_last.index()
+                "swap the segments {a_first} to {a_last} and {b_first} to {b_last} back"
             ),
             Self::ReverseSegment {
                 original_first,
                 original_last,
             } => write!(
                 f,
-                "Reverse Segment(V{}..V{}) back",
-                original_last.index(),
-                original_first.index()
+                "reverse the segment {original_last} to {original_first} back"
             ),
             Self::RelocateAfterVessel {
                 vessel,
                 predecessor,
-            } => write!(
-                f,
-                "Relocate V{} back after V{}",
-                vessel.index(),
-                predecessor.index()
-            ),
-            Self::RelocateToHead { vessel, berth } => write!(
-                f,
-                "Relocate V{} back to head of Berth {}",
-                vessel.index(),
-                berth.index()
-            ),
+            } => {
+                write!(f, "move {vessel} back after {predecessor}")
+            }
+            Self::RelocateToHead { vessel, berth } => {
+                write!(f, "move {vessel} back to the head of {berth}")
+            }
             Self::RelocateSegmentAfterVessel {
                 segment_first,
                 segment_last,
                 predecessor,
             } => write!(
                 f,
-                "Relocate Segment(V{}..V{}) back after V{}",
-                segment_first.index(),
-                segment_last.index(),
-                predecessor.index()
+                "move the segment {segment_first} to {segment_last} back after {predecessor}"
             ),
             Self::RelocateSegmentToHead {
                 segment_first,
@@ -264,10 +249,7 @@ impl std::fmt::Display for UndoInstruction {
                 berth,
             } => write!(
                 f,
-                "Relocate Segment(V{}..V{}) back to head of Berth {}",
-                segment_first.index(),
-                segment_last.index(),
-                berth.index()
+                "move the segment {segment_first} to {segment_last} back to the head of {berth}"
             ),
         }
     }
@@ -440,15 +422,11 @@ impl ScheduleGraphUndoLog {
 }
 
 impl std::fmt::Display for ScheduleGraphUndoLog {
+    /// The instructions in the order a rollback applies them, the latest first, one per line.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let len = self.stack.len();
-        writeln!(f, "ScheduleGraphUndoLog [Instructions: {}]", len)?;
-        if len == 0 {
-            return write!(f, "  (Empty)");
-        }
-        for (i, instruction) in self.stack.iter().rev().enumerate() {
-            let marker = if i == 0 { "Next -> " } else { "        " };
-            writeln!(f, "  {}{}", marker, instruction)?;
+        write!(f, "undo log of {} instructions", self.stack.len())?;
+        for instruction in self.stack.iter().rev() {
+            write!(f, "\n  {instruction}")?;
         }
         Ok(())
     }
@@ -683,6 +661,18 @@ mod tests {
                 vessel: v(2),
                 berth: b(1)
             }
+        );
+    }
+
+    #[test]
+    fn test_display_lists_the_instructions_latest_first() {
+        let mut log = ScheduleGraphUndoLog::default();
+        assert_eq!(log.to_string(), "undo log of 0 instructions");
+        log.push_swap_vessels(v(0), v(1));
+        log.push_relocate_to_head(v(2), b(1));
+        assert_eq!(
+            log.to_string(),
+            "undo log of 2 instructions\n  move Vessel 2 back to the head of Berth 1\n  swap Vessel 0 and Vessel 1 back"
         );
     }
 }

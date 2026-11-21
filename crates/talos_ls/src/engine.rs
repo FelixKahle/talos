@@ -29,10 +29,9 @@ use talos_model::{Model, Solution, SolutionView};
 /// The local-search engine: it improves a schedule of a model by moves from a set of neighbourhoods, under a
 /// metaheuristic, within limits.
 ///
-/// An engine owns the states and records a run works in, and keeps their memory from one run to the next: a run
-/// on an instance no larger than an earlier one allocates only its operator and the memory of its metaheuristic.
-/// A run is reproducible from its model, its initial schedule, its parameters and its monitor; two engines share
-/// nothing, so runs on different engines may go on in parallel.
+/// An engine owns the states and records a run works in, and keeps their memory from one run to the next. A run is
+/// reproducible from its model, its initial schedule, its parameters and its monitor; two engines share nothing,
+/// so runs on different engines may go on in parallel.
 ///
 /// The states of an engine count the vessels and berths of the model of its last run, and so do its graphs, once a
 /// run has loaded it.
@@ -90,8 +89,9 @@ where
     /// the metaheuristic accept, keep aside or reject it, until the metaheuristic, a limit or the monitor ends
     /// it. The outcome holds the best schedule found, which is never worse than the initial one.
     ///
-    /// The checks at the door cost one pass over the vessels; a run allocates only its operator, the memory of
-    /// its metaheuristic and, on a larger model than the engine has seen, its states.
+    /// The checks at the door cost one pass over the vessels. A run allocates its operator, the memory of its
+    /// metaheuristic and its outcome, and its states where the model is larger than any the engine has run on;
+    /// the steps of the search reuse the memory of the engine.
     ///
     /// # Errors
     ///
@@ -383,6 +383,19 @@ where
     watch: LimitWatch,
     buffer: Buffer,
     cost: PhantomData<V>,
+}
+
+impl<T, V, R, O, M> std::fmt::Debug for Run<'_, T, V, R, O, M>
+where
+    T: SolverNumeric,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Run")
+            .field("statistics", &self.statistics)
+            .field("watch", &self.watch)
+            .field("buffer", &self.buffer)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T, V, R, O, M> Run<'_, T, V, R, O, M>

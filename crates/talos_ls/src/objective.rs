@@ -188,6 +188,8 @@ impl<T> VesselCost<T> for TurnaroundCost
 where
     T: SolverNumeric,
 {
+    // The decoder calls the cost once per vessel of every berth it decodes; inlined into its loop, the reads of
+    // the model fuse with the decoder's own.
     #[inline(always)]
     unsafe fn cost_unchecked(
         model: &Model<T>,
@@ -213,6 +215,7 @@ impl<T> VesselCost<T> for CompletionCost
 where
     T: SolverNumeric,
 {
+    // As for the turnaround time: inlined into the decoder's loop.
     #[inline(always)]
     unsafe fn cost_unchecked(
         model: &Model<T>,
