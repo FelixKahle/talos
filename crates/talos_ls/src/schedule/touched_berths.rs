@@ -1,238 +1,260 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Lightweight dirty-tracking for berths modified during a neighborhood move.
-//!
-//! After a topological mutation on the `ScheduleGraph`, only a small subset
-//! of berths need their schedules re-decoded and costs re-evaluated.
-//! `TouchedBerths` records exactly which berths were affected, so the
-//! evaluation engine can skip all clean berths entirely.
-//!
-//! # Implementation
-//!
-//! The tracker is a thin wrapper around a `Vec<bool>` indexed by
-//! `BerthIndex::get()`. Marking and querying are both $O(1)$; resetting
-//! the entire mask is $O(B)$ via `fill(false)`.
+//! The berths whose order a sequence of moves changed, which the decoder decodes again.
 
+use std::fmt;
+use std::iter::FusedIterator;
 use talos_model::BerthIndex;
+use typed_index_collections::TiVec;
 
-// ----------------------------------------------------------------
-// TouchedIndicesIter
-// ----------------------------------------------------------------
-
-/// An iterator that yields the `BerthIndex` of every touched berth.
+/// The berths a sequence of moves touched, as a set of berths.
 ///
-/// Created by `TouchedBerths::iter_touched_berths`. Scans the boolean
-/// array linearly, skipping untouched entries.
-pub struct TouchedIndicesIter<'a> {
-    iter: std::iter::Enumerate<std::slice::Iter<'a, bool>>,
-}
-
-impl<'a> Iterator for TouchedIndicesIter<'a> {
-    type Item = BerthIndex;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        // Fast-forward to the next `true` value and return its index
-        for (idx, &is_touched) in &mut self.iter {
-            if is_touched {
-                return Some(BerthIndex::new(idx));
-            }
-        }
-        None
-    }
-}
-
-// ----------------------------------------------------------------
-// UntouchedBerthsIter
-// ----------------------------------------------------------------
-
-/// An iterator that yields the `BerthIndex` of every untouched (clean) berth.
-///
-/// Created by `TouchedBerths::iter_untouched_berths`. Scans the boolean
-/// array linearly, skipping touched entries.
-pub struct UntouchedBerthsIter<'a> {
-    iter: std::iter::Enumerate<std::slice::Iter<'a, bool>>,
-}
-
-impl<'a> Iterator for UntouchedBerthsIter<'a> {
-    type Item = BerthIndex;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        // Fast-forward to the next `false` value and return its index
-        for (idx, &is_touched) in &mut self.iter {
-            if !is_touched {
-                return Some(BerthIndex::new(idx));
-            }
-        }
-        None
-    }
-}
-
-// ----------------------------------------------------------------
-// TouchedBerths
-// ----------------------------------------------------------------
-
-/// Tracks which berths have been touched (modified) during a mutation.
-///
-/// This allows the engine to efficiently identify which berths need to be
-/// re-decoded after a mutation, without having to check every berth.
-#[repr(transparent)]
-#[derive(Clone, PartialEq, Eq)]
+/// Marking a berth, asking whether one is marked, and walking the marked ones cost what was marked, not the count
+/// of berths, and marking never allocates: the set holds room for every berth from the start.
+// Invariant: `touched` holds every berth whose mark is set, once each, in the order they were first marked, and its
+// capacity is at least the count of berths, the length of `marked`. Every entry of `touched` is below that count,
+// which is what the decoder's unchecked reads through the walk rest on.
+#[derive(PartialEq, Eq, Debug)]
 pub struct TouchedBerths {
-    // Note
-    // We might use a bitset in the future
-    // but for now a Vec<bool> is simple and efficient enough for our needs.
-    touched: Vec<bool>,
+    /// Whether each berth is marked, per berth.
+    marked: TiVec<BerthIndex, bool>,
+    /// The marked berths, in the order of their first mark.
+    touched: Vec<BerthIndex>,
 }
 
 impl TouchedBerths {
-    /// Creates a new touched berths tracker with the given number of berths.
-    #[inline(always)]
+    /// The empty set of `num_berths` berths.
+    #[inline]
     pub fn new(num_berths: usize) -> Self {
         Self {
-            touched: vec![false; num_berths],
+            marked: TiVec::from(vec![false; num_berths]),
+            touched: Vec::with_capacity(num_berths),
         }
     }
 
-    /// Resizes the tracker to accommodate a new number of berths.
-    #[inline(always)]
+    /// Makes the set the empty set of `num_berths` berths, reusing its memory.
+    #[inline]
     pub fn resize(&mut self, num_berths: usize) {
-        self.touched.resize(num_berths, false);
+        self.reset();
+        self.marked.resize(num_berths, false);
+        self.touched.reserve(num_berths);
     }
 
-    /// Marks a berth as touched.
-    #[inline(always)]
-    pub fn touch(&mut self, berth: BerthIndex) {
-        self.touched[berth.index()] = true;
-    }
-
-    /// Marks a berth as touched without bounds checking.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that `berth.get()` is < `num_berths`.
-    #[inline(always)]
-    pub unsafe fn touch_unchecked(&mut self, berth: BerthIndex) {
-        debug_assert!(berth.index() < self.touched.len());
-
-        unsafe {
-            *self.touched.get_unchecked_mut(berth.index()) = true;
-        }
-    }
-
-    /// Checks if a berth has been touched.
-    #[inline(always)]
-    pub fn is_touched(&self, berth: BerthIndex) -> bool {
-        self.touched[berth.index()]
-    }
-
-    /// Checks if a berth has been touched without bounds checking.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that `berth.get()` is < `num_berths`.
-    #[inline(always)]
-    pub unsafe fn is_touched_unchecked(&self, berth: BerthIndex) -> bool {
-        debug_assert!(berth.index() < self.touched.len());
-
-        unsafe { *self.touched.get_unchecked(berth.index()) }
-    }
-
-    /// Resets all berths to untouched.
-    #[inline(always)]
-    pub fn reset(&mut self) {
-        self.touched.fill(false);
-    }
-
-    /// Returns the number of berths tracked.
+    /// The number of berths.
     #[inline(always)]
     pub fn num_berths(&self) -> usize {
-        self.touched.len()
+        self.marked.len()
     }
 
-    /// Returns an iterator over the touched status of each berth.
-    #[inline(always)]
-    pub fn iter(&self) -> std::slice::Iter<'_, bool> {
-        self.touched.iter()
+    /// Marks `berth`; nothing changes if it is marked already.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `berth` is not below the number of berths.
+    #[inline]
+    #[track_caller]
+    pub fn touch(&mut self, berth: BerthIndex) {
+        assert!(
+            berth.index() < self.num_berths(),
+            "called `TouchedBerths::touch` with {berth}, outside a set of {} berths",
+            self.num_berths()
+        );
+        // SAFETY: `berth` is below the number of berths, as the check above found.
+        unsafe { self.touch_unchecked(berth) }
     }
 
-    /// Returns an iterator over the indices of touched berths.
+    /// Marks `berth`, for a berth the caller knows to be below the number of berths.
+    ///
+    /// # Safety
+    ///
+    /// `berth` must be below the number of berths, the condition [`touch`](Self::touch) checks.
     #[inline(always)]
-    pub fn iter_touched_berths(&self) -> TouchedIndicesIter<'_> {
-        TouchedIndicesIter {
-            iter: self.touched.iter().enumerate(),
+    pub unsafe fn touch_unchecked(&mut self, berth: BerthIndex) {
+        debug_assert!(
+            berth.index() < self.num_berths(),
+            "called `TouchedBerths::touch_unchecked` with {berth}, outside a set of {} berths",
+            self.num_berths()
+        );
+        // SAFETY: `berth` is below the number of berths, the precondition of this function.
+        let mark = unsafe { self.marked.get_unchecked_mut(berth) };
+        if !*mark {
+            *mark = true;
+            // Within the capacity, which counts every berth, so the push does not allocate.
+            self.touched.push(berth);
         }
     }
 
-    /// Returns an iterator over the indices of untouched berths.
-    #[inline(always)]
-    pub fn iter_untouched_berths(&self) -> UntouchedBerthsIter<'_> {
-        UntouchedBerthsIter {
-            iter: self.touched.iter().enumerate(),
-        }
+    /// Whether `berth` is marked.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `berth` is not below the number of berths.
+    #[inline]
+    #[track_caller]
+    pub fn is_touched(&self, berth: BerthIndex) -> bool {
+        self.marked[berth]
     }
 
-    /// Returns a slice of the touched status of each berth.
+    /// Unmarks every berth, at a cost of the marked ones.
+    #[inline]
+    pub fn reset(&mut self) {
+        for &berth in &self.touched {
+            debug_assert!(
+                berth.index() < self.marked.len(),
+                "a marked berth should lie below the number of berths"
+            );
+            // SAFETY: every marked berth is below the number of berths by the invariant of `TouchedBerths`.
+            *unsafe { self.marked.get_unchecked_mut(berth) } = false;
+        }
+        self.touched.clear();
+    }
+
+    /// The marked berths, each once, in the order of their first mark.
     #[inline(always)]
-    pub fn as_slice(&self) -> &[bool] {
-        &self.touched
+    pub fn iter_touched_berths(&self) -> TouchedBerthsIter<'_> {
+        TouchedBerthsIter {
+            inner: self.touched.iter(),
+        }
+    }
+}
+
+// Written out so that the copy, too, holds room for every berth.
+impl Clone for TouchedBerths {
+    fn clone(&self) -> Self {
+        let mut touched = Vec::with_capacity(self.num_berths());
+        touched.extend_from_slice(&self.touched);
+        Self {
+            marked: self.marked.clone(),
+            touched,
+        }
+    }
+}
+
+impl fmt::Display for TouchedBerths {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "touched:")?;
+        for berth in self.iter_touched_berths() {
+            write!(f, " {berth}")?;
+        }
+        Ok(())
     }
 }
 
 impl<'a> IntoIterator for &'a TouchedBerths {
-    type Item = &'a bool;
-    type IntoIter = std::slice::Iter<'a, bool>;
+    type Item = BerthIndex;
+    type IntoIter = TouchedBerthsIter<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_touched_berths()
+    }
+}
+
+/// The marked berths of a [`TouchedBerths`], in the order of their first mark.
+#[derive(Clone, Debug)]
+pub struct TouchedBerthsIter<'a> {
+    /// The walk over the list of marked berths.
+    inner: std::slice::Iter<'a, BerthIndex>,
+}
+
+impl Iterator for TouchedBerthsIter<'_> {
+    type Item = BerthIndex;
 
     #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter {
-        self.touched.iter()
+    fn next(&mut self) -> Option<BerthIndex> {
+        self.inner.next().copied()
     }
-}
-
-impl<'a> IntoIterator for &'a mut TouchedBerths {
-    type Item = &'a mut bool;
-    type IntoIter = std::slice::IterMut<'a, bool>;
 
     #[inline(always)]
-    fn into_iter(self) -> Self::IntoIter {
-        self.touched.iter_mut()
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
-impl IntoIterator for TouchedBerths {
-    type Item = bool;
-    type IntoIter = std::vec::IntoIter<bool>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.touched.into_iter()
+impl DoubleEndedIterator for TouchedBerthsIter<'_> {
+    #[inline(always)]
+    fn next_back(&mut self) -> Option<BerthIndex> {
+        self.inner.next_back().copied()
     }
 }
 
-impl std::fmt::Debug for TouchedBerths {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TouchedBerths")
-            .field("touched", &self.touched)
-            .finish()
+impl ExactSizeIterator for TouchedBerthsIter<'_> {}
+
+impl FusedIterator for TouchedBerthsIter<'_> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn berth(index: usize) -> BerthIndex {
+        BerthIndex::new(index)
     }
-}
 
-impl std::fmt::Display for TouchedBerths {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Touched Berths: [")?;
+    #[test]
+    fn test_a_berth_touched_twice_is_walked_once_in_the_order_of_its_first_touch() {
+        let mut touched = TouchedBerths::new(4);
+        touched.touch(berth(2));
+        touched.touch(berth(0));
+        touched.touch(berth(2));
+        assert_eq!(
+            touched.iter_touched_berths().collect::<Vec<_>>(),
+            [berth(2), berth(0)]
+        );
+        assert!(touched.is_touched(berth(0)) && !touched.is_touched(berth(1)));
+    }
 
-        let mut first = true;
-        for (idx, &is_touched) in self.touched.iter().enumerate() {
-            if is_touched {
-                if !first {
-                    write!(f, ", ")?;
-                }
-                write!(f, "{}", idx)?;
-                first = false;
+    #[test]
+    fn test_reset_unmarks_every_berth() {
+        let mut touched = TouchedBerths::new(3);
+        touched.touch(berth(1));
+        touched.reset();
+        assert_eq!(touched.iter_touched_berths().len(), 0);
+        assert!(!touched.is_touched(berth(1)));
+    }
+
+    #[test]
+    fn test_resize_empties_the_set_and_counts_the_new_berths() {
+        let mut touched = TouchedBerths::new(2);
+        touched.touch(berth(1));
+        touched.resize(5);
+        assert_eq!(touched.num_berths(), 5);
+        assert_eq!(touched.iter_touched_berths().len(), 0);
+        touched.touch(berth(4));
+        assert!(touched.is_touched(berth(4)));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "called `TouchedBerths::touch` with Berth 3, outside a set of 3 berths"
+    )]
+    fn test_touch_refuses_a_berth_outside() {
+        TouchedBerths::new(3).touch(berth(3));
+    }
+
+    proptest! {
+        #[test]
+        fn test_marks_match_a_set_and_touch_matches_its_unchecked_twin(
+            num_berths in 1_usize..8,
+            marks in proptest::collection::vec(0_usize..8, 0..20),
+        ) {
+            let mut checked = TouchedBerths::new(num_berths);
+            let mut unchecked = TouchedBerths::new(num_berths);
+            let mut reference = std::collections::BTreeSet::new();
+            for &mark in marks.iter().filter(|&&mark| mark < num_berths) {
+                checked.touch(berth(mark));
+                // SAFETY: `mark` is below the number of berths, as the filter keeps.
+                unsafe { unchecked.touch_unchecked(berth(mark)) };
+                reference.insert(mark);
+            }
+            prop_assert_eq!(&checked, &unchecked);
+            let walked: std::collections::BTreeSet<_> = checked.iter_touched_berths().map(BerthIndex::index).collect();
+            prop_assert_eq!(walked.len(), checked.iter_touched_berths().len());
+            prop_assert_eq!(&walked, &reference);
+            for index in 0..num_berths {
+                prop_assert_eq!(checked.is_touched(berth(index)), reference.contains(&index));
             }
         }
-
-        write!(f, "]")
     }
 }

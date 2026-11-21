@@ -20,5 +20,5 @@ mod mutator;
 pub use diff::{DiffEdgeIter, DiffReallocationIter, ScheduleGraphDiff, ScheduleGraphDiffEdge};
 pub use graph::{BerthTopologyIter, ScheduleGraph, VesselSequenceIter};
 pub use mutator::Mutator;
-pub use touched_berths::{TouchedBerths, TouchedIndicesIter, UntouchedBerthsIter};
+pub use touched_berths::{TouchedBerths, TouchedBerthsIter};
 pub use undo_log::{ScheduleGraphUndoLog, UndoInstruction, UndoLogIter};

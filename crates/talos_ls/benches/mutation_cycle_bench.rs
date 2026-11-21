@@ -76,7 +76,7 @@ fn bench_mutation_cycle(c: &mut Criterion) {
     for (name, is_worst_case) in scenarios.iter() {
         let (mut graph, mut candidate, accepted, model) = setup_scenario(*is_worst_case);
 
-        let mut undo = ScheduleGraphUndoLog::preallocated(250);
+        let mut undo = ScheduleGraphUndoLog::new(1);
         let mut diff = ScheduleGraphDiff::new();
         let mut touched = TouchedBerths::new(20);
         let evaluator = |_: &Model<i64>, _: VesselIndex, _: BerthIndex, start: i64| Some(start);
@@ -243,7 +243,7 @@ fn bench_single_mutation_cycle(c: &mut Criterion) {
     for (name, is_worst_case) in scenarios.iter() {
         let (mut graph, mut candidate, accepted, model) = setup_scenario(*is_worst_case);
 
-        let mut undo = ScheduleGraphUndoLog::preallocated(250);
+        let mut undo = ScheduleGraphUndoLog::new(1);
         let mut diff = ScheduleGraphDiff::new();
         let mut touched = TouchedBerths::new(20);
         let evaluator = |_: &Model<i64>, _: VesselIndex, _: BerthIndex, start: i64| Some(start);

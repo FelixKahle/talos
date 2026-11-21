@@ -327,33 +327,11 @@ pub struct ScheduleGraphUndoLog {
 }
 
 impl ScheduleGraphUndoLog {
-    const MIN_CAP_OPS: usize = 16;
-    const OPS_PER_VESSEL: usize = 8;
-
-    /// Creates a new undo log with the given initial capacity.
+    /// The empty log, with room for `capacity` instructions.
     #[inline]
     pub fn new(capacity: usize) -> Self {
         Self {
             stack: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Creates a new undo log heuristically sized for the given number of vessels.
-    #[inline]
-    pub fn preallocated(num_vessels: usize) -> Self {
-        let capacity = num_vessels
-            .saturating_mul(Self::OPS_PER_VESSEL)
-            .max(Self::MIN_CAP_OPS);
-        Self {
-            stack: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Ensures the log has capacity for `target_ops` operations.
-    #[inline(always)]
-    pub fn ensure_capacity(&mut self, target_ops: usize) {
-        if self.stack.capacity() < target_ops {
-            self.stack.reserve(target_ops - self.stack.capacity());
         }
     }
 
@@ -749,21 +727,15 @@ mod tests {
     }
 
     #[test]
-    fn test_capacity_and_clear() {
-        let mut log = ScheduleGraphUndoLog::preallocated(10);
-        assert!(log.stack.capacity() >= 80);
-
-        let small = ScheduleGraphUndoLog::preallocated(1);
-        assert!(small.stack.capacity() >= 16);
-
+    fn test_clear_keeps_the_memory() {
+        let mut log = ScheduleGraphUndoLog::new(4);
         log.push_swap_vessels(v(0), v(1));
         log.push_reverse_segment(v(2), v(3));
         assert_eq!(log.len(), 2);
-
-        let cap = log.stack.capacity();
+        let capacity = log.stack.capacity();
         log.clear();
         assert!(log.is_empty());
-        assert_eq!(log.stack.capacity(), cap);
+        assert_eq!(log.stack.capacity(), capacity);
     }
 
     #[test]

@@ -96,7 +96,7 @@ impl<T> Engine<T> {
             best_state: make_state(),
             topology_graph,
             buffered_topology_graph,
-            schedule_graph_undo_log: ScheduleGraphUndoLog::preallocated(num_vessels),
+            schedule_graph_undo_log: ScheduleGraphUndoLog::new(1),
             schedule_graph_diff: ScheduleGraphDiff::new(),
             buffered_schedule_graph_diff: ScheduleGraphDiff::new(),
             touched: TouchedBerths::new(num_berths),
@@ -771,7 +771,6 @@ impl<T> Engine<T> {
         self.buffered_state.resize(num_vessels, num_berths);
         self.best_state.resize(num_vessels, num_berths);
         self.touched.resize(num_berths);
-        self.schedule_graph_undo_log.ensure_capacity(num_vessels);
 
         // topology_graph and buffered_topology_graph are handled by
         // overwrite_from_slices / overwrite_from_graph which grow internally.
