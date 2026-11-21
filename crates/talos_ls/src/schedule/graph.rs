@@ -867,6 +867,26 @@ impl ScheduleGraph {
         }
     }
 
+    /// Whether `first ..= last` is a segment of one berth: both are vessels of the graph, and `last` is `first` or
+    /// follows it on its berth.
+    ///
+    /// The cost is the segment's length, or the rest of the berth if `last` does not follow `first`; the steps on
+    /// segments check their precondition by it in a debug build.
+    pub(super) fn is_segment(&self, first: VesselIndex, last: VesselIndex) -> bool {
+        if self
+            .vessel_outside(first)
+            .or(self.vessel_outside(last))
+            .is_some()
+        {
+            return false;
+        }
+        // SAFETY: `first` and `last` are the graph's, as the check above found.
+        let segment = unsafe { self.segment_unchecked(first, last) };
+        // The walk ends at `last`'s successor or at the first sentinel; it yields `last` last exactly when it
+        // reached the successor, since the node it yields before that is `last`.
+        segment.last() == Some(last)
+    }
+
     /// The nodes of the ring of `berth`: its sentinel, its vessels from head to tail, and its sentinel again.
     ///
     /// # Panics
@@ -996,6 +1016,11 @@ impl ScheduleGraph {
         if a_first == b_first {
             return;
         }
+        debug_assert!(
+            self.is_segment(a_first, a_last) && self.is_segment(b_first, b_last),
+            "called `ScheduleGraph::swap_segments_unchecked` with {a_first} ..= {a_last} or {b_first} ..= {b_last}, \
+             which is no segment of one berth"
+        );
         // SAFETY: both first vessels are the graph's, the precondition of this function.
         let (berth_a, berth_b) = unsafe {
             (
@@ -1057,6 +1082,11 @@ impl ScheduleGraph {
             "called `ScheduleGraph::reverse_segment_unchecked` with {first} or {last}, outside a graph of {} \
              vessels",
             self.num_vessels()
+        );
+        debug_assert!(
+            self.is_segment(first, last),
+            "called `ScheduleGraph::reverse_segment_unchecked` with {first} ..= {last}, which is no \
+             segment of one berth"
         );
         // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes lie in the arena
         // by the invariant of `ScheduleGraph`.
@@ -1271,6 +1301,11 @@ impl ScheduleGraph {
              graph of {} vessels",
             self.num_vessels()
         );
+        debug_assert!(
+            self.is_segment(first, last),
+            "called `ScheduleGraph::relocate_segment_after_unchecked` with {first} ..= {last}, which is no \
+             segment of one berth"
+        );
         // SAFETY: the three vessels are the graph's, the precondition of this function, so their nodes lie in the
         // arena by the invariant of `ScheduleGraph`.
         unsafe {
@@ -1336,6 +1371,11 @@ impl ScheduleGraph {
             "called `ScheduleGraph::relocate_segment_before_unchecked` with {first}, {last} or {reference}, \
              outside a graph of {} vessels",
             self.num_vessels()
+        );
+        debug_assert!(
+            self.is_segment(first, last),
+            "called `ScheduleGraph::relocate_segment_before_unchecked` with {first} ..= {last}, which is no \
+             segment of one berth"
         );
         // SAFETY: the three vessels are the graph's, the precondition of this function, so their nodes lie in the
         // arena by the invariant of `ScheduleGraph`.
@@ -1403,6 +1443,11 @@ impl ScheduleGraph {
             self.num_vessels(),
             self.num_berths()
         );
+        debug_assert!(
+            self.is_segment(first, last),
+            "called `ScheduleGraph::relocate_segment_to_head_unchecked` with {first} ..= {last}, which is no \
+             segment of one berth"
+        );
         let sentinel = self.sentinel_of(berth);
         // SAFETY: the vessels and the berth are the graph's, the precondition of this function, so the vessels'
         // nodes and the berth's sentinel lie in the arena by the invariant of `ScheduleGraph`.
@@ -1463,6 +1508,11 @@ impl ScheduleGraph {
              a graph of {} vessels and {} berths",
             self.num_vessels(),
             self.num_berths()
+        );
+        debug_assert!(
+            self.is_segment(first, last),
+            "called `ScheduleGraph::relocate_segment_to_tail_unchecked` with {first} ..= {last}, which is no \
+             segment of one berth"
         );
         let sentinel = self.sentinel_of(berth);
         // Before the sentinel rather than after the tail, which lies inside the segment when it ends the berth.
@@ -1793,6 +1843,45 @@ mod tests {
         // SAFETY: the vessels and the berth are the graph's.
         unsafe { graph.relocate_segment_to_tail_unchecked(vessel(3), vessel(4), berth(1)) };
         check_berth(&graph, 1, &[3, 4]);
+    }
+
+    // B0: V0 V1. From V1 the ring runs through the sentinel of B0 back to V0, so V1 ..= V0 is no segment of a berth.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(
+        expected = "called `ScheduleGraph::reverse_segment_unchecked` with Vessel 1 ..= Vessel 0, which is no \
+                    segment of one berth"
+    )]
+    fn test_reverse_segment_refuses_a_segment_through_a_sentinel() {
+        let mut graph = ScheduleGraph::from_slices(&[berth(0), berth(0)], &[0, 1], 1);
+        graph.reverse_segment(vessel(1), vessel(0));
+    }
+
+    // B0: V0 V1, B1: V2 V3. From V1 the ring runs through the sentinel of B0 back to V0.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(
+        expected = "called `ScheduleGraph::swap_segments_unchecked` with Vessel 1 ..= Vessel 0 or Vessel 2 ..= \
+                    Vessel 2, which is no segment of one berth"
+    )]
+    fn test_swap_segments_refuses_a_segment_through_a_sentinel() {
+        let mut graph =
+            ScheduleGraph::from_slices(&[berth(0), berth(0), berth(1), berth(1)], &[0, 1, 0, 1], 2);
+        graph.swap_segments(vessel(1), vessel(0), vessel(2), vessel(2));
+    }
+
+    #[test]
+    fn test_is_segment_holds_exactly_for_a_vessel_and_one_that_follows_it_on_its_berth() {
+        let graph = standard_fixture();
+        assert!(graph.is_segment(vessel(0), vessel(0)));
+        assert!(graph.is_segment(vessel(0), vessel(1)));
+        assert!(graph.is_segment(vessel(2), vessel(1)));
+        assert!(graph.is_segment(vessel(3), vessel(4)));
+        assert!(!graph.is_segment(vessel(1), vessel(0)));
+        assert!(!graph.is_segment(vessel(1), vessel(2)));
+        assert!(!graph.is_segment(vessel(0), vessel(3)));
+        assert!(!graph.is_segment(vessel(0), vessel(6)));
+        assert!(!graph.is_segment(vessel(6), vessel(0)));
     }
 
     #[test]
