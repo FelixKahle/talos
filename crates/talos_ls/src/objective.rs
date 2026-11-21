@@ -1,215 +1,250 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! The cost of serving one vessel at one berth from one start, which the decoder sums over a schedule.
+//!
+//! Each cost comes as a checked function and its unchecked twin; a cost is `None` where the vessel may not use the
+//! berth or would leave after its latest departure.
+
 use talos_core::SolverNumeric;
 use talos_model::{BerthIndex, Model, VesselIndex};
 
-/// Calculates the weighted completion time cost for a vessel assigned to a berth at a given start time.
+/// The weighted completion time of `vessel` served at `berth` from `start_time`: its weight times the time its
+/// service ends, or `None` if it may not use `berth` or would end after its latest departure.
 ///
-/// # Mathematical Note
-///
-/// This function calculates **Weighted Completion Time** ($C_j \times w_j$) rather than
-/// strict **Weighted Flow Time** ($(C_j - r_j) \times w_j$).
-///
-/// Since the term $\sum (r_j \times w_j)$ is constant for a given problem instance, minimizing
-/// Weighted Completion Time yields the **exact same optimal schedule** as minimizing Weighted
-/// Flow Time. Excluding the subtraction of the arrival time $r_j$ allows the solver to perform
-/// fewer arithmetic operations in the hot path.
+/// The weighted completion time differs from the weighted turnaround time by the weighted arrival times, a sum
+/// fixed by the model, so both rank schedules alike; this one leaves out a subtraction per vessel.
 ///
 /// # Panics
 ///
-/// In debug builds, this function will panic if `vessel_index` is not within `0..model.num_vessels()`
-/// or if `berth_index` is not within `0..model.num_berths()`.
+/// Panics if `vessel` or `berth` is not one of `model`'s.
 #[inline(always)]
+#[track_caller]
 pub fn calculate_weighted_completion_time<T>(
     model: &Model<T>,
-    vessel_index: VesselIndex,
-    berth_index: BerthIndex,
+    vessel: VesselIndex,
+    berth: BerthIndex,
     start_time: T,
 ) -> Option<T>
 where
     T: SolverNumeric,
 {
-    debug_assert!(
-        vessel_index.index() < model.num_vessels(),
-        "called `calculate_weighted_completion_time` with vessel index out of bounds: the len is {} but the index is {}",
-        model.num_vessels(),
-        vessel_index.index()
-    );
-
-    debug_assert!(
-        berth_index.index() < model.num_berths(),
-        "called `calculate_weighted_completion_time` with berth index out of bounds: the len is {} but the index is {}",
-        model.num_berths(),
-        berth_index.index()
-    );
-
-    let deadline = model.vessel_latest_departure_time(vessel_index);
-    let pt = model.vessel_processing_time(vessel_index, berth_index)?;
-    let completion_time = start_time + pt;
-
-    if completion_time > deadline {
+    let processing_time = model.vessel_processing_time(vessel, berth)?;
+    let completion_time = start_time + processing_time;
+    if completion_time > model.vessel_latest_departure_time(vessel) {
         return None;
     }
-
-    let weight = model.vessel_weight(vessel_index);
-    Some(completion_time * weight)
+    Some(completion_time * model.vessel_weight(vessel))
 }
 
-/// Calculates the weighted completion time cost for a vessel assigned to a berth at a given start time.
-///
-/// # Mathematical Note
-///
-/// This function calculates **Weighted Completion Time** ($C_j \times w_j$) rather than
-/// strict **Weighted Flow Time** ($(C_j - r_j) \times w_j$).
-///
-/// Since the term $\sum (r_j \times w_j)$ is constant for a given problem instance, minimizing
-/// Weighted Completion Time yields the **exact same optimal schedule** as minimizing Weighted
-/// Flow Time. Excluding the subtraction of the arrival time $r_j$ allows the solver to perform
-/// fewer arithmetic operations in the hot path.
-///
-/// # Panics
-///
-/// In debug builds, this function will panic if `vessel_index` is not within `0..model.num_vessels()`
-/// or if `berth_index` is not within `0..model.num_berths()`.
+/// The weighted completion time of `vessel` served at `berth` from `start_time`, for a vessel and a berth the
+/// caller knows to be `model`'s.
 ///
 /// # Safety
 ///
-/// The caller must ensure that `vessel_index` is within `0..model.num_vessels()` and
-/// `berth_index` is within `0..model.num_berths()`.
+/// `vessel` and `berth` must be `model`'s, the condition [`calculate_weighted_completion_time`] checks.
 #[inline(always)]
 pub unsafe fn calculate_weighted_completion_time_unchecked<T>(
     model: &Model<T>,
-    vessel_index: VesselIndex,
-    berth_index: BerthIndex,
+    vessel: VesselIndex,
+    berth: BerthIndex,
     start_time: T,
 ) -> Option<T>
 where
     T: SolverNumeric,
 {
     debug_assert!(
-        vessel_index.index() < model.num_vessels(),
-        "called `calculate_weighted_completion_time_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
+        vessel.index() < model.num_vessels() && berth.index() < model.num_berths(),
+        "called `calculate_weighted_completion_time_unchecked` with {vessel} or {berth}, outside a model of {} \
+         vessels and {} berths",
         model.num_vessels(),
-        vessel_index.index()
+        model.num_berths()
     );
-
-    debug_assert!(
-        berth_index.index() < model.num_berths(),
-        "called `calculate_weighted_completion_time_unchecked` with berth index out of bounds: the len is {} but the index is {}",
-        model.num_berths(),
-        berth_index.index()
-    );
-
-    let deadline = unsafe { model.vessel_latest_departure_time_unchecked(vessel_index) };
-    let pt = unsafe { model.vessel_processing_time_unchecked(vessel_index, berth_index) }?;
-    let completion_time = start_time + pt;
-
+    // SAFETY: `vessel` and `berth` are the model's, the precondition of this function.
+    let processing_time = unsafe { model.vessel_processing_time_unchecked(vessel, berth) }?;
+    let completion_time = start_time + processing_time;
+    // SAFETY: `vessel` is the model's, the precondition of this function.
+    let deadline = unsafe { model.vessel_latest_departure_time_unchecked(vessel) };
     if completion_time > deadline {
         return None;
     }
-
-    let weight = unsafe { model.vessel_weight_unchecked(vessel_index) };
+    // SAFETY: `vessel` is the model's, the precondition of this function.
+    let weight = unsafe { model.vessel_weight_unchecked(vessel) };
     Some(completion_time * weight)
 }
 
-/// Calculates the weighted total turnaround time (or flow time) cost for a vessel assigned to a berth at a given start time.
-///
-/// The turnaround time is defined as the completion time minus the arrival time of the vessel.
+/// The weighted turnaround time of `vessel` served at `berth` from `start_time`: its weight times the time from
+/// its arrival to the end of its service, or `None` if it may not use `berth` or would end after its latest
+/// departure.
 ///
 /// # Panics
 ///
-/// In debug builds, this function will panic if `vessel_index` is not within `0..model.num_vessels()`
-/// or if `berth_index` is not within `0..model.num_berths()`.
+/// Panics if `vessel` or `berth` is not one of `model`'s.
 #[inline(always)]
+#[track_caller]
 pub fn calculate_weighted_turnaround_time<T>(
     model: &Model<T>,
-    vessel_index: VesselIndex,
-    berth_index: BerthIndex,
+    vessel: VesselIndex,
+    berth: BerthIndex,
     start_time: T,
 ) -> Option<T>
 where
     T: SolverNumeric,
 {
-    debug_assert!(
-        vessel_index.index() < model.num_vessels(),
-        "called `calculate_weighted_turnaround_time` with vessel index out of bounds: the len is {} but the index is {}",
-        model.num_vessels(),
-        vessel_index.index()
-    );
-
-    debug_assert!(
-        berth_index.index() < model.num_berths(),
-        "called `calculate_weighted_turnaround_time` with berth index out of bounds: the len is {} but the index is {}",
-        model.num_berths(),
-        berth_index.index()
-    );
-
-    let deadline = model.vessel_latest_departure_time(vessel_index);
-    let pt = model.vessel_processing_time(vessel_index, berth_index)?;
-    let completion_time = start_time + pt;
-
-    if completion_time > deadline {
+    let processing_time = model.vessel_processing_time(vessel, berth)?;
+    let completion_time = start_time + processing_time;
+    if completion_time > model.vessel_latest_departure_time(vessel) {
         return None;
     }
-
-    let arrival_time = model.vessel_arrival_time(vessel_index);
-    let weight = model.vessel_weight(vessel_index);
-
-    let turnaround_time = completion_time - arrival_time;
-
-    Some(turnaround_time * weight)
+    let turnaround_time = completion_time - model.vessel_arrival_time(vessel);
+    Some(turnaround_time * model.vessel_weight(vessel))
 }
 
-/// Calculates the weighted total turnaround time (or flow time) cost for a vessel assigned to a berth at a given start time.
-///
-/// The turnaround time is defined as the completion time minus the arrival time of the vessel.
-///
-/// # Panics
-///
-/// In debug builds, this function will panic if `vessel_index` is not within `0..model.num_vessels()`
-/// or if `berth_index` is not within `0..model.num_berths()`.
+/// The weighted turnaround time of `vessel` served at `berth` from `start_time`, for a vessel and a berth the
+/// caller knows to be `model`'s.
 ///
 /// # Safety
 ///
-/// The caller must ensure that `vessel_index` is within `0..model.num_vessels()` and
-/// `berth_index` is within `0..model.num_berths()`.
+/// `vessel` and `berth` must be `model`'s, the condition [`calculate_weighted_turnaround_time`] checks.
 #[inline(always)]
 pub unsafe fn calculate_weighted_turnaround_time_unchecked<T>(
     model: &Model<T>,
-    vessel_index: VesselIndex,
-    berth_index: BerthIndex,
+    vessel: VesselIndex,
+    berth: BerthIndex,
     start_time: T,
 ) -> Option<T>
 where
     T: SolverNumeric,
 {
     debug_assert!(
-        vessel_index.index() < model.num_vessels(),
-        "called `calculate_weighted_turnaround_time_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
+        vessel.index() < model.num_vessels() && berth.index() < model.num_berths(),
+        "called `calculate_weighted_turnaround_time_unchecked` with {vessel} or {berth}, outside a model of {} \
+         vessels and {} berths",
         model.num_vessels(),
-        vessel_index.index()
+        model.num_berths()
     );
-
-    debug_assert!(
-        berth_index.index() < model.num_berths(),
-        "called `calculate_weighted_turnaround_time_unchecked` with berth index out of bounds: the len is {} but the index is {}",
-        model.num_berths(),
-        berth_index.index()
-    );
-
-    let deadline = unsafe { model.vessel_latest_departure_time_unchecked(vessel_index) };
-    let pt = unsafe { model.vessel_processing_time_unchecked(vessel_index, berth_index) }?;
-    let completion_time = start_time + pt;
-
+    // SAFETY: `vessel` and `berth` are the model's, the precondition of this function.
+    let processing_time = unsafe { model.vessel_processing_time_unchecked(vessel, berth) }?;
+    let completion_time = start_time + processing_time;
+    // SAFETY: `vessel` is the model's, the precondition of this function.
+    let deadline = unsafe { model.vessel_latest_departure_time_unchecked(vessel) };
     if completion_time > deadline {
         return None;
     }
+    // SAFETY: `vessel` is the model's, the precondition of this function.
+    let (arrival_time, weight) = unsafe {
+        (
+            model.vessel_arrival_time_unchecked(vessel),
+            model.vessel_weight_unchecked(vessel),
+        )
+    };
+    Some((completion_time - arrival_time) * weight)
+}
 
-    let arrival_time = unsafe { model.vessel_arrival_time_unchecked(vessel_index) };
-    let weight = unsafe { model.vessel_weight_unchecked(vessel_index) };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use talos_core::ClosedOpenInterval;
 
-    let turnaround_time = completion_time - arrival_time;
+    /// V0 arrives at 10, must leave by 50 and weighs 2; V1 arrives at 0, must leave by 100 and weighs 3. V0 takes
+    /// 5 at B0 and may not use B1; V1 takes 7 at either.
+    fn two_vessels() -> Model<i64> {
+        Model::new(
+            vec![10, 0],
+            vec![50, 100],
+            vec![2, 3],
+            vec![Some(5), None, Some(7), Some(7)],
+            vec![
+                vec![ClosedOpenInterval::new(0, 1000)],
+                vec![ClosedOpenInterval::new(0, 1000)],
+            ],
+        )
+    }
 
-    Some(turnaround_time * weight)
+    fn vessel(index: usize) -> VesselIndex {
+        VesselIndex::new(index)
+    }
+
+    fn berth(index: usize) -> BerthIndex {
+        BerthIndex::new(index)
+    }
+
+    #[test]
+    fn test_completion_time_weighs_the_end_of_service() {
+        // V0 from 20 ends at 25, weighing 2.
+        assert_eq!(
+            calculate_weighted_completion_time(&two_vessels(), vessel(0), berth(0), 20),
+            Some(50)
+        );
+    }
+
+    #[test]
+    fn test_turnaround_time_weighs_the_time_since_arrival() {
+        // V0 from 20 ends at 25, 15 after its arrival at 10, weighing 2.
+        assert_eq!(
+            calculate_weighted_turnaround_time(&two_vessels(), vessel(0), berth(0), 20),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn test_a_berth_the_vessel_may_not_use_has_no_cost() {
+        let model = two_vessels();
+        assert_eq!(
+            calculate_weighted_completion_time(&model, vessel(0), berth(1), 20),
+            None
+        );
+        assert_eq!(
+            calculate_weighted_turnaround_time(&model, vessel(0), berth(1), 20),
+            None
+        );
+    }
+
+    #[test]
+    fn test_a_service_that_ends_after_the_latest_departure_has_no_cost() {
+        let model = two_vessels();
+        // V0 from 45 ends at 50, its latest departure; from 46 it ends after it.
+        assert_eq!(
+            calculate_weighted_completion_time(&model, vessel(0), berth(0), 45),
+            Some(100)
+        );
+        assert_eq!(
+            calculate_weighted_completion_time(&model, vessel(0), berth(0), 46),
+            None
+        );
+        assert_eq!(
+            calculate_weighted_turnaround_time(&model, vessel(0), berth(0), 46),
+            None
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_completion_time_refuses_a_vessel_outside_the_model() {
+        let _ = calculate_weighted_completion_time(&two_vessels(), vessel(2), berth(0), 0);
+    }
+
+    proptest! {
+        #[test]
+        fn test_checked_costs_match_their_unchecked_twins(
+            vessel_index in 0_usize..2,
+            berth_index in 0_usize..2,
+            start in -100_i64..200,
+        ) {
+            let model = two_vessels();
+            let (vessel, berth) = (vessel(vessel_index), berth(berth_index));
+            // SAFETY: both vessels and both berths are the model's.
+            unsafe {
+                prop_assert_eq!(
+                    calculate_weighted_completion_time(&model, vessel, berth, start),
+                    calculate_weighted_completion_time_unchecked(&model, vessel, berth, start)
+                );
+                prop_assert_eq!(
+                    calculate_weighted_turnaround_time(&model, vessel, berth, start),
+                    calculate_weighted_turnaround_time_unchecked(&model, vessel, berth, start)
+                );
+            }
+        }
+    }
 }
