@@ -433,7 +433,7 @@ impl<'a> Mutator<'a> {
         let reference_prev = unsafe { self.graph.prev_node_unchecked(reference_node) };
         let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
 
-        if vessel_node == reference_node || vessel_prev == reference_prev {
+        if vessel_node == reference_node || vessel_node == reference_prev {
             return;
         }
 
@@ -655,7 +655,7 @@ impl<'a> Mutator<'a> {
         let reference_prev = unsafe { self.graph.prev_node_unchecked(reference_node) };
         let first_prev = unsafe { self.graph.prev_node_unchecked(first_node) };
 
-        if first_prev == reference_prev {
+        if last_node == reference_prev {
             return;
         }
 
@@ -1066,7 +1066,7 @@ impl<'a> Mutator<'a> {
         let reference_prev = unsafe { self.graph.prev_node_unchecked(reference_node) };
         let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
 
-        if vessel_node == reference_node || vessel_prev == reference_prev {
+        if vessel_node == reference_node || vessel_node == reference_prev {
             return;
         }
 
@@ -1289,7 +1289,7 @@ impl<'a> Mutator<'a> {
         let reference_prev = unsafe { self.graph.prev_node_unchecked(reference_node) };
         let first_prev = unsafe { self.graph.prev_node_unchecked(first_node) };
 
-        if first_prev == reference_prev {
+        if last_node == reference_prev {
             return;
         }
 
@@ -1732,6 +1732,30 @@ mod tests {
 
         let reallocs = extract_reallocations(&diff);
         assert_eq!(reallocs, vec![(v(3), b(1), b(2)), (v(4), b(1), b(2))]);
+    }
+
+    // V1 already stands directly before V2, and the segment [V0, V1] too: neither move changes anything, so none
+    // is recorded and no berth is touched.
+    #[test]
+    fn test_relocating_before_the_vessel_already_followed_records_nothing() {
+        let mut graph = setup_graph();
+        let original = graph.clone();
+        let mut undo = ScheduleGraphUndoLog::new(10);
+        let mut diff = ScheduleGraphDiff::new();
+        let mut touched = TouchedBerths::new(graph.num_berths());
+        {
+            let mut m = Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched);
+            m.relocate_before(v(1), v(2));
+            m.relocate_segment_before(v(0), v(1), v(2));
+            // SAFETY: every vessel handed over is one of the graph's.
+            unsafe {
+                m.relocate_before_unchecked(v(1), v(2));
+                m.relocate_segment_before_unchecked(v(0), v(1), v(2));
+            }
+        }
+        assert_eq!(graph, original);
+        assert!(undo.is_empty());
+        assert_eq!(touched.iter_touched_berths().count(), 0);
     }
 
     #[test]
