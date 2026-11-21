@@ -39,14 +39,40 @@ pub enum NeighborhoodSelection {
 ///
 /// The score of a neighbourhood is its average improvement, divided by the largest improvement seen, plus the
 /// bonus `exploration * sqrt(2 ln(1 + samples) / samples of the neighbourhood)`; a neighbourhood not yet sampled
-/// scores infinity.
+/// scores infinity. The memory is the weight of the newest improvement in a neighbourhood's average, in `(0, 1]`:
+/// the average moves by this fraction of the distance to the newest improvement. The exploration weight is finite
+/// and not negative; the standard UCB1 constant is the square root of two.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MultiArmedBandit {
-    /// The weight of the newest improvement in a neighbourhood's average, in `(0, 1]`: the average moves by this
-    /// fraction of the distance to the newest improvement.
-    pub memory: f64,
-    /// The weight of the exploration bonus; the standard UCB1 constant is the square root of two.
-    pub exploration: f64,
+    memory: f64,
+    exploration: f64,
+}
+
+impl MultiArmedBandit {
+    /// The bandit of `memory` and `exploration`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `memory` is not in `(0, 1]` or `exploration` is not finite and at least zero.
+    pub fn new(memory: f64, exploration: f64) -> Self {
+        match Self::try_new(memory, exploration) {
+            Some(bandit) => bandit,
+            None => panic!(
+                "called `MultiArmedBandit::new` with memory {memory} and exploration {exploration}, not a memory in \
+                 (0, 1] and a finite exploration of at least zero"
+            ),
+        }
+    }
+
+    /// The bandit of [`new`](Self::new), or `None` if `memory` is not in `(0, 1]` or `exploration` is not finite
+    /// and at least zero.
+    pub fn try_new(memory: f64, exploration: f64) -> Option<Self> {
+        let valid = memory > 0.0 && memory <= 1.0 && exploration.is_finite() && exploration >= 0.0;
+        valid.then_some(Self {
+            memory,
+            exploration,
+        })
+    }
 }
 
 impl Default for MultiArmedBandit {
@@ -420,6 +446,31 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_armed_bandit_refuses_a_memory_outside_its_range_and_an_exploration_that_is_not_finite()
+     {
+        assert_eq!(
+            MultiArmedBandit::try_new(1.0, 0.0),
+            Some(MultiArmedBandit::new(1.0, 0.0))
+        );
+        for (memory, exploration) in [
+            (0.0, 1.0),
+            (1.5, 1.0),
+            (f64::NAN, 1.0),
+            (0.5, -1.0),
+            (0.5, f64::INFINITY),
+            (0.5, f64::NAN),
+        ] {
+            assert_eq!(MultiArmedBandit::try_new(memory, exploration), None);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "called `MultiArmedBandit::new` with memory 0 and exploration 1,")]
+    fn test_multi_armed_bandit_new_refuses_a_memory_of_zero() {
+        let _ = MultiArmedBandit::new(0.0, 1.0);
+    }
+
+    #[test]
     fn test_bandit_scores_an_unsampled_neighborhood_infinite_and_ranks_it_first() {
         let mut bandit = Bandit::new(3, MultiArmedBandit::default());
         bandit.samples = vec![4, 0, 2];
@@ -432,13 +483,7 @@ mod tests {
 
     #[test]
     fn test_bandit_score_is_the_scaled_average_plus_the_bonus() {
-        let mut bandit = Bandit::new(
-            2,
-            MultiArmedBandit {
-                memory: 0.5,
-                exploration: 1.0,
-            },
-        );
+        let mut bandit = Bandit::new(2, MultiArmedBandit::new(0.5, 1.0));
         bandit.samples = vec![2, 2];
         bandit.total_samples = 4;
         bandit.averages = vec![3.0, 1.0];
@@ -454,13 +499,7 @@ mod tests {
     // taken: the next scan must leave every average as it was.
     #[test]
     fn test_bandit_credits_nothing_for_a_scan_without_an_accepted_move() {
-        let mut bandit = Bandit::new(
-            2,
-            MultiArmedBandit {
-                memory: 0.5,
-                exploration: 1.0,
-            },
-        );
+        let mut bandit = Bandit::new(2, MultiArmedBandit::new(0.5, 1.0));
         bandit.prepare(100.0);
         bandit.averages = vec![4.0, 4.0];
         bandit.prepare(100.0);
@@ -469,13 +508,7 @@ mod tests {
 
     #[test]
     fn test_bandit_credits_the_improvement_of_the_scan_to_the_neighborhood_of_the_accepted_move() {
-        let mut bandit = Bandit::new(
-            2,
-            MultiArmedBandit {
-                memory: 0.5,
-                exploration: 1.0,
-            },
-        );
+        let mut bandit = Bandit::new(2, MultiArmedBandit::new(0.5, 1.0));
         bandit.prepare(100.0);
         bandit.active_rank = 1;
         let credited = bandit.ranking[1];
@@ -496,13 +529,7 @@ mod tests {
 
     #[test]
     fn test_bandit_credits_a_kept_aside_move_to_the_neighborhood_that_made_it() {
-        let mut bandit = Bandit::new(
-            2,
-            MultiArmedBandit {
-                memory: 0.5,
-                exploration: 1.0,
-            },
-        );
+        let mut bandit = Bandit::new(2, MultiArmedBandit::new(0.5, 1.0));
         bandit.prepare(100.0);
         let maker = bandit.ranking[0];
         bandit.on_kept_aside();
