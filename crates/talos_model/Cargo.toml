@@ -10,3 +10,6 @@ publish.workspace = true
 
 [dependencies]
 talos_core = { workspace = true }
+
+# This crate is not yet brought in line with the workspace lints; it opts in with `workspace = true` once it is.
+[lints]

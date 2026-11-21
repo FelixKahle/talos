@@ -37,14 +37,16 @@ num-traits = { version = "0.2.19", default-features = false, features = ["std"] 
 itertools = { version = "0.14.0", default-features = false, features = ["use_std"] }
 # Randomness of the engine: seeded generators, and the thread generator for the unseeded tie-break.
 rand = { version = "0.10.0", default-features = false, features = ["std", "std_rng", "thread_rng"] }
-# Python bindings; `abi3-py38` builds one module for every CPython from 3.8 on.
-pyo3 = { version = "0.28.2", features = ["abi3-py38"] }
+# Python bindings: `macros` for the `#[pyfunction]` and `#[pyclass]` attributes, and `abi3-py38` builds one module
+# for every CPython from 3.8 on.
+pyo3 = { version = "0.28.2", default-features = false, features = ["macros", "abi3-py38"] }
 # Reading and writing the binary's results as JSON.
 serde = { version = "1.0.228", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
 
-# Benchmarks of the engine (dev-dependency only).
-criterion = "0.8.2"
+# Benchmarks of the engine (dev-dependency only); `cargo_bench_support` runs them under `cargo bench`, without the
+# plots and the thread pool of the default features.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 # Property tests (dev-dependency only); `std` is all the runner needs, without forking or timeouts.
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 

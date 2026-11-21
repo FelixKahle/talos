@@ -18,3 +18,6 @@ talos_model = { workspace = true }
 talos_ls = { workspace = true }
 itertools = { workspace = true }
 pyo3 = { workspace = true }
+
+# This crate is not yet brought in line with the workspace lints; it opts in with `workspace = true` once it is.
+[lints]

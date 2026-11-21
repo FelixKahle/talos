@@ -14,3 +14,6 @@ talos_model = { workspace = true }
 talos_ls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# This crate is not yet brought in line with the workspace lints; it opts in with `workspace = true` once it is.
+[lints]
