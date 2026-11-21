@@ -90,21 +90,6 @@ where
     pub const fn index(self) -> usize {
         widen(self.index)
     }
-
-    /// The id of kind `U` at the same position.
-    ///
-    /// This is for tables of two kinds whose positions correspond by construction, such as the first nodes of a
-    /// graph that stand for the vessels of a problem.
-    #[inline]
-    pub const fn map<U>(self) -> TypedIndex<U>
-    where
-        U: TypedIndexTag,
-    {
-        TypedIndex {
-            index: self.index,
-            tag: PhantomData,
-        }
-    }
 }
 
 impl<T> fmt::Debug for TypedIndex<T>
@@ -163,13 +148,6 @@ mod tests {
         const NAME: &'static str = "Test";
     }
 
-    #[derive(Debug)]
-    struct OtherTag;
-
-    impl TypedIndexTag for OtherTag {
-        const NAME: &'static str = "Other";
-    }
-
     type TestIndex = TypedIndex<TestTag>;
 
     // Every position beyond `u32::MAX` that a 64-bit `usize` can name.
@@ -213,13 +191,6 @@ mod tests {
         let id: TestIndex = 42.into();
         assert_eq!(id, TestIndex::new(42));
         assert_eq!(usize::from(id), 42);
-    }
-
-    #[test]
-    fn test_map_keeps_the_position() {
-        let other: TypedIndex<OtherTag> = TestIndex::new(7).map();
-        assert_eq!(other.index(), 7);
-        assert_eq!(format!("{other}"), "Other 7");
     }
 
     #[test]

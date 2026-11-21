@@ -1314,18 +1314,10 @@ impl<'a> Mutator<'a> {
         if old_berth == new_berth {
             return;
         }
-        let mut current_node = self.graph.vessel_node(first);
-        let last_node = self.graph.vessel_node(last);
-        loop {
-            self.diff.push_reallocation(
-                VesselIndex::new(current_node.index()),
-                old_berth,
-                new_berth,
-            );
-            if current_node == last_node {
-                break;
-            }
-            current_node = unsafe { self.graph.next_node_unchecked(current_node) };
+        // SAFETY: `first` and `last` are the graph's, a precondition of this function.
+        let segment = unsafe { self.graph.segment_unchecked(first, last) };
+        for vessel in segment {
+            self.diff.push_reallocation(vessel, old_berth, new_berth);
         }
     }
 
