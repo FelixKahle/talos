@@ -41,6 +41,8 @@ serde_json = { version = "1.0.149", default-features = false, features = ["std"]
 
 # Benchmarks of the engine (dev-dependency only).
 criterion = "0.8.2"
+# Property tests (dev-dependency only); `std` is all the runner needs, without forking or timeouts.
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

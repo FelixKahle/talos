@@ -79,18 +79,18 @@ where
         _stats: &LocalSearchStatistics,
     ) -> bool {
         loop {
-            if self.cursor_a >= self.num_vessels.saturating_sub(1) {
+            if self.cursor_a.index() >= self.num_vessels.saturating_sub(1) {
                 return false;
             }
-            if self.cursor_b >= self.num_vessels {
-                self.cursor_a += 1;
-                self.cursor_b = self.cursor_a + 1;
+            if self.cursor_b.index() >= self.num_vessels {
+                self.cursor_a = VesselIndex::new(self.cursor_a.index() + 1);
+                self.cursor_b = VesselIndex::new(self.cursor_a.index() + 1);
                 continue;
             }
 
             let v_a = self.cursor_a;
             let v_b = self.cursor_b;
-            self.cursor_b += 1;
+            self.cursor_b = VesselIndex::new(self.cursor_b.index() + 1);
 
             // Strict Intra-Berth Check ($O(1)$ Unchecked)
             let berth_a = unsafe { mutator.graph().vessel_berth_unchecked(v_a) };
@@ -184,18 +184,18 @@ where
         _stats: &LocalSearchStatistics,
     ) -> bool {
         loop {
-            if self.cursor_a >= self.num_vessels.saturating_sub(1) {
+            if self.cursor_a.index() >= self.num_vessels.saturating_sub(1) {
                 return false;
             }
-            if self.cursor_b >= self.num_vessels {
-                self.cursor_a += 1;
-                self.cursor_b = self.cursor_a + 1;
+            if self.cursor_b.index() >= self.num_vessels {
+                self.cursor_a = VesselIndex::new(self.cursor_a.index() + 1);
+                self.cursor_b = VesselIndex::new(self.cursor_a.index() + 1);
                 continue;
             }
 
             let v_a = self.cursor_a;
             let v_b = self.cursor_b;
-            self.cursor_b += 1;
+            self.cursor_b = VesselIndex::new(self.cursor_b.index() + 1);
 
             // Strict Inter-Berth Check ($O(1)$ Unchecked)
             let berth_a = unsafe { mutator.graph().vessel_berth_unchecked(v_a) };

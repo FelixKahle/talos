@@ -326,10 +326,10 @@ impl PySolver {
             return Err(PyValueError::new_err("operators list must not be empty"));
         }
         for (i, &berth) in inner_solution.berths().iter().enumerate() {
-            if berth.get() >= num_berths {
+            if berth.index() >= num_berths {
                 return Err(PyValueError::new_err(format!(
                     "berth index {} for vessel {i} out of bounds (num_berths = {num_berths})",
-                    berth.get()
+                    berth.index()
                 )));
             }
         }

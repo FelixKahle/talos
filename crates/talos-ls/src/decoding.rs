@@ -64,7 +64,7 @@ unsafe fn find_earliest_start_unchecked<T>(
 where
     T: SolverNumeric,
 {
-    debug_assert!(berth_index.get() < model.num_berths());
+    debug_assert!(berth_index.index() < model.num_berths());
 
     let min_start = if berth_free_time > vessel_arrival {
         berth_free_time

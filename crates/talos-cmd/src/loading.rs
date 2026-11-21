@@ -49,7 +49,7 @@ impl Display for FeasibilityError {
         write!(
             f,
             "Vessel {} has no valid berth assignments",
-            self.vessel_index.get()
+            self.vessel_index.index()
         )
     }
 }
@@ -86,7 +86,7 @@ impl Display for ConstraintViolationError {
                 write!(
                     f,
                     "Berth {} closes at {} before it opens at {}",
-                    berth_index.get(),
+                    berth_index.index(),
                     closing_time,
                     opening_time
                 )
@@ -99,7 +99,7 @@ impl Display for ConstraintViolationError {
                 write!(
                     f,
                     "Vessel {} has latest departure {} before arrival {}",
-                    vessel_index.get(),
+                    vessel_index.index(),
                     departure_time,
                     arrival_time
                 )

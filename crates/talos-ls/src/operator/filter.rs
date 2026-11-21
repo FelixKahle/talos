@@ -38,8 +38,8 @@ pub unsafe fn intra_berth_swap_filter_unchecked<T>(
 where
     T: SolverNumeric,
 {
-    debug_assert!(v_a < model.num_vessels());
-    debug_assert!(v_b < model.num_vessels());
+    debug_assert!(v_a.index() < model.num_vessels());
+    debug_assert!(v_b.index() < model.num_vessels());
 
     // Time windows overlap iff neither is entirely before the other.
     //   overlap ⟺ arrival_a < deadline_b  ∧  arrival_b < deadline_a
@@ -75,8 +75,8 @@ pub unsafe fn inter_berth_swap_filter_unchecked<T>(
 where
     T: SolverNumeric,
 {
-    debug_assert!(v_a < graph.num_vessels());
-    debug_assert!(v_b < graph.num_vessels());
+    debug_assert!(v_a.index() < graph.num_vessels());
+    debug_assert!(v_b.index() < graph.num_vessels());
 
     let berth_a = unsafe { graph.vessel_berth_unchecked(v_a) };
     let berth_b = unsafe { graph.vessel_berth_unchecked(v_b) };
@@ -111,8 +111,8 @@ pub unsafe fn intra_berth_shift_filter_unchecked<T>(
 where
     T: SolverNumeric,
 {
-    debug_assert!(anchor < model.num_vessels());
-    debug_assert!(v < model.num_vessels());
+    debug_assert!(anchor.index() < model.num_vessels());
+    debug_assert!(v.index() < model.num_vessels());
 
     let arrival_v = unsafe { model.vessel_arrival_time_unchecked(v) };
     let deadline_v = unsafe { model.vessel_latest_departure_time_unchecked(v) };
@@ -146,7 +146,7 @@ pub unsafe fn inter_berth_shift_filter_unchecked<T>(
 where
     T: SolverNumeric,
 {
-    debug_assert!(anchor < graph.num_vessels());
+    debug_assert!(anchor.index() < graph.num_vessels());
     let berth_anchor = unsafe { graph.vessel_berth_unchecked(anchor) };
     model.vessel_allowed_on_berth(v, berth_anchor)
 }

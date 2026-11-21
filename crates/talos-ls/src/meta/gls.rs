@@ -145,7 +145,7 @@ impl PenalizationStrategy for MaxUtilityPenalization {
             let topo_iter = graph.berth_topology_iter(berth);
 
             for (prev_node, next_node) in topo_iter.clone().zip(topo_iter.skip(1)) {
-                if prev_node.get() < num_vessels || next_node.get() < num_vessels {
+                if prev_node.index() < num_vessels || next_node.index() < num_vessels {
                     let c = cost.edge_cost(prev_node, next_node);
                     let idx = edge_flat_index(prev_node, next_node, num_vessels);
 
@@ -158,7 +158,7 @@ impl PenalizationStrategy for MaxUtilityPenalization {
 
             for vessel in graph.vessel_sequence_iter(berth) {
                 let c = cost.berth_cost(vessel, berth);
-                let idx = vessel.get() * num_berths + berth.get();
+                let idx = vessel.index() * num_berths + berth.index();
 
                 debug_assert!(idx < memory.berth.len());
                 let p = unsafe { *memory.berth.get_unchecked(idx) } as f64;
@@ -228,8 +228,8 @@ pub struct PenaltyMemory {
 /// `PenaltyMemory::edge`.
 #[inline(always)]
 fn edge_flat_index(from: Node, to: Node, num_vessels: usize) -> usize {
-    let a = from.get().min(num_vessels);
-    let b = to.get().min(num_vessels);
+    let a = from.index().min(num_vessels);
+    let b = to.index().min(num_vessels);
     a * (num_vessels + 1) + b
 }
 
@@ -295,7 +295,7 @@ impl PenaltyMemory {
     /// * `berth` — The berth index.
     #[inline]
     pub fn berth_penalty(&self, vessel: VesselIndex, berth: BerthIndex) -> u64 {
-        let idx = vessel.get() * self.num_berths + berth.get();
+        let idx = vessel.index() * self.num_berths + berth.index();
         debug_assert!(idx < self.berth.len());
 
         // SAFETY: vessel < num_vessels and berth < num_berths.
@@ -341,8 +341,8 @@ impl PenaltyMemory {
 
             // Subtract penalties for old berth assignments, add for new.
             for (vessel, old_berth, new_berth) in diff.reallocations() {
-                let old_idx = vessel.get() * self.num_berths + old_berth.get();
-                let new_idx = vessel.get() * self.num_berths + new_berth.get();
+                let old_idx = vessel.index() * self.num_berths + old_berth.index();
+                let new_idx = vessel.index() * self.num_berths + new_berth.index();
                 debug_assert!(
                     old_idx < self.berth.len(),
                     "penalty_delta old berth: index {old_idx} out of bounds (len {})",
@@ -1054,7 +1054,7 @@ where
             let mut prev_node = sentinel;
             loop {
                 let next = graph.next_node(prev_node);
-                if prev_node.get() < num_vessels || next.get() < num_vessels {
+                if prev_node.index() < num_vessels || next.index() < num_vessels {
                     let idx = edge_flat_index(prev_node, next, num_vessels);
                     debug_assert!(idx < self.memory.edge.len());
 
@@ -1070,7 +1070,7 @@ where
 
         for vessel in graph.vessel_iter() {
             let berth = graph.vessel_berth(vessel);
-            let idx = vessel.get() * num_berths + berth.get();
+            let idx = vessel.index() * num_berths + berth.index();
             debug_assert!(idx < self.memory.berth.len());
 
             // SAFETY: v < num_vessels and berth < num_berths.

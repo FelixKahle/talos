@@ -257,9 +257,12 @@ impl<T> Solution<T> {
     where
         T: Copy,
     {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        Assignment::new(self.start_times[vessel.get()], self.berths[vessel.get()])
+        Assignment::new(
+            self.start_times[vessel.index()],
+            self.berths[vessel.index()],
+        )
     }
 
     /// Returns the assignment for a vessel without bounds checks.
@@ -272,12 +275,12 @@ impl<T> Solution<T> {
     where
         T: Copy,
     {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
         unsafe {
             Assignment::new(
-                *self.start_times.get_unchecked(vessel.get()),
-                *self.berths.get_unchecked(vessel.get()),
+                *self.start_times.get_unchecked(vessel.index()),
+                *self.berths.get_unchecked(vessel.index()),
             )
         }
     }
@@ -289,10 +292,10 @@ impl<T> Solution<T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn set_assignment_for_vessel(&mut self, vessel: VesselIndex, assignment: Assignment<T>) {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        self.start_times[vessel.get()] = assignment.start_time;
-        self.berths[vessel.get()] = assignment.berth;
+        self.start_times[vessel.index()] = assignment.start_time;
+        self.berths[vessel.index()] = assignment.berth;
     }
 
     /// Returns the berth assigned to the given vessel.
@@ -302,9 +305,9 @@ impl<T> Solution<T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn berth_for_vessel(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        self.berths[vessel.get()]
+        self.berths[vessel.index()]
     }
 
     /// Returns the berth assigned to a vessel without bounds checks.
@@ -314,9 +317,9 @@ impl<T> Solution<T> {
     /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn berth_for_vessel_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        *unsafe { self.berths.get_unchecked(vessel.get()) }
+        *unsafe { self.berths.get_unchecked(vessel.index()) }
     }
 
     /// Returns a reference to the start time for the given vessel.
@@ -326,9 +329,9 @@ impl<T> Solution<T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn start_time_for_vessel(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel < self.start_times.len());
+        debug_assert!(vessel.index() < self.start_times.len());
 
-        &self.start_times[vessel.get()]
+        &self.start_times[vessel.index()]
     }
 
     /// Returns the start time for a vessel without bounds checks.
@@ -338,9 +341,9 @@ impl<T> Solution<T> {
     /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn start_time_for_vessel_unchecked(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel < self.start_times.len());
+        debug_assert!(vessel.index() < self.start_times.len());
 
-        unsafe { self.start_times.get_unchecked(vessel.get()) }
+        unsafe { self.start_times.get_unchecked(vessel.index()) }
     }
 
     /// Returns all start times (read-only).
@@ -543,9 +546,9 @@ impl<'a, T> SolutionView<'a, T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn berth_for_vessel(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        self.berths[vessel.get()]
+        self.berths[vessel.index()]
     }
 
     /// Returns the berth assigned to a vessel without bounds checks.
@@ -555,9 +558,9 @@ impl<'a, T> SolutionView<'a, T> {
     /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn berth_for_vessel_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        *unsafe { self.berths.get_unchecked(vessel.get()) }
+        *unsafe { self.berths.get_unchecked(vessel.index()) }
     }
 
     /// Returns start times slice.
@@ -573,9 +576,9 @@ impl<'a, T> SolutionView<'a, T> {
     /// Panics in debug builds if `vessel` is out of bounds.
     #[inline]
     pub fn start_time_for_vessel(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel < self.start_times.len());
+        debug_assert!(vessel.index() < self.start_times.len());
 
-        &self.start_times[vessel.get()]
+        &self.start_times[vessel.index()]
     }
 
     /// Returns the start time for a vessel without bounds checks.
@@ -585,9 +588,9 @@ impl<'a, T> SolutionView<'a, T> {
     /// The caller must ensure `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn start_time_for_vessel_unchecked(&self, vessel: VesselIndex) -> &T {
-        debug_assert!(vessel < self.start_times.len());
+        debug_assert!(vessel.index() < self.start_times.len());
 
-        unsafe { self.start_times.get_unchecked(vessel.get()) }
+        unsafe { self.start_times.get_unchecked(vessel.index()) }
     }
 
     /// Returns the objective value.

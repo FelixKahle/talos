@@ -34,17 +34,17 @@ where
     T: SolverNumeric,
 {
     debug_assert!(
-        vessel_index.get() < model.num_vessels(),
+        vessel_index.index() < model.num_vessels(),
         "called `calculate_weighted_completion_time` with vessel index out of bounds: the len is {} but the index is {}",
         model.num_vessels(),
-        vessel_index.get()
+        vessel_index.index()
     );
 
     debug_assert!(
-        berth_index.get() < model.num_berths(),
+        berth_index.index() < model.num_berths(),
         "called `calculate_weighted_completion_time` with berth index out of bounds: the len is {} but the index is {}",
         model.num_berths(),
-        berth_index.get()
+        berth_index.index()
     );
 
     let deadline = model.vessel_latest_departure_time(vessel_index);
@@ -97,17 +97,17 @@ where
     T: SolverNumeric,
 {
     debug_assert!(
-        vessel_index.get() < model.num_vessels(),
+        vessel_index.index() < model.num_vessels(),
         "called `calculate_weighted_completion_time_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
         model.num_vessels(),
-        vessel_index.get()
+        vessel_index.index()
     );
 
     debug_assert!(
-        berth_index.get() < model.num_berths(),
+        berth_index.index() < model.num_berths(),
         "called `calculate_weighted_completion_time_unchecked` with berth index out of bounds: the len is {} but the index is {}",
         model.num_berths(),
-        berth_index.get()
+        berth_index.index()
     );
 
     let deadline = unsafe { model.vessel_latest_departure_time_unchecked(vessel_index) };
@@ -147,17 +147,17 @@ where
     T: SolverNumeric,
 {
     debug_assert!(
-        vessel_index.get() < model.num_vessels(),
+        vessel_index.index() < model.num_vessels(),
         "called `calculate_weighted_turnaround_time` with vessel index out of bounds: the len is {} but the index is {}",
         model.num_vessels(),
-        vessel_index.get()
+        vessel_index.index()
     );
 
     debug_assert!(
-        berth_index.get() < model.num_berths(),
+        berth_index.index() < model.num_berths(),
         "called `calculate_weighted_turnaround_time` with berth index out of bounds: the len is {} but the index is {}",
         model.num_berths(),
-        berth_index.get()
+        berth_index.index()
     );
 
     let deadline = model.vessel_latest_departure_time(vessel_index);
@@ -206,17 +206,17 @@ where
     T: SolverNumeric,
 {
     debug_assert!(
-        vessel_index.get() < model.num_vessels(),
+        vessel_index.index() < model.num_vessels(),
         "called `calculate_weighted_turnaround_time_unchecked` with vessel index out of bounds: the len is {} but the index is {}",
         model.num_vessels(),
-        vessel_index.get()
+        vessel_index.index()
     );
 
     debug_assert!(
-        berth_index.get() < model.num_berths(),
+        berth_index.index() < model.num_berths(),
         "called `calculate_weighted_turnaround_time_unchecked` with berth index out of bounds: the len is {} but the index is {}",
         model.num_berths(),
-        berth_index.get()
+        berth_index.index()
     );
 
     let deadline = unsafe { model.vessel_latest_departure_time_unchecked(vessel_index) };

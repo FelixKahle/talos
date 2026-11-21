@@ -114,7 +114,7 @@ where
         dep1.cmp(&dep2)
             .then(arr1.cmp(&arr2))
             .then(w2.cmp(&w1)) // w2 compared to w1 gives descending order
-            .then(v1.get().cmp(&v2.get()))
+            .then(v1.index().cmp(&v2.index()))
     });
 
     // 2. Greedily insert each vessel
@@ -177,24 +177,24 @@ where
         let assigned_start = best_start?;
 
         // Record assignment
-        final_berths[vessel.get()] = assigned_berth;
-        final_starts[vessel.get()] = assigned_start;
+        final_berths[vessel.index()] = assigned_berth;
+        final_starts[vessel.index()] = assigned_start;
 
         // Update occupancy
         let pt = model
             .vessel_processing_time(vessel, assigned_berth)
             .unwrap();
-        berth_occupancy[assigned_berth.get()]
+        berth_occupancy[assigned_berth.index()]
             .push(ClosedOpenInterval::new(assigned_start, assigned_start + pt));
         // Keep occupancies sorted by start time
-        berth_occupancy[assigned_berth.get()].sort_unstable_by_key(|occ| occ.start());
+        berth_occupancy[assigned_berth.index()].sort_unstable_by_key(|occ| occ.start());
     }
 
     // 3. Compute total objective function
     let mut total_objective = T::default();
     for vessel in model.vessel_iter() {
-        let berth = final_berths[vessel.get()];
-        let start = final_starts[vessel.get()];
+        let berth = final_berths[vessel.index()];
+        let start = final_starts[vessel.index()];
 
         let weight = model.vessel_weight(vessel);
         let pt = model.vessel_processing_time(vessel, berth).unwrap();

@@ -244,10 +244,10 @@ where
         // AND check that every vessel is actually allowed to dock at its assigned berth.
         let num_berths = model.num_berths();
         for (v_idx, &berth_idx) in berths.iter().enumerate() {
-            if berth_idx.get() >= num_berths {
+            if berth_idx.index() >= num_berths {
                 return Err(LocalSearchParamsError::SolutionBerthOutOfBounds(
                     SolutionBerthOutOfBoundsError {
-                        invalid_index: berth_idx.get(),
+                        invalid_index: berth_idx.index(),
                         model_count: num_berths,
                     },
                 ));
@@ -258,7 +258,7 @@ where
                 return Err(LocalSearchParamsError::SolutionIncompatibleBerth(
                     SolutionIncompatibleBerthError {
                         vessel_index: v_idx,
-                        incompatible_berth: berth_idx.get(),
+                        incompatible_berth: berth_idx.index(),
                     },
                 ));
             }

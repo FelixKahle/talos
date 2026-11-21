@@ -68,7 +68,7 @@ where
                 f,
                 "  V{:<3} -> B{:<2} | start: {:<5} | pos: {:<3}",
                 i,
-                self.berths[i].get(),
+                self.berths[i].index(),
                 self.starts[i],
                 self.positions[i],
             )?;
@@ -242,9 +242,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
         start: T,
         position: usize,
     ) {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        let v_idx = vessel.get();
+        let v_idx = vessel.index();
         self.berths[v_idx] = berth;
         self.starts[v_idx] = start;
         self.positions[v_idx] = position;
@@ -264,9 +264,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
         start: T,
         position: usize,
     ) {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        let v_idx = vessel.get();
+        let v_idx = vessel.index();
         *unsafe { self.berths.get_unchecked_mut(v_idx) } = berth;
         *unsafe { self.starts.get_unchecked_mut(v_idx) } = start;
         *unsafe { self.positions.get_unchecked_mut(v_idx) } = position;
@@ -280,9 +280,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel >= self.num_vessels()`.
     #[inline]
     pub fn vessel_berth(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        self.berths[vessel.get()]
+        self.berths[vessel.index()]
     }
 
     /// Returns the berth assigned to a specific vessel without any bounds checks.
@@ -293,9 +293,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn vessel_berth_unchecked(&self, vessel: VesselIndex) -> BerthIndex {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
-        *unsafe { self.berths.get_unchecked(vessel.get()) }
+        *unsafe { self.berths.get_unchecked(vessel.index()) }
     }
 
     /// Returns the start time assigned to a specific vessel.
@@ -306,9 +306,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel >= self.num_vessels()`.
     #[inline]
     pub fn vessel_start(&self, vessel: VesselIndex) -> T {
-        debug_assert!(vessel < self.starts.len());
+        debug_assert!(vessel.index() < self.starts.len());
 
-        self.starts[vessel.get()]
+        self.starts[vessel.index()]
     }
 
     /// Returns the start time assigned to a specific vessel without any bounds checks.
@@ -319,9 +319,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn vessel_start_unchecked(&self, vessel: VesselIndex) -> T {
-        debug_assert!(vessel < self.starts.len());
+        debug_assert!(vessel.index() < self.starts.len());
 
-        *unsafe { self.starts.get_unchecked(vessel.get()) }
+        *unsafe { self.starts.get_unchecked(vessel.index()) }
     }
 
     /// Returns the cost of the given berth.
@@ -332,9 +332,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `berth >= self.num_berths()`.
     #[inline]
     pub fn berth_cost(&self, berth: BerthIndex) -> T {
-        debug_assert!(berth < self.costs.len());
+        debug_assert!(berth.index() < self.costs.len());
 
-        self.costs[berth.get()]
+        self.costs[berth.index()]
     }
 
     /// Returns the cost of the given berth without any bounds checks.
@@ -345,9 +345,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `berth < self.num_berths()`.
     #[inline]
     pub unsafe fn berth_cost_unchecked(&self, berth: BerthIndex) -> T {
-        debug_assert!(berth < self.costs.len());
+        debug_assert!(berth.index() < self.costs.len());
 
-        *unsafe { self.costs.get_unchecked(berth.get()) }
+        *unsafe { self.costs.get_unchecked(berth.index()) }
     }
 
     /// Sets the cost of the given berth.
@@ -358,9 +358,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `berth >= self.num_berths()`.
     #[inline]
     pub fn set_berth_cost(&mut self, berth: BerthIndex, cost: T) {
-        debug_assert!(berth < self.costs.len());
+        debug_assert!(berth.index() < self.costs.len());
 
-        self.costs[berth.get()] = cost;
+        self.costs[berth.index()] = cost;
     }
 
     /// Sets the cost of the given berth without any bounds checks.
@@ -371,9 +371,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `berth < self.num_berths()`.
     #[inline]
     pub unsafe fn set_berth_cost_unchecked(&mut self, berth: BerthIndex, cost: T) {
-        debug_assert!(berth < self.costs.len());
+        debug_assert!(berth.index() < self.costs.len());
 
-        *unsafe { self.costs.get_unchecked_mut(berth.get()) } = cost;
+        *unsafe { self.costs.get_unchecked_mut(berth.index()) } = cost;
     }
 
     /// Returns the position of the given vessel in its berth's sequence.
@@ -384,9 +384,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel >= self.num_vessels()`.
     #[inline]
     pub fn vessel_position(&self, vessel: VesselIndex) -> usize {
-        debug_assert!(vessel < self.positions.len());
+        debug_assert!(vessel.index() < self.positions.len());
 
-        self.positions[vessel.get()]
+        self.positions[vessel.index()]
     }
 
     /// Returns the position of the given vessel in its berth's sequence without any bounds checks.
@@ -397,9 +397,9 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn vessel_position_unchecked(&self, vessel: VesselIndex) -> usize {
-        debug_assert!(vessel < self.positions.len());
+        debug_assert!(vessel.index() < self.positions.len());
 
-        *unsafe { self.positions.get_unchecked(vessel.get()) }
+        *unsafe { self.positions.get_unchecked(vessel.index()) }
     }
 
     /// Returns an `Assignment` for the given vessel, which includes both the berth and start time.
@@ -409,7 +409,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel >= self.num_vessels()`.
     #[inline]
     pub fn vessel_assignment(&self, vessel: VesselIndex) -> Assignment<T> {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
         Assignment::new(self.vessel_start(vessel), self.vessel_berth(vessel))
     }
@@ -422,7 +422,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
     /// meaning `vessel < self.num_vessels()`.
     #[inline]
     pub unsafe fn vessel_assignment_unchecked(&self, vessel: VesselIndex) -> Assignment<T> {
-        debug_assert!(vessel < self.berths.len());
+        debug_assert!(vessel.index() < self.berths.len());
 
         Assignment::new(unsafe { self.vessel_start_unchecked(vessel) }, unsafe {
             self.vessel_berth_unchecked(vessel)
@@ -469,7 +469,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
         debug_assert!(graph.num_vessels() <= self.berths.len());
 
         for berth_idx in touched.iter_touched_berths() {
-            let b = berth_idx.get();
+            let b = berth_idx.index();
 
             unsafe {
                 *self.costs.get_unchecked_mut(b) = *cand.costs.get_unchecked(b);
@@ -477,7 +477,7 @@ impl<T: SolverNumeric> ScheduleState<T> {
 
             let sequence = unsafe { graph.vessel_sequence_iter_unchecked(berth_idx) };
             for (pos, vessel) in sequence.enumerate() {
-                let v_idx = vessel.get();
+                let v_idx = vessel.index();
                 unsafe {
                     *self.berths.get_unchecked_mut(v_idx) = berth_idx;
                     *self.starts.get_unchecked_mut(v_idx) = *cand.starts.get_unchecked(v_idx);

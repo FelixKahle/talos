@@ -24,7 +24,7 @@ impl BerthIndexIter {
         );
 
         BerthIndexIter {
-            inner: from.get()..to.get(),
+            inner: from.index()..to.index(),
         }
     }
 }
@@ -72,7 +72,7 @@ impl VesselIndexIter {
         );
 
         VesselIndexIter {
-            inner: from.get()..to.get(),
+            inner: from.index()..to.index(),
         }
     }
 }
@@ -420,7 +420,7 @@ where
 
 #[inline(always)]
 fn flatten_index(num_berths: usize, vessel_index: VesselIndex, berth_index: BerthIndex) -> usize {
-    vessel_index.get() * num_berths + berth_index.get()
+    vessel_index.index() * num_berths + berth_index.index()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -646,7 +646,7 @@ where
     /// Panics if `vessel_index` is not in `0..num_vessels()`.
     #[inline]
     pub fn vessel_processing_times(&self, vessel_index: VesselIndex) -> &[ProcessingTime<T>] {
-        let start = vessel_index.get() * self.num_berths();
+        let start = vessel_index.index() * self.num_berths();
         let end = start + self.num_berths();
         &self.processing_times[start..end]
     }
@@ -658,7 +658,7 @@ where
     /// Panics if `vessel_index` is not in `0..num_vessels()`.
     #[inline]
     pub fn vessel_arrival_time(&self, vessel_index: VesselIndex) -> T {
-        let index = vessel_index.get();
+        let index = vessel_index.index();
         debug_assert!(index < self.num_vessels());
 
         self.arrival_times[index]
@@ -673,7 +673,7 @@ where
     /// may occur if this precondition is violated.
     #[inline]
     pub unsafe fn vessel_arrival_time_unchecked(&self, vessel_index: VesselIndex) -> T {
-        let index = vessel_index.get();
+        let index = vessel_index.index();
         debug_assert!(index < self.num_vessels());
 
         unsafe { *self.arrival_times.get_unchecked(index) }
@@ -686,7 +686,7 @@ where
     /// Panics if `vessel_index` is not in `0..num_vessels()`.
     #[inline]
     pub fn vessel_latest_departure_time(&self, vessel_index: VesselIndex) -> T {
-        let index = vessel_index.get();
+        let index = vessel_index.index();
         debug_assert!(index < self.num_vessels());
 
         self.latest_departure_times[index]
@@ -701,7 +701,7 @@ where
     /// may occur if this precondition is violated.
     #[inline]
     pub unsafe fn vessel_latest_departure_time_unchecked(&self, vessel_index: VesselIndex) -> T {
-        let index = vessel_index.get();
+        let index = vessel_index.index();
         debug_assert!(index < self.num_vessels());
 
         unsafe { *self.latest_departure_times.get_unchecked(index) }
@@ -714,7 +714,7 @@ where
     /// Panics if `vessel_index` is not in `0..num_vessels()`.
     #[inline]
     pub fn vessel_weight(&self, vessel_index: VesselIndex) -> T {
-        let index = vessel_index.get();
+        let index = vessel_index.index();
         debug_assert!(index < self.num_vessels());
 
         self.vessel_weights[index]
@@ -729,7 +729,7 @@ where
     /// may occur if this precondition is violated.
     #[inline]
     pub unsafe fn vessel_weight_unchecked(&self, vessel_index: VesselIndex) -> T {
-        let index = vessel_index.get();
+        let index = vessel_index.index();
         debug_assert!(index < self.num_vessels());
 
         unsafe { *self.vessel_weights.get_unchecked(index) }
@@ -747,8 +747,8 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> ProcessingTime<T> {
-        debug_assert!(vessel_index < self.num_vessels());
-        debug_assert!(berth_index < self.num_berths());
+        debug_assert!(vessel_index.index() < self.num_vessels());
+        debug_assert!(berth_index.index() < self.num_berths());
 
         let flat_index = flatten_index(self.num_berths(), vessel_index, berth_index);
         debug_assert!(flat_index < self.processing_times.len());
@@ -770,8 +770,8 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> ProcessingTime<T> {
-        debug_assert!(vessel_index < self.num_vessels());
-        debug_assert!(berth_index < self.num_berths());
+        debug_assert!(vessel_index.index() < self.num_vessels());
+        debug_assert!(berth_index.index() < self.num_berths());
 
         let flat_index = flatten_index(self.num_berths(), vessel_index, berth_index);
         debug_assert!(flat_index < self.processing_times.len());
@@ -790,7 +790,7 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> bool {
-        let index = vessel_index.get();
+        let index = vessel_index.index();
         debug_assert!(index < self.num_vessels());
 
         self.vessel_processing_time(vessel_index, berth_index)
@@ -810,7 +810,7 @@ where
         vessel_index: VesselIndex,
         berth_index: BerthIndex,
     ) -> bool {
-        let index = vessel_index.get();
+        let index = vessel_index.index();
         debug_assert!(index < self.num_vessels());
 
         unsafe { self.vessel_processing_time_unchecked(vessel_index, berth_index) }.is_some()
@@ -823,7 +823,7 @@ where
     /// Panics if `berth_index` is not in `0..num_berths()`.
     #[inline]
     pub fn berth_opening_times(&self, berth_index: BerthIndex) -> &[ClosedOpenInterval<T>] {
-        let index = berth_index.get();
+        let index = berth_index.index();
         debug_assert!(index < self.num_berths());
 
         let start = self.opening_offsets[index];
@@ -843,7 +843,7 @@ where
         &self,
         berth_index: BerthIndex,
     ) -> &[ClosedOpenInterval<T>] {
-        let index = berth_index.get();
+        let index = berth_index.index();
         debug_assert!(index < self.num_berths());
 
         let start = *unsafe { self.opening_offsets.get_unchecked(index) };

@@ -1,93 +1,113 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! # Strongly Typed Indices (Zero-Cost)
-//!
-//! Phantom-typed wrappers around `usize` to prevent mixing indices from
-//! different domains (e.g., vessels vs. berths). `TypedIndex<T>` carries a
-//! tag type `T: TypedIndexTag` that encodes intent at the type level, while
-//! compiling down to a transparent `usize` (no runtime overhead).
-//!
-//! ## Motivation
-//!
-//! In large scheduling and optimization pipelines, multiple index spaces are
-//! used concurrently. Raw `usize` invites accidental swaps and hard-to-trace
-//! bugs. Phantom-tagged indices provide compile-time guarantees with minimal
-//! ceremony and excellent ergonomics.
+//! Typed ids: one type per kind of id, so that an id of one table cannot index another.
 
-/// A trait to tag typed indices with a name for debugging and display purposes.
-pub trait TypedIndexTag:
-    Copy + Clone + PartialEq + Eq + PartialOrd + Ord + std::hash::Hash
-{
-    /// A human-readable name for the index type,
-    /// used in `Debug` and `Display` implementations.
+use std::fmt;
+use std::hash::Hash;
+use std::marker::PhantomData;
+
+// An id stores a `u32` and answers a `usize`; that conversion is exact only where a `usize` holds every `u32`.
+const _: () = assert!(
+    usize::BITS >= u32::BITS,
+    "a `usize` should hold every `u32`"
+);
+
+/// The marker that makes a [`TypedIndex`] an id of one kind.
+///
+/// A tag is a zero-sized type that exists only to tell one kind of id from another. Each kind of id declares
+/// its own tag and names its id type `TypedIndex<ThatTag>`.
+pub trait TypedIndexTag: Copy + Eq + Ord + Hash + fmt::Debug {
+    /// The name of the id kind, as `Debug` and `Display` print it (`Node 3`).
     const NAME: &'static str;
 }
 
-/// A strongly typed index that is associated with a specific tag type `T`.
+/// An id of the kind that `T` tags: a position in the tables of that kind.
 ///
-/// This struct wraps a `usize` index and uses a phantom type parameter `T`
-/// to provide type safety and prevent mixing indices of different types.
-#[repr(transparent)]
+/// Ids of different kinds are different types, so an id of one table cannot be handed to another by mistake.
+/// The id stores a `u32`, which halves the memory of every stored column of ids, and speaks `usize` at its
+/// interface: it is made from a `usize` and answers one. An id is so at most `u32::MAX`, which [`new`] checks.
+///
+/// [`new`]: TypedIndex::new
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypedIndex<T>
 where
     T: TypedIndexTag,
 {
-    index: usize,
-    _marker: std::marker::PhantomData<T>, // optimized away at compile time, no runtime overhead
+    index: u32,
+    tag: PhantomData<T>,
 }
 
 impl<T> TypedIndex<T>
 where
     T: TypedIndexTag,
 {
-    /// Creates a new `TypedIndex` with the given `usize` index.
-    #[inline(always)]
+    /// The id at position `index`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is greater than `u32::MAX`.
+    #[inline]
+    #[track_caller]
     pub const fn new(index: usize) -> Self {
-        Self {
-            index,
-            _marker: std::marker::PhantomData,
+        match Self::try_new(index) {
+            Some(id) => id,
+            None => panic!("called `TypedIndex::new` with an index beyond u32::MAX"),
         }
     }
 
-    /// Returns the underlying `usize` index.
-    #[inline(always)]
-    pub const fn get(&self) -> usize {
-        self.index
+    /// The id at position `index`, or `None` if `index` is greater than `u32::MAX`.
+    #[inline]
+    pub const fn try_new(index: usize) -> Option<Self> {
+        // Both casts are exact: a `usize` holds every `u32`, as the assertion at the top of this module states,
+        // and `index` is at most `u32::MAX` once past the check.
+        if index > u32::MAX as usize {
+            return None;
+        }
+        Some(Self {
+            index: index as u32,
+            tag: PhantomData,
+        })
     }
 
-    /// Checks if the index is zero.
-    #[inline(always)]
-    pub const fn is_zero(&self) -> bool {
-        self.index == 0
+    /// The position this id stands for.
+    #[inline]
+    pub const fn index(self) -> usize {
+        // Exact: a `usize` holds every `u32`, as the assertion at the top of this module states.
+        self.index as usize
     }
 
-    /// Maps this `TypedIndex<T>` to a `TypedIndex<U>` with the same underlying index.
-    #[inline(always)]
-    pub const fn map<U>(&self) -> TypedIndex<U>
+    /// The id of kind `U` at the same position.
+    ///
+    /// This is for tables of two kinds whose positions correspond by construction, such as the first nodes of a
+    /// graph that stand for the vessels of a problem.
+    #[inline]
+    pub const fn map<U>(self) -> TypedIndex<U>
     where
         U: TypedIndexTag,
     {
-        TypedIndex::new(self.index)
+        TypedIndex {
+            index: self.index,
+            tag: PhantomData,
+        }
     }
 }
 
-impl<T> std::fmt::Debug for TypedIndex<T>
+impl<T> fmt::Debug for TypedIndex<T>
 where
     T: TypedIndexTag,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}({})", T::NAME, self.index)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", T::NAME, self.index)
     }
 }
 
-impl<T> std::fmt::Display for TypedIndex<T>
+impl<T> fmt::Display for TypedIndex<T>
 where
     T: TypedIndexTag,
 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}({})", T::NAME, self.index)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", T::NAME, self.index)
     }
 }
 
@@ -95,6 +115,13 @@ impl<T> From<usize> for TypedIndex<T>
 where
     T: TypedIndexTag,
 {
+    /// The id at position `index`, as [`TypedIndex::new`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is greater than `u32::MAX`.
+    #[inline]
+    #[track_caller]
     fn from(index: usize) -> Self {
         Self::new(index)
     }
@@ -104,302 +131,110 @@ impl<T> From<TypedIndex<T>> for usize
 where
     T: TypedIndexTag,
 {
-    fn from(typed_index: TypedIndex<T>) -> Self {
-        typed_index.index
-    }
-}
-
-impl<T> std::ops::Add<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    type Output = Self;
-
-    #[inline(always)]
-    fn add(self, rhs: usize) -> Self::Output {
-        Self::new(self.index + rhs)
-    }
-}
-
-impl<T> std::ops::Sub<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    type Output = Self;
-
-    #[inline(always)]
-    fn sub(self, rhs: usize) -> Self::Output {
-        Self::new(self.index - rhs)
-    }
-}
-
-impl<T> std::ops::Mul<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    type Output = Self;
-
-    #[inline(always)]
-    fn mul(self, rhs: usize) -> Self::Output {
-        Self::new(self.index * rhs)
-    }
-}
-
-impl<T> std::ops::Div<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    type Output = Self;
-
-    #[inline(always)]
-    fn div(self, rhs: usize) -> Self::Output {
-        Self::new(self.index / rhs)
-    }
-}
-
-impl<T> std::ops::Rem<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    type Output = Self;
-
-    #[inline(always)]
-    fn rem(self, rhs: usize) -> Self::Output {
-        Self::new(self.index % rhs)
-    }
-}
-
-impl<T> std::ops::AddAssign<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn add_assign(&mut self, rhs: usize) {
-        self.index += rhs;
-    }
-}
-
-impl<T> std::ops::SubAssign<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn sub_assign(&mut self, rhs: usize) {
-        self.index -= rhs;
-    }
-}
-
-impl<T> std::ops::MulAssign<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn mul_assign(&mut self, rhs: usize) {
-        self.index *= rhs;
-    }
-}
-
-impl<T> std::ops::DivAssign<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn div_assign(&mut self, rhs: usize) {
-        self.index /= rhs;
-    }
-}
-
-impl<T> std::ops::RemAssign<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn rem_assign(&mut self, rhs: usize) {
-        self.index %= rhs;
-    }
-}
-
-impl<T> PartialEq<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn eq(&self, other: &usize) -> bool {
-        self.index == *other
-    }
-}
-
-impl<T> PartialEq<TypedIndex<T>> for usize
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn eq(&self, other: &TypedIndex<T>) -> bool {
-        *self == other.index
-    }
-}
-
-impl<T> PartialOrd<usize> for TypedIndex<T>
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn partial_cmp(&self, other: &usize) -> Option<std::cmp::Ordering> {
-        self.index.partial_cmp(other)
-    }
-}
-
-impl<T> PartialOrd<TypedIndex<T>> for usize
-where
-    T: TypedIndexTag,
-{
-    #[inline(always)]
-    fn partial_cmp(&self, other: &TypedIndex<T>) -> Option<std::cmp::Ordering> {
-        self.partial_cmp(&other.index)
+    #[inline]
+    fn from(id: TypedIndex<T>) -> Self {
+        id.index()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
-    // Define a dummy tag for testing purposes
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
     struct TestTag;
 
     impl TypedIndexTag for TestTag {
-        const NAME: &'static str = "TestIdx";
+        const NAME: &'static str = "Test";
     }
 
-    // Type alias for convenience inside tests
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+    struct OtherTag;
+
+    impl TypedIndexTag for OtherTag {
+        const NAME: &'static str = "Other";
+    }
+
     type TestIndex = TypedIndex<TestTag>;
 
+    // Every position beyond `u32::MAX` that a 64-bit `usize` can name.
+    #[cfg(target_pointer_width = "64")]
+    const FIRST_BEYOND_U32: usize = 1 << 32;
+
     #[test]
-    fn test_new_and_get() {
-        let idx = TestIndex::new(10);
-        assert_eq!(idx.get(), 10);
+    fn test_index_answers_the_position_it_was_made_from() {
+        assert_eq!(TestIndex::new(10).index(), 10);
+        assert_eq!(TestIndex::new(0).index(), 0);
+    }
+
+    fn largest_u32() -> usize {
+        usize::try_from(u32::MAX).expect("a u32 should fit a usize")
     }
 
     #[test]
-    fn test_conversions() {
-        // From usize
-        let idx: TestIndex = 42.into();
-        assert_eq!(idx.get(), 42);
+    fn test_try_new_accepts_u32_max() {
+        let largest = largest_u32();
+        assert_eq!(
+            TestIndex::try_new(largest).map(TestIndex::index),
+            Some(largest)
+        );
+    }
 
-        // Into usize
-        let val: usize = idx.into();
-        assert_eq!(val, 42);
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn test_try_new_refuses_beyond_u32_max() {
+        assert_eq!(TestIndex::try_new(FIRST_BEYOND_U32), None);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    #[should_panic(expected = "called `TypedIndex::new` with an index beyond u32::MAX")]
+    fn test_new_panics_beyond_u32_max() {
+        let _ = TestIndex::new(FIRST_BEYOND_U32);
     }
 
     #[test]
-    fn test_debug_and_display() {
-        let idx = TestIndex::new(7);
-        // Uses the NAME const from the trait
-        assert_eq!(format!("{}", idx), "TestIdx(7)");
-        assert_eq!(format!("{:?}", idx), "TestIdx(7)");
+    fn test_conversions_with_usize_round_trip() {
+        let id: TestIndex = 42.into();
+        assert_eq!(id, TestIndex::new(42));
+        assert_eq!(usize::from(id), 42);
     }
 
     #[test]
-    fn test_arithmetic_ops() {
-        let idx = TestIndex::new(10);
-
-        // Test operators (consuming self/copy)
-        assert_eq!((idx + 5).get(), 15);
-        assert_eq!((idx - 5).get(), 5);
-        assert_eq!((idx * 2).get(), 20);
-        assert_eq!((idx / 2).get(), 5);
-        assert_eq!((idx % 3).get(), 1);
+    fn test_map_keeps_the_position() {
+        let other: TypedIndex<OtherTag> = TestIndex::new(7).map();
+        assert_eq!(other.index(), 7);
+        assert_eq!(format!("{other}"), "Other 7");
     }
 
     #[test]
-    fn test_assignment_ops() {
-        let mut idx = TestIndex::new(10);
-
-        idx += 5;
-        assert_eq!(idx.get(), 15);
-
-        idx -= 5;
-        assert_eq!(idx.get(), 10);
-
-        idx *= 2;
-        assert_eq!(idx.get(), 20);
-
-        idx /= 4;
-        assert_eq!(idx.get(), 5);
-
-        idx %= 2;
-        assert_eq!(idx.get(), 1);
+    fn test_debug_and_display_name_the_kind() {
+        let id = TestIndex::new(7);
+        assert_eq!(format!("{id}"), "Test 7");
+        assert_eq!(format!("{id:?}"), "Test 7");
     }
 
     #[test]
-    fn test_is_zero() {
-        let zero = TestIndex::new(0);
-        let non_zero = TestIndex::new(1);
-
-        assert!(zero.is_zero());
-        assert!(!non_zero.is_zero());
+    fn test_ids_order_by_position() {
+        assert!(TestIndex::new(1) < TestIndex::new(2));
+        assert_ne!(TestIndex::new(1), TestIndex::new(2));
     }
 
-    #[test]
-    fn test_ordering_and_equality() {
-        let a = TestIndex::new(1);
-        let b = TestIndex::new(2);
-        let c = TestIndex::new(2);
+    proptest! {
+        #[test]
+        fn test_try_new_is_some_exactly_up_to_u32_max(index in prop_oneof![0..=largest_u32(), any::<usize>()]) {
+            let made = TestIndex::try_new(index);
+            prop_assert_eq!(made.is_some(), u32::try_from(index).is_ok());
+            if let Some(id) = made {
+                prop_assert_eq!(id.index(), index);
+            }
+        }
 
-        assert!(a < b);
-        assert!(b > a);
-        assert_eq!(b, c);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn test_hash_works_consistently() {
-        use std::collections::HashSet;
-
-        let a = TestIndex::new(1);
-        let b = TestIndex::new(2);
-        let c = TestIndex::new(1);
-
-        let mut set = HashSet::new();
-        set.insert(a);
-        set.insert(b);
-
-        // c should be considered the same key as a
-        assert!(set.contains(&c));
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn test_arithmetic_does_not_mutate_original() {
-        let idx = TestIndex::new(10);
-
-        let plus = idx + 5;
-        let minus = idx - 3;
-        let mul = idx * 2;
-        let div = idx / 5;
-        let rem = idx % 3;
-
-        // original unchanged
-        assert_eq!(idx.get(), 10);
-
-        assert_eq!(plus.get(), 15);
-        assert_eq!(minus.get(), 7);
-        assert_eq!(mul.get(), 20);
-        assert_eq!(div.get(), 2);
-        assert_eq!(rem.get(), 1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_divide_by_zero_panics() {
-        let idx = TestIndex::new(10);
-        let _ = idx / 0;
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_rem_by_zero_panics() {
-        let idx = TestIndex::new(10);
-        let _ = idx % 0;
+        #[test]
+        fn test_order_of_ids_is_the_order_of_positions(a in any::<u32>(), b in any::<u32>()) {
+            let (a, b) = (usize::try_from(a).unwrap(), usize::try_from(b).unwrap());
+            prop_assert_eq!(TestIndex::new(a).cmp(&TestIndex::new(b)), a.cmp(&b));
+        }
     }
 }

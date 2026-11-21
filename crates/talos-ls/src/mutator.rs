@@ -176,8 +176,8 @@ impl<'a> Mutator<'a> {
     /// Panics if either vessel is out of bounds.
     #[inline]
     pub fn swap_vessels(&mut self, a: VesselIndex, b: VesselIndex) {
-        debug_assert!(a < self.graph.num_vessels());
-        debug_assert!(b < self.graph.num_vessels());
+        debug_assert!(a.index() < self.graph.num_vessels());
+        debug_assert!(b.index() < self.graph.num_vessels());
 
         if a == b {
             return;
@@ -248,10 +248,10 @@ impl<'a> Mutator<'a> {
         b_first: VesselIndex,
         b_last: VesselIndex,
     ) {
-        debug_assert!(a_first < self.graph.num_vessels());
-        debug_assert!(a_last < self.graph.num_vessels());
-        debug_assert!(b_first < self.graph.num_vessels());
-        debug_assert!(b_last < self.graph.num_vessels());
+        debug_assert!(a_first.index() < self.graph.num_vessels());
+        debug_assert!(a_last.index() < self.graph.num_vessels());
+        debug_assert!(b_first.index() < self.graph.num_vessels());
+        debug_assert!(b_last.index() < self.graph.num_vessels());
 
         if a_first == b_first {
             return;
@@ -314,8 +314,8 @@ impl<'a> Mutator<'a> {
     /// Panics if either vessel is out of bounds.
     #[inline]
     pub fn reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
 
         if first == last {
             return;
@@ -370,8 +370,8 @@ impl<'a> Mutator<'a> {
     /// Panics if either vessel is out of bounds.
     #[inline]
     pub fn relocate_after(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
-        debug_assert!(vessel < self.graph.num_vessels());
-        debug_assert!(anchor < self.graph.num_vessels());
+        debug_assert!(vessel.index() < self.graph.num_vessels());
+        debug_assert!(anchor.index() < self.graph.num_vessels());
 
         let vessel_node = self.graph.vessel_node(vessel);
         let anchor_node = self.graph.vessel_node(anchor);
@@ -425,8 +425,8 @@ impl<'a> Mutator<'a> {
     /// Panics if either vessel is out of bounds.
     #[inline]
     pub fn relocate_before(&mut self, vessel: VesselIndex, reference: VesselIndex) {
-        debug_assert!(vessel < self.graph.num_vessels());
-        debug_assert!(reference < self.graph.num_vessels());
+        debug_assert!(vessel.index() < self.graph.num_vessels());
+        debug_assert!(reference.index() < self.graph.num_vessels());
 
         let vessel_node = self.graph.vessel_node(vessel);
         let reference_node = self.graph.vessel_node(reference);
@@ -479,8 +479,8 @@ impl<'a> Mutator<'a> {
     /// Panics if vessel or berth is out of bounds.
     #[inline]
     pub fn relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        debug_assert!(vessel < self.graph.num_vessels());
-        debug_assert!(berth < self.graph.num_berths());
+        debug_assert!(vessel.index() < self.graph.num_vessels());
+        debug_assert!(berth.index() < self.graph.num_berths());
 
         let vessel_node = self.graph.vessel_node(vessel);
         let head_boundary = self.graph.berth_head_boundary_node(berth);
@@ -526,8 +526,8 @@ impl<'a> Mutator<'a> {
     /// Panics if vessel or berth is out of bounds.
     #[inline]
     pub fn relocate_to_tail(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        debug_assert!(vessel < self.graph.num_vessels());
-        debug_assert!(berth < self.graph.num_berths());
+        debug_assert!(vessel.index() < self.graph.num_vessels());
+        debug_assert!(berth.index() < self.graph.num_berths());
 
         let vessel_node = self.graph.vessel_node(vessel);
         let tail_boundary = self.graph.berth_tail_boundary_node(berth);
@@ -583,9 +583,9 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         anchor: VesselIndex,
     ) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
-        debug_assert!(anchor < self.graph.num_vessels());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
+        debug_assert!(anchor.index() < self.graph.num_vessels());
 
         let first_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
@@ -645,9 +645,9 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         reference: VesselIndex,
     ) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
-        debug_assert!(reference < self.graph.num_vessels());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
+        debug_assert!(reference.index() < self.graph.num_vessels());
 
         let first_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
@@ -706,9 +706,9 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
-        debug_assert!(berth < self.graph.num_berths());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
+        debug_assert!(berth.index() < self.graph.num_berths());
 
         let first_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
@@ -760,9 +760,9 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
-        debug_assert!(berth < self.graph.num_berths());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
+        debug_assert!(berth.index() < self.graph.num_berths());
 
         let first_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
@@ -807,8 +807,8 @@ impl<'a> Mutator<'a> {
     /// Both vessels must be in bounds.
     #[inline]
     pub unsafe fn swap_vessels_unchecked(&mut self, a: VesselIndex, b: VesselIndex) {
-        debug_assert!(a < self.graph.num_vessels());
-        debug_assert!(b < self.graph.num_vessels());
+        debug_assert!(a.index() < self.graph.num_vessels());
+        debug_assert!(b.index() < self.graph.num_vessels());
 
         if a == b {
             return;
@@ -877,10 +877,10 @@ impl<'a> Mutator<'a> {
         b_first: VesselIndex,
         b_last: VesselIndex,
     ) {
-        debug_assert!(a_first < self.graph.num_vessels());
-        debug_assert!(a_last < self.graph.num_vessels());
-        debug_assert!(b_first < self.graph.num_vessels());
-        debug_assert!(b_last < self.graph.num_vessels());
+        debug_assert!(a_first.index() < self.graph.num_vessels());
+        debug_assert!(a_last.index() < self.graph.num_vessels());
+        debug_assert!(b_first.index() < self.graph.num_vessels());
+        debug_assert!(b_last.index() < self.graph.num_vessels());
 
         if a_first == b_first {
             return;
@@ -947,8 +947,8 @@ impl<'a> Mutator<'a> {
     /// Both vessels must be in bounds and form a valid contiguous segment.
     #[inline]
     pub unsafe fn reverse_segment_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
 
         if first == last {
             return;
@@ -1000,8 +1000,8 @@ impl<'a> Mutator<'a> {
     /// Both vessels must be in bounds.
     #[inline]
     pub unsafe fn relocate_after_unchecked(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
-        debug_assert!(vessel < self.graph.num_vessels());
-        debug_assert!(anchor < self.graph.num_vessels());
+        debug_assert!(vessel.index() < self.graph.num_vessels());
+        debug_assert!(anchor.index() < self.graph.num_vessels());
 
         let vessel_node = self.graph.vessel_node(vessel);
         let anchor_node = self.graph.vessel_node(anchor);
@@ -1058,8 +1058,8 @@ impl<'a> Mutator<'a> {
         vessel: VesselIndex,
         reference: VesselIndex,
     ) {
-        debug_assert!(vessel < self.graph.num_vessels());
-        debug_assert!(reference < self.graph.num_vessels());
+        debug_assert!(vessel.index() < self.graph.num_vessels());
+        debug_assert!(reference.index() < self.graph.num_vessels());
 
         let vessel_node = self.graph.vessel_node(vessel);
         let reference_node = self.graph.vessel_node(reference);
@@ -1113,8 +1113,8 @@ impl<'a> Mutator<'a> {
     /// Vessel and berth must be in bounds.
     #[inline]
     pub unsafe fn relocate_to_head_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        debug_assert!(vessel < self.graph.num_vessels());
-        debug_assert!(berth < self.graph.num_berths());
+        debug_assert!(vessel.index() < self.graph.num_vessels());
+        debug_assert!(berth.index() < self.graph.num_berths());
 
         let vessel_node = self.graph.vessel_node(vessel);
         let head_boundary = self.graph.berth_head_boundary_node(berth);
@@ -1161,8 +1161,8 @@ impl<'a> Mutator<'a> {
     /// Vessel and berth must be in bounds.
     #[inline]
     pub unsafe fn relocate_to_tail_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        debug_assert!(vessel < self.graph.num_vessels());
-        debug_assert!(berth < self.graph.num_berths());
+        debug_assert!(vessel.index() < self.graph.num_vessels());
+        debug_assert!(berth.index() < self.graph.num_berths());
 
         let vessel_node = self.graph.vessel_node(vessel);
         let tail_boundary = self.graph.berth_tail_boundary_node(berth);
@@ -1216,9 +1216,9 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         anchor: VesselIndex,
     ) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
-        debug_assert!(anchor < self.graph.num_vessels());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
+        debug_assert!(anchor.index() < self.graph.num_vessels());
 
         let first_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
@@ -1279,9 +1279,9 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         reference: VesselIndex,
     ) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
-        debug_assert!(reference < self.graph.num_vessels());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
+        debug_assert!(reference.index() < self.graph.num_vessels());
 
         let first_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
@@ -1343,9 +1343,9 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
-        debug_assert!(berth < self.graph.num_berths());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
+        debug_assert!(berth.index() < self.graph.num_berths());
 
         let first_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
@@ -1400,9 +1400,9 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
-        debug_assert!(first < self.graph.num_vessels());
-        debug_assert!(last < self.graph.num_vessels());
-        debug_assert!(berth < self.graph.num_berths());
+        debug_assert!(first.index() < self.graph.num_vessels());
+        debug_assert!(last.index() < self.graph.num_vessels());
+        debug_assert!(berth.index() < self.graph.num_berths());
 
         let first_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
@@ -1520,8 +1520,11 @@ impl<'a> Mutator<'a> {
         let mut current_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
         loop {
-            self.diff
-                .push_reallocation(VesselIndex::new(current_node.get()), old_berth, new_berth);
+            self.diff.push_reallocation(
+                VesselIndex::new(current_node.index()),
+                old_berth,
+                new_berth,
+            );
             if current_node == last_node {
                 break;
             }
@@ -1548,8 +1551,11 @@ impl<'a> Mutator<'a> {
         let mut current_node = self.graph.vessel_node(first);
         let last_node = self.graph.vessel_node(last);
         loop {
-            self.diff
-                .push_reallocation(VesselIndex::new(current_node.get()), old_berth, new_berth);
+            self.diff.push_reallocation(
+                VesselIndex::new(current_node.index()),
+                old_berth,
+                new_berth,
+            );
             if current_node == last_node {
                 break;
             }

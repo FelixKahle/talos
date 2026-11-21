@@ -73,7 +73,7 @@ impl std::fmt::Display for UndoInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SwapVessels { vessel_a, vessel_b } => {
-                write!(f, "Swap V{} <-> V{}", vessel_a.get(), vessel_b.get())
+                write!(f, "Swap V{} <-> V{}", vessel_a.index(), vessel_b.index())
             }
             Self::SwapSegments {
                 a_first,
@@ -83,10 +83,10 @@ impl std::fmt::Display for UndoInstruction {
             } => write!(
                 f,
                 "Swap Segment(V{}..V{}) <-> Segment(V{}..V{})",
-                a_first.get(),
-                a_last.get(),
-                b_first.get(),
-                b_last.get()
+                a_first.index(),
+                a_last.index(),
+                b_first.index(),
+                b_last.index()
             ),
             Self::ReverseSegment {
                 original_first,
@@ -94,8 +94,8 @@ impl std::fmt::Display for UndoInstruction {
             } => write!(
                 f,
                 "Reverse Segment(V{}..V{}) back",
-                original_last.get(),
-                original_first.get()
+                original_last.index(),
+                original_first.index()
             ),
             Self::RelocateAfterVessel {
                 vessel,
@@ -103,14 +103,14 @@ impl std::fmt::Display for UndoInstruction {
             } => write!(
                 f,
                 "Relocate V{} back after V{}",
-                vessel.get(),
-                predecessor.get()
+                vessel.index(),
+                predecessor.index()
             ),
             Self::RelocateToHead { vessel, berth } => write!(
                 f,
                 "Relocate V{} back to head of Berth {}",
-                vessel.get(),
-                berth.get()
+                vessel.index(),
+                berth.index()
             ),
             Self::RelocateSegmentAfterVessel {
                 segment_first,
@@ -119,9 +119,9 @@ impl std::fmt::Display for UndoInstruction {
             } => write!(
                 f,
                 "Relocate Segment(V{}..V{}) back after V{}",
-                segment_first.get(),
-                segment_last.get(),
-                predecessor.get()
+                segment_first.index(),
+                segment_last.index(),
+                predecessor.index()
             ),
             Self::RelocateSegmentToHead {
                 segment_first,
@@ -130,9 +130,9 @@ impl std::fmt::Display for UndoInstruction {
             } => write!(
                 f,
                 "Relocate Segment(V{}..V{}) back to head of Berth {}",
-                segment_first.get(),
-                segment_last.get(),
-                berth.get()
+                segment_first.index(),
+                segment_last.index(),
+                berth.index()
             ),
         }
     }

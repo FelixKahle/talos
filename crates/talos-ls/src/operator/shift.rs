@@ -81,18 +81,18 @@ where
         _stats: &LocalSearchStatistics,
     ) -> bool {
         loop {
-            if self.cursor_v >= self.num_vessels {
+            if self.cursor_v.index() >= self.num_vessels {
                 return false;
             }
-            if self.cursor_anchor >= self.num_vessels {
-                self.cursor_v += 1;
+            if self.cursor_anchor.index() >= self.num_vessels {
+                self.cursor_v = VesselIndex::new(self.cursor_v.index() + 1);
                 self.cursor_anchor = VesselIndex::new(0);
                 continue;
             }
 
             let v = self.cursor_v;
             let anchor = self.cursor_anchor;
-            self.cursor_anchor += 1;
+            self.cursor_anchor = VesselIndex::new(self.cursor_anchor.index() + 1);
 
             // 1. Cannot shift a vessel after itself
             if v == anchor {
@@ -199,18 +199,18 @@ where
         _stats: &LocalSearchStatistics,
     ) -> bool {
         loop {
-            if self.cursor_v >= self.num_vessels {
+            if self.cursor_v.index() >= self.num_vessels {
                 return false;
             }
-            if self.cursor_anchor >= self.num_vessels {
-                self.cursor_v += 1;
+            if self.cursor_anchor.index() >= self.num_vessels {
+                self.cursor_v = VesselIndex::new(self.cursor_v.index() + 1);
                 self.cursor_anchor = VesselIndex::new(0);
                 continue;
             }
 
             let v = self.cursor_v;
             let anchor = self.cursor_anchor;
-            self.cursor_anchor += 1;
+            self.cursor_anchor = VesselIndex::new(self.cursor_anchor.index() + 1);
 
             if v == anchor {
                 continue;
