@@ -1583,6 +1583,24 @@ mod tests {
     }
 
     #[test]
+    fn test_relocate_segment_to_the_tail_it_already_ends_keeps_the_graph() {
+        let mut graph = setup_graph();
+        let original = graph.clone();
+        let mut undo = ScheduleGraphUndoLog::new(10);
+        let mut diff = ScheduleGraphDiff::new();
+        let mut touched = TouchedBerths::new(graph.num_berths());
+        Mutator::new(&mut graph, &mut undo, &mut diff, &mut touched).relocate_segment_to_tail(
+            v(3),
+            v(4),
+            b(1),
+        );
+        assert_eq!(graph, original);
+        assert_eq!(diff.link_broken_count(), 0);
+        undo.apply_rollback(&mut graph);
+        assert_eq!(graph, original);
+    }
+
+    #[test]
     fn test_mutator_then_undo_rollback() {
         let mut graph = setup_graph();
         let original = graph.clone();

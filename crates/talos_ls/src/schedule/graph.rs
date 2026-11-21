@@ -1381,9 +1381,8 @@ impl ScheduleGraph {
         assert!(berth.index() < self.num_berths);
 
         let sentinel = self.sentinel(berth);
-        let tail = self.arena.prev(sentinel);
         self.arena
-            .relocate_segment_after(first.map(), last.map(), tail);
+            .relocate_segment_before(first.map(), last.map(), sentinel);
         self.update_segment_berth(first.map(), last.map(), berth);
     }
 
@@ -1402,10 +1401,10 @@ impl ScheduleGraph {
         debug_assert!(berth.index() < self.num_berths);
 
         let sentinel = self.sentinel(berth);
-        let tail = unsafe { self.arena.prev_unchecked(sentinel) };
+        // Before the sentinel rather than after the tail, which lies inside the segment when it ends the berth.
         unsafe {
             self.arena
-                .relocate_segment_after_unchecked(first.map(), last.map(), tail)
+                .relocate_segment_before_unchecked(first.map(), last.map(), sentinel)
         };
         unsafe { self.update_segment_berth_unchecked(first.map(), last.map(), berth) };
     }
@@ -1792,6 +1791,17 @@ mod tests {
         graph.relocate_segment_to_tail(vessel(0), vessel(2), berth(1));
         check_berth(&graph, 0, &[1]);
         check_berth(&graph, 1, &[3, 4, 0, 2]);
+    }
+
+    // The segment [V3, V4] already ends berth 1, so the berth's tail lies inside it.
+    #[test]
+    fn test_relocate_segment_to_the_tail_it_already_ends_changes_nothing() {
+        let mut graph = standard_fixture();
+        graph.relocate_segment_to_tail(vessel(3), vessel(4), berth(1));
+        check_berth(&graph, 1, &[3, 4]);
+        // SAFETY: the vessels and the berth are the graph's.
+        unsafe { graph.relocate_segment_to_tail_unchecked(vessel(3), vessel(4), berth(1)) };
+        check_berth(&graph, 1, &[3, 4]);
     }
 
     #[test]
