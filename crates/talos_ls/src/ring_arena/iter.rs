@@ -84,6 +84,13 @@ impl FusedIterator for RingSequenceIter<'_> {}
 /// The links `(node, successor)` between consecutive nodes of a [`RingSequenceIter`] along the successors.
 // Invariant: that of the sequence it walks; it reads no column of its own.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the links of a walk, which only the checked step `links` makes"
+    )
+)]
 pub struct RingLinkIter<'a> {
     /// The nodes whose consecutive pairs are the links.
     sequence: RingSequenceIter<'a>,
@@ -91,6 +98,13 @@ pub struct RingLinkIter<'a> {
 
 impl<'a> RingLinkIter<'a> {
     /// The links between consecutive nodes of `sequence`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the links of a walk, which only the checked step `links` makes"
+        )
+    )]
     pub(super) fn new(sequence: RingSequenceIter<'a>) -> Self {
         Self { sequence }
     }

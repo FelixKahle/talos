@@ -44,6 +44,13 @@ pub struct RingArena {
 }
 
 /// A safe step of the arena, as its refusal names it.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the names of the checked twins of the unchecked steps: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+    )
+)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
     Next,
@@ -217,6 +224,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `start` or `stop` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn sequence(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
         let [start, stop] = match self.slots([start, stop]) {
@@ -250,6 +264,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `start` or `stop` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn sequence_rev(&self, start: Node, stop: Node) -> RingSequenceIter<'_> {
         let [start, stop] = match self.slots([start, stop]) {
@@ -282,6 +303,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `start` or `stop` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn links(&self, start: Node, stop: Node) -> RingLinkIter<'_> {
         let [start, stop] = match self.slots([start, stop]) {
@@ -301,6 +329,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `first` or `second` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn swap_nodes(&mut self, first: Node, second: Node) {
         let [first, second] = match self.slots([first, second]) {
@@ -344,6 +379,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if any of the four nodes lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn swap_segments(&mut self, a_first: Node, a_last: Node, b_first: Node, b_last: Node) {
         let [a_first, a_last, b_first, b_last] =
@@ -417,6 +459,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `node` or `anchor` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn relocate_after(&mut self, node: Node, anchor: Node) {
         let [node, anchor] = match self.slots([node, anchor]) {
@@ -449,6 +498,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `node` or `anchor` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn relocate_before(&mut self, node: Node, anchor: Node) {
         let [node, anchor] = match self.slots([node, anchor]) {
@@ -492,6 +548,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `first`, `last` or `anchor` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn relocate_segment_after(&mut self, first: Node, last: Node, anchor: Node) {
         let [first, last, anchor] = match self.slots([first, last, anchor]) {
@@ -568,6 +631,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `first`, `last` or `anchor` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn relocate_segment_before(&mut self, first: Node, last: Node, anchor: Node) {
         let [first, last, anchor] = match self.slots([first, last, anchor]) {
@@ -645,6 +715,13 @@ impl RingArena {
     /// # Panics
     ///
     /// Panics if `first` or `last` lies outside the arena.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a checked twin of an unchecked step: the schedule graph proves its nodes and calls only the unchecked steps, and the arena's tests check the two agree"
+        )
+    )]
     #[track_caller]
     pub fn reverse_segment(&mut self, first: Node, last: Node) {
         let [first, last] = match self.slots([first, last]) {

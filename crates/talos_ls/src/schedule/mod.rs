@@ -17,16 +17,8 @@ mod undo_log;
 
 mod mutator;
 
-pub use diff::{
-    DiffEdgeIter, DiffReallocationIter, ScheduleGraphDiff, ScheduleGraphDiffEdge,
-    ScheduleGraphDiffTracker,
-};
-pub use graph::{
-    BerthEdgeIter, BerthTopologyIter, ScheduleGraph, ScheduleGraphEdge, VesselSequenceIter,
-    VesselSequenceRevIter,
-};
+pub use diff::{DiffEdgeIter, DiffReallocationIter, ScheduleGraphDiff, ScheduleGraphDiffEdge};
+pub use graph::{BerthTopologyIter, ScheduleGraph, VesselSequenceIter};
 pub use mutator::Mutator;
-pub use touched_berths::{
-    TouchedBerths, TouchedBerthsTracker, TouchedIndicesIter, UntouchedBerthsIter,
-};
-pub use undo_log::{ScheduleGraphUndoLog, ScheduleGraphUndoTracker, UndoInstruction, UndoLogIter};
+pub use touched_berths::{TouchedBerths, TouchedIndicesIter, UntouchedBerthsIter};
+pub use undo_log::{ScheduleGraphUndoLog, UndoInstruction, UndoLogIter};

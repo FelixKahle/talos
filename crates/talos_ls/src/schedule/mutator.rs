@@ -1,115 +1,66 @@
 // Copyright 2026 Felix Kahle
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! High-level mutation engine for ScheduleGraph topology changes.
-//!
-//! This module provides Mutator, a transactional wrapper around a
-//! ScheduleGraph that intercepts every topological modification and
-//! automatically records two side-products:
-//!
-//! - An undo log (ScheduleGraphUndoLog) that captures the inverse of each
-//!   operation, enabling callers to roll back an arbitrary sequence of
-//!   mutations in reverse order.
-//!
-//! - A structural diff (ScheduleGraphDiff) that records which linked-list
-//!   edges were broken or created and which vessels were reallocated between
-//!   berths. Downstream consumers use this diff to determine which berths
-//!   need re-decoding after a mutation.
-//!
-//! Mutator exposes both bounds-checked and unchecked variants of every
-//! operation. The checked variants panic on out-of-bounds indices while the
-//! unchecked variants use only debug assertions and skip bounds checks in
-//! release builds. The supported operations are:
-//!
-//! - Single-vessel and segment swaps
-//! - Segment reversal
-//! - Relocation of a single vessel or contiguous segment to an arbitrary
-//!   position (after/before a reference vessel, or to the head/tail of a
-//!   berth)
-//!
-//! Edge diff tracking is handled by EdgeDeltaTracker, a stack-allocated
-//! micro-tracker that snapshots up to four nodes' next pointers before a
-//! mutation and emits the net edge changes into the diff afterward.
+//! The moves of the local search on a schedule graph, each recorded as it is made.
 
-use super::diff::ScheduleGraphDiffTracker;
-use super::graph::{Outside, ScheduleGraph};
-use super::touched_berths::TouchedBerthsTracker;
-use super::undo_log::ScheduleGraphUndoTracker;
+use super::diff::ScheduleGraphDiff;
+use super::graph::ScheduleGraph;
+use super::touched_berths::TouchedBerths;
+use super::undo_log::ScheduleGraphUndoLog;
 use crate::ring_arena::Node;
+use std::fmt;
 use talos_model::{BerthIndex, VesselIndex};
 
 // ----------------------------------------------------------------
-// EdgeDeltaTracker
+// LinkSnapshot
 // ----------------------------------------------------------------
 
-/// A micro-tracker that lives purely on the stack.
-///
-/// Records up to 4 nodes' `next` pointers *before* a mutation, then after
-/// the mutation, emits the exact net edge differences into the diff.
-///
-/// This is the one place that reaches through `graph.arena()` for raw
-/// topology access — justified by the hot-loop performance requirement.
-struct EdgeDeltaTracker {
-    nodes: [Node; 4],
-    old_nexts: [Node; 4],
-    len: usize,
+/// The successors of up to `N` nodes before a move, from which the links the move changed are read after it.
+#[derive(Clone, Copy, Debug)]
+struct LinkSnapshot<const N: usize> {
+    /// The nodes whose outgoing link a move may change; one may stand more than once.
+    nodes: [Node; N],
+    /// The successor of each node before the move, per node of `nodes`.
+    successors: [Node; N],
 }
 
-impl EdgeDeltaTracker {
+impl<const N: usize> LinkSnapshot<N> {
+    /// The successors of `nodes` in `graph` as it stands.
+    ///
+    /// # Safety
+    ///
+    /// Every node must be a vessel's node or a berth's sentinel of `graph`.
     #[inline(always)]
-    fn new() -> Self {
-        Self {
-            nodes: [Node::new(0); 4],
-            old_nexts: [Node::new(0); 4],
-            len: 0,
-        }
+    unsafe fn new_unchecked(graph: &ScheduleGraph, nodes: [Node; N]) -> Self {
+        // SAFETY: every node is the graph's, the precondition of this function.
+        let successors = nodes.map(|node| unsafe { graph.next_node_unchecked(node) });
+        Self { nodes, successors }
     }
 
-    /// Records a node's `next` pointer before mutation.
-    /// Uses raw arena access for zero-overhead reads.
+    /// Records in `diff` every link of the snapshot's nodes that differs in `graph` now, once per node.
+    ///
+    /// # Safety
+    ///
+    /// Every node of the snapshot must be a vessel's node or a berth's sentinel of `graph`, which holds when it is
+    /// the graph the snapshot was taken of, with its counts unchanged.
     #[inline(always)]
-    fn track(&mut self, node: Node, graph: &ScheduleGraph) {
-        // Unrolled dedup for len <= 4
-        if self.len > 0 && unsafe { *self.nodes.get_unchecked(0) } == node {
-            return;
-        }
-        if self.len > 1 && unsafe { *self.nodes.get_unchecked(1) } == node {
-            return;
-        }
-        if self.len > 2 && unsafe { *self.nodes.get_unchecked(2) } == node {
-            return;
-        }
-        if self.len > 3 && unsafe { *self.nodes.get_unchecked(3) } == node {
-            return;
-        }
-
-        unsafe {
-            debug_assert!(self.len < 4);
-            *self.nodes.get_unchecked_mut(self.len) = node;
-            *self.old_nexts.get_unchecked_mut(self.len) = graph.next_node_unchecked(node);
-        }
-        self.len += 1;
-        debug_assert!(self.len <= 4);
-    }
-
-    /// Compares recorded state against current state and emits diffs.
-    #[inline(always)]
-    fn commit(self, graph: &ScheduleGraph, diff: &mut ScheduleGraphDiffTracker<'_>) {
-        for i in 0..self.len {
-            let node = unsafe { *self.nodes.get_unchecked(i) };
-            let old_next = unsafe { *self.old_nexts.get_unchecked(i) };
-            let new_next = unsafe { graph.next_node_unchecked(node) };
-
-            if old_next != new_next {
-                diff.push_link_broken(node, old_next);
-                diff.push_link_created(node, new_next);
+    unsafe fn commit_unchecked(&self, graph: &ScheduleGraph, diff: &mut ScheduleGraphDiff) {
+        for (index, (&node, &before)) in self.nodes.iter().zip(&self.successors).enumerate() {
+            if self.nodes[..index].contains(&node) {
+                continue;
+            }
+            // SAFETY: `node` is the graph's, the precondition of this function.
+            let after = unsafe { graph.next_node_unchecked(node) };
+            if before != after {
+                diff.push_link_broken(node, before);
+                diff.push_link_created(node, after);
             }
         }
     }
 }
 
 // ----------------------------------------------------------------
-// MoveRefusal
+// Move
 // ----------------------------------------------------------------
 
 /// A safe move of a [`Mutator`], as its refusal names it.
@@ -128,8 +79,8 @@ enum Move {
     RelocateSegmentToTail,
 }
 
-impl std::fmt::Display for Move {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Move {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::SwapVessels => "swap_vessels",
             Self::SwapSegments => "swap_segments",
@@ -147,129 +98,164 @@ impl std::fmt::Display for Move {
     }
 }
 
-/// An id handed to a safe move of a mutator that is not one of its graph's.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct MoveRefusal {
-    /// The move that was handed the id.
-    step: Move,
-    /// The first id handed over that is not the graph's, vessels before berths.
-    outside: Outside,
-}
-
-impl MoveRefusal {
-    /// Panics with the refusal of the move.
-    // Kept out of line so that the check of every safe move stays a compare and a branch on the caller's path.
-    #[cold]
-    #[inline(never)]
-    #[track_caller]
-    fn panic(self) -> ! {
-        panic!("{self}")
-    }
-}
-
-impl std::fmt::Display for MoveRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "called {} with {}", self.step, self.outside)
-    }
-}
-
 // ----------------------------------------------------------------
 // Mutator
 // ----------------------------------------------------------------
 
-/// A mutation engine for applying topological changes to a `ScheduleGraph`.
+/// The moves of the local search on a [`ScheduleGraph`], each recorded as it is made.
 ///
-/// Automatically records every mutation into a `ScheduleGraphUndoLog` and
-/// tracks edge/reallocation diffs. The public API uses only `VesselIndex`
-/// and `BerthIndex`.
+/// Every move is recorded three ways: its inverse in an undo log, so that a rejected candidate is undone; the
+/// links it broke and made and the vessels it moved between berths in a diff, which the metaheuristics read; and
+/// the berths whose order it changed among the touched berths, which the decoder decodes again. A move that
+/// changes nothing records nothing where its doc says so.
+///
+/// Each move comes as a safe form, which checks in every build that its vessels and berths are the graph's, and an
+/// `_unchecked` twin for the operator whose loop proves that they are.
+// Invariant: `touched` counts as many berths as `graph`. Unchecked marks of a berth rest on it; `new` checks it,
+// and neither count can change while the mutator holds both borrows.
 #[derive(Debug)]
 pub struct Mutator<'a> {
+    /// The graph the moves change.
     graph: &'a mut ScheduleGraph,
-    undo: ScheduleGraphUndoTracker<'a>,
-    diff: ScheduleGraphDiffTracker<'a>,
-    touched: TouchedBerthsTracker<'a>,
+    /// The inverse of every move made, the latest last.
+    undo: &'a mut ScheduleGraphUndoLog,
+    /// The links and berths the moves changed.
+    diff: &'a mut ScheduleGraphDiff,
+    /// The berths whose order the moves changed.
+    touched: &'a mut TouchedBerths,
 }
 
 impl<'a> Mutator<'a> {
-    /// Creates a new `Mutator` that wraps the given graph, undo log, diff,
-    /// and touched-berths tracker.
+    /// The mutator that makes moves on `graph` and records them in `undo`, `diff` and `touched`.
     ///
-    /// Every subsequent mutation will be recorded into `undo` and `diff`,
-    /// and any berth whose topology changes will be marked in `touched`.
-    #[inline(always)]
-    pub fn new<U, D, B>(graph: &'a mut ScheduleGraph, undo: U, diff: D, touched: B) -> Self
-    where
-        U: Into<ScheduleGraphUndoTracker<'a>>,
-        D: Into<ScheduleGraphDiffTracker<'a>>,
-        B: Into<TouchedBerthsTracker<'a>>,
-    {
+    /// # Panics
+    ///
+    /// Panics if `touched` does not count as many berths as `graph`.
+    #[inline]
+    #[track_caller]
+    pub fn new(
+        graph: &'a mut ScheduleGraph,
+        undo: &'a mut ScheduleGraphUndoLog,
+        diff: &'a mut ScheduleGraphDiff,
+        touched: &'a mut TouchedBerths,
+    ) -> Self {
+        assert!(
+            touched.num_berths() == graph.num_berths(),
+            "called `Mutator::new` with touched berths of {} berths for a graph of {}",
+            touched.num_berths(),
+            graph.num_berths()
+        );
         Self {
             graph,
-            undo: undo.into(),
-            diff: diff.into(),
-            touched: touched.into(),
+            undo,
+            diff,
+            touched,
         }
     }
 
-    /// Returns a shared reference to the underlying `ScheduleGraph`.
+    /// The graph the moves change.
     #[inline(always)]
     pub fn graph(&self) -> &ScheduleGraph {
         self.graph
     }
 
-    /// Swaps the positions of two vessels in the schedule graph.
+    /// Panics with the refusal of `step` if one of `vessels` or `berths` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    fn check<const V: usize, const B: usize>(
+        &self,
+        step: Move,
+        vessels: [VesselIndex; V],
+        berths: [BerthIndex; B],
+    ) {
+        if let Some(refusal) = self.graph.refusal(step, vessels, berths) {
+            refusal.panic();
+        }
+    }
+
+    /// Exchanges the places of `a` and `b`, on one berth or across two; nothing changes and nothing is recorded if
+    /// they are one vessel.
     ///
     /// ```text
-    /// Before:
-    ///   Berth X: ... <-> Prev_A <-> A <-> Next_A <-> ...
-    ///   Berth Y: ... <-> Prev_B <-> B <-> Next_B <-> ...
-    ///
-    /// After:
-    ///   Berth X: ... <-> Prev_A <-> B <-> Next_A <-> ...
-    ///   Berth Y: ... <-> Prev_B <-> A <-> Next_B <-> ...
+    /// before:  ... prev_a -> a -> next_a ...      ... prev_b -> b -> next_b ...
+    /// after:   ... prev_a -> b -> next_a ...      ... prev_b -> a -> next_b ...
     /// ```
-    ///
-    /// Records the swap in the undo log, emits edge diffs for every
-    /// changed `next` pointer, and emits reallocation entries if the
-    /// two vessels belonged to different berths.
-    ///
-    /// No-op if `a == b`.
     ///
     /// # Panics
     ///
-    /// Panics if either vessel is out of bounds.
+    /// Panics if any of `a` and `b` is not one of the graph's.
     #[inline]
     #[track_caller]
     pub fn swap_vessels(&mut self, a: VesselIndex, b: VesselIndex) {
-        if let Some(refusal) = self.refusal(Move::SwapVessels, [a, b], []) {
-            refusal.panic();
-        }
-        debug_assert!(self.refusal(Move::SwapVessels, [a, b], []).is_none());
-        // SAFETY: `a` and `b` are the graph's, as the refusal above found, which is all the unchecked move asks.
+        self.check(Move::SwapVessels, [a, b], []);
+        // SAFETY: `a` and `b` are the graph's, as the check above found.
         unsafe { self.swap_vessels_unchecked(a, b) }
     }
 
-    /// Swaps two contiguous segments of vessels.
+    /// The move [`swap_vessels`](Self::swap_vessels) makes, for ids the caller knows to be the graph's.
+    ///
+    /// # Safety
+    ///
+    /// `a` and `b` must be the graph's, the condition [`swap_vessels`](Self::swap_vessels) checks.
+    #[inline]
+    pub unsafe fn swap_vessels_unchecked(&mut self, a: VesselIndex, b: VesselIndex) {
+        debug_assert!(
+            a.index() < self.graph.num_vessels() && b.index() < self.graph.num_vessels(),
+            "called `Mutator::swap_vessels_unchecked` with {a} or {b}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
+        if a == b {
+            return;
+        }
+        let (node_a, node_b) = (self.graph.vessel_node(a), self.graph.vessel_node(b));
+        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes and the nodes
+        // read before them are the graph's, and so are their berths.
+        let (links, berth_a, berth_b) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(node_a),
+                self.graph.prev_node_unchecked(node_b),
+                node_a,
+                node_b,
+            ];
+            let berths = (
+                self.graph.vessel_berth_unchecked(a),
+                self.graph.vessel_berth_unchecked(b),
+            );
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                berths.0,
+                berths.1,
+            )
+        };
+        self.undo.push_swap_vessels(a, b);
+        // SAFETY: both vessels and both berths are the graph's, as above.
+        unsafe {
+            self.touch_unchecked(berth_a);
+            self.touch_unchecked(berth_b);
+            self.graph.swap_vessels_unchecked(a, b);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(a, a, berth_a);
+            self.record_berth_change_unchecked(b, b, berth_b);
+        }
+    }
+
+    /// Exchanges the places of the segments `a_first ..= a_last` and `b_first ..= b_last`, on one berth or across
+    /// two; nothing changes and nothing is recorded if both start at one vessel.
     ///
     /// ```text
-    /// Before:
-    ///   Berth X: ... <-> Prev_A <-> [ A_First ... A_Last ] <-> Next_A <-> ...
-    ///   Berth Y: ... <-> Prev_B <-> [ B_First ... B_Last ] <-> Next_B <-> ...
-    ///
-    /// After:
-    ///   Berth X: ... <-> Prev_A <-> [ B_First ... B_Last ] <-> Next_A <-> ...
-    ///   Berth Y: ... <-> Prev_B <-> [ A_First ... A_Last ] <-> Next_B <-> ...
+    /// before:  ... prev_a -> [a_first ... a_last] -> next_a ...   ... prev_b -> [b_first ... b_last] -> next_b ...
+    /// after:   ... prev_a -> [b_first ... b_last] -> next_a ...   ... prev_b -> [a_first ... a_last] -> next_b ...
     /// ```
     ///
-    /// Records the swap in the undo log, emits edge diffs, and emits
-    /// reallocation entries for every vessel in each segment if the
-    /// segments belonged to different berths.
+    /// # Preconditions
     ///
-    /// No-op if `a_first == b_first`.
+    /// `a_last` follows `a_first` on its berth, `b_last` follows `b_first`, and the segments share no vessel. Otherwise
+    /// the order breaks, though no access leaves the graph; a debug build checks it.
     ///
     /// # Panics
     ///
-    /// Panics if any vessel is out of bounds.
+    /// Panics if any of `a_first`, `a_last`, `b_first` and `b_last` is not one of the graph's.
     #[inline]
     #[track_caller]
     pub fn swap_segments(
@@ -279,430 +265,20 @@ impl<'a> Mutator<'a> {
         b_first: VesselIndex,
         b_last: VesselIndex,
     ) {
-        if let Some(refusal) =
-            self.refusal(Move::SwapSegments, [a_first, a_last, b_first, b_last], [])
-        {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::SwapSegments, [a_first, a_last, b_first, b_last], [])
-                .is_none()
-        );
-        // SAFETY: `a_first`, `a_last`, `b_first` and `b_last` are the graph's, as the refusal above found, which is all the unchecked move asks.
+        self.check(Move::SwapSegments, [a_first, a_last, b_first, b_last], []);
+        // SAFETY: `a_first`, `a_last`, `b_first` and `b_last` are the graph's, as the check above found.
         unsafe { self.swap_segments_unchecked(a_first, a_last, b_first, b_last) }
     }
 
-    /// Reverses the internal ordering of a contiguous segment of vessels.
+    /// The move [`swap_segments`](Self::swap_segments) makes, for ids the caller knows to be the graph's.
     ///
-    /// ```text
-    /// Before:
-    ///   ... <-> Prev <-> [ A <-> B <-> C <-> D ] <-> Next <-> ...
-    ///                      ^                 ^
-    ///                    first              last
+    /// # Preconditions
     ///
-    /// After:
-    ///   ... <-> Prev <-> [ D <-> C <-> B <-> A ] <-> Next <-> ...
-    /// ```
-    ///
-    /// Records the reversal in the undo log and emits edge diffs for
-    /// every internal link that was reversed, plus the two boundary
-    /// links. No reallocation entries are emitted because reversal
-    /// does not change berth assignments.
-    ///
-    /// No-op if `first == last`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if either vessel is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
-        if let Some(refusal) = self.refusal(Move::ReverseSegment, [first, last], []) {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::ReverseSegment, [first, last], [])
-                .is_none()
-        );
-        // SAFETY: `first` and `last` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.reverse_segment_unchecked(first, last) }
-    }
-
-    /// Relocates a single vessel to immediately follow another vessel.
-    ///
-    /// ```text
-    /// Before:
-    ///   Source: ... <-> Prev <-> Vessel <-> Next <-> ...
-    ///   Target: ... <-> Anchor <-> Anchor_Next <-> ...
-    ///
-    /// After:
-    ///   Source: ... <-> Prev <------------> Next <-> ...
-    ///   Target: ... <-> Anchor <-> Vessel <-> Anchor_Next <-> ...
-    /// ```
-    ///
-    /// Records the original position in the undo log, emits edge diffs,
-    /// and emits a reallocation entry if the vessel changed berths.
-    ///
-    /// No-op if `vessel == anchor` or `vessel` already follows `anchor`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if either vessel is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_after(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
-        if let Some(refusal) = self.refusal(Move::RelocateAfter, [vessel, anchor], []) {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::RelocateAfter, [vessel, anchor], [])
-                .is_none()
-        );
-        // SAFETY: `vessel` and `anchor` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.relocate_after_unchecked(vessel, anchor) }
-    }
-
-    /// Relocates a single vessel to immediately precede another vessel.
-    ///
-    /// ```text
-    /// Before:
-    ///   Source: ... <-> Prev <-> Vessel <-> Next <-> ...
-    ///   Target: ... <-> Ref_Prev <-> Reference <-> ...
-    ///
-    /// After:
-    ///   Source: ... <-> Prev <------------> Next <-> ...
-    ///   Target: ... <-> Ref_Prev <-> Vessel <-> Reference <-> ...
-    /// ```
-    ///
-    /// Records the original position in the undo log, emits edge diffs,
-    /// and emits a reallocation entry if the vessel changed berths.
-    ///
-    /// No-op if `vessel == reference` or `vessel` already precedes `reference`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if either vessel is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_before(&mut self, vessel: VesselIndex, reference: VesselIndex) {
-        if let Some(refusal) = self.refusal(Move::RelocateBefore, [vessel, reference], []) {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::RelocateBefore, [vessel, reference], [])
-                .is_none()
-        );
-        // SAFETY: `vessel` and `reference` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.relocate_before_unchecked(vessel, reference) }
-    }
-
-    /// Relocates a single vessel to the head (first position) of a berth.
-    ///
-    /// ```text
-    /// Before:
-    ///   Source:  ... <-> Prev <-> Vessel <-> Next <-> ...
-    ///   Target:  Sentinel <-> Old_Head <-> ...
-    ///
-    /// After:
-    ///   Source:  ... <-> Prev <------------> Next <-> ...
-    ///   Target:  Sentinel <-> Vessel <-> Old_Head <-> ...
-    /// ```
-    ///
-    /// Records the original position in the undo log, emits edge diffs,
-    /// and emits a reallocation entry if the vessel changed berths.
-    ///
-    /// # Panics
-    ///
-    /// Panics if vessel or berth is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        if let Some(refusal) = self.refusal(Move::RelocateToHead, [vessel], [berth]) {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::RelocateToHead, [vessel], [berth])
-                .is_none()
-        );
-        // SAFETY: `vessel` and `berth` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.relocate_to_head_unchecked(vessel, berth) }
-    }
-
-    /// Relocates a single vessel to the tail (last position) of a berth.
-    ///
-    /// ```text
-    /// Before:
-    ///   Source:  ... <-> Prev <-> Vessel <-> Next <-> ...
-    ///   Target:  ... <-> Old_Tail <-> Sentinel
-    ///
-    /// After:
-    ///   Source:  ... <-> Prev <------------> Next <-> ...
-    ///   Target:  ... <-> Old_Tail <-> Vessel <-> Sentinel
-    /// ```
-    ///
-    /// Records the original position in the undo log, emits edge diffs,
-    /// and emits a reallocation entry if the vessel changed berths.
-    ///
-    /// # Panics
-    ///
-    /// Panics if vessel or berth is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_to_tail(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        if let Some(refusal) = self.refusal(Move::RelocateToTail, [vessel], [berth]) {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::RelocateToTail, [vessel], [berth])
-                .is_none()
-        );
-        // SAFETY: `vessel` and `berth` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.relocate_to_tail_unchecked(vessel, berth) }
-    }
-
-    /// Relocates a contiguous segment of vessels to immediately follow
-    /// another vessel.
-    ///
-    /// ```text
-    /// Before:
-    ///   Source: ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
-    ///   Target: ... <-> Anchor <-> Anchor_Next <-> ...
-    ///
-    /// After:
-    ///   Source: ... <-> Prev <---------------------> Next <-> ...
-    ///   Target: ... <-> Anchor <-> [ First ... Last ] <-> Anchor_Next <-> ...
-    /// ```
-    ///
-    /// Records the original position in the undo log, emits edge diffs,
-    /// and emits reallocation entries for every vessel in the segment if
-    /// it changed berths.
-    ///
-    /// No-op if the segment already follows `anchor`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any vessel is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_segment_after(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        anchor: VesselIndex,
-    ) {
-        if let Some(refusal) = self.refusal(Move::RelocateSegmentAfter, [first, last, anchor], []) {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::RelocateSegmentAfter, [first, last, anchor], [])
-                .is_none()
-        );
-        // SAFETY: `first`, `last` and `anchor` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.relocate_segment_after_unchecked(first, last, anchor) }
-    }
-
-    /// Relocates a contiguous segment of vessels to immediately precede
-    /// another vessel.
-    ///
-    /// ```text
-    /// Before:
-    ///   Source: ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
-    ///   Target: ... <-> Ref_Prev <-> Reference <-> ...
-    ///
-    /// After:
-    ///   Source: ... <-> Prev <---------------------> Next <-> ...
-    ///   Target: ... <-> Ref_Prev <-> [ First ... Last ] <-> Reference <-> ...
-    /// ```
-    ///
-    /// Records the original position in the undo log, emits edge diffs,
-    /// and emits reallocation entries for every vessel in the segment if
-    /// it changed berths.
-    ///
-    /// No-op if the segment already precedes `reference`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any vessel is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_segment_before(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        reference: VesselIndex,
-    ) {
-        if let Some(refusal) =
-            self.refusal(Move::RelocateSegmentBefore, [first, last, reference], [])
-        {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::RelocateSegmentBefore, [first, last, reference], [])
-                .is_none()
-        );
-        // SAFETY: `first`, `last` and `reference` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.relocate_segment_before_unchecked(first, last, reference) }
-    }
-
-    /// Relocates a contiguous segment of vessels to the head (first
-    /// position) of a berth.
-    ///
-    /// ```text
-    /// Before:
-    ///   Source:  ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
-    ///   Target:  Sentinel <-> Old_Head <-> ...
-    ///
-    /// After:
-    ///   Source:  ... <-> Prev <---------------------> Next <-> ...
-    ///   Target:  Sentinel <-> [ First ... Last ] <-> Old_Head <-> ...
-    /// ```
-    ///
-    /// Records the original position in the undo log, emits edge diffs,
-    /// and emits reallocation entries for every vessel in the segment if
-    /// it changed berths.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any vessel or berth is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_segment_to_head(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        berth: BerthIndex,
-    ) {
-        if let Some(refusal) = self.refusal(Move::RelocateSegmentToHead, [first, last], [berth]) {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::RelocateSegmentToHead, [first, last], [berth])
-                .is_none()
-        );
-        // SAFETY: `first`, `last` and `berth` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.relocate_segment_to_head_unchecked(first, last, berth) }
-    }
-
-    /// Relocates a contiguous segment of vessels to the tail (last
-    /// position) of a berth.
-    ///
-    /// ```text
-    /// Before:
-    ///   Source:  ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
-    ///   Target:  ... <-> Old_Tail <-> Sentinel
-    ///
-    /// After:
-    ///   Source:  ... <-> Prev <---------------------> Next <-> ...
-    ///   Target:  ... <-> Old_Tail <-> [ First ... Last ] <-> Sentinel
-    /// ```
-    ///
-    /// Records the original position in the undo log, emits edge diffs,
-    /// and emits reallocation entries for every vessel in the segment if
-    /// it changed berths.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any vessel or berth is out of bounds.
-    #[inline]
-    #[track_caller]
-    pub fn relocate_segment_to_tail(
-        &mut self,
-        first: VesselIndex,
-        last: VesselIndex,
-        berth: BerthIndex,
-    ) {
-        if let Some(refusal) = self.refusal(Move::RelocateSegmentToTail, [first, last], [berth]) {
-            refusal.panic();
-        }
-        debug_assert!(
-            self.refusal(Move::RelocateSegmentToTail, [first, last], [berth])
-                .is_none()
-        );
-        // SAFETY: `first`, `last` and `berth` are the graph's, as the refusal above found, which is all the unchecked move asks.
-        unsafe { self.relocate_segment_to_tail_unchecked(first, last, berth) }
-    }
-
-    /// Swaps the positions of two vessels in the schedule graph.
-    ///
-    /// ```text
-    /// Before:
-    ///   Berth X: ... <-> Prev_A <-> A <-> Next_A <-> ...
-    ///   Berth Y: ... <-> Prev_B <-> B <-> Next_B <-> ...
-    ///
-    /// After:
-    ///   Berth X: ... <-> Prev_A <-> B <-> Next_A <-> ...
-    ///   Berth Y: ... <-> Prev_B <-> A <-> Next_B <-> ...
-    /// ```
-    ///
-    /// Unchecked version of `swap_vessels`. Uses `debug_assert!` only.
+    /// Those of [`swap_segments`](Self::swap_segments).
     ///
     /// # Safety
     ///
-    /// Both vessels must be in bounds.
-    #[inline]
-    pub unsafe fn swap_vessels_unchecked(&mut self, a: VesselIndex, b: VesselIndex) {
-        debug_assert!(a.index() < self.graph.num_vessels());
-        debug_assert!(b.index() < self.graph.num_vessels());
-
-        if a == b {
-            return;
-        }
-
-        let node_a = self.graph.vessel_node(a);
-        let node_b = self.graph.vessel_node(b);
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(
-            unsafe { self.graph.prev_node_unchecked(node_a) },
-            self.graph,
-        );
-        tracker.track(
-            unsafe { self.graph.prev_node_unchecked(node_b) },
-            self.graph,
-        );
-        tracker.track(node_a, self.graph);
-        tracker.track(node_b, self.graph);
-
-        let old_berth_a = unsafe { self.graph.vessel_berth_unchecked(a) };
-        let old_berth_b = unsafe { self.graph.vessel_berth_unchecked(b) };
-
-        unsafe {
-            self.touched.touch_unchecked(old_berth_a);
-            self.touched.touch_unchecked(old_berth_b);
-        }
-
-        self.undo.push_swap_vessels(a, b);
-        unsafe { self.graph.swap_vessels_unchecked(a, b) };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        let new_berth_a = unsafe { self.graph.vessel_berth_unchecked(a) };
-        let new_berth_b = unsafe { self.graph.vessel_berth_unchecked(b) };
-        if old_berth_a != new_berth_a {
-            self.diff.push_reallocation(a, old_berth_a, new_berth_a);
-        }
-        if old_berth_b != new_berth_b {
-            self.diff.push_reallocation(b, old_berth_b, new_berth_b);
-        }
-    }
-
-    /// Swaps two contiguous segments of vessels.
-    ///
-    /// ```text
-    /// Before:
-    ///   Berth X: ... <-> Prev_A <-> [ A_First ... A_Last ] <-> Next_A <-> ...
-    ///   Berth Y: ... <-> Prev_B <-> [ B_First ... B_Last ] <-> Next_B <-> ...
-    ///
-    /// After:
-    ///   Berth X: ... <-> Prev_A <-> [ B_First ... B_Last ] <-> Next_A <-> ...
-    ///   Berth Y: ... <-> Prev_B <-> [ A_First ... A_Last ] <-> Next_B <-> ...
-    /// ```
-    ///
-    /// Unchecked version of `swap_segments`. Uses `debug_assert!` only.
-    ///
-    /// # Safety
-    ///
-    /// All vessels must be in bounds. Segments must be valid and non-overlapping.
+    /// `a_first`, `a_last`, `b_first` and `b_last` must be the graph's, the condition [`swap_segments`](Self::swap_segments) checks.
     #[inline]
     pub unsafe fn swap_segments_unchecked(
         &mut self,
@@ -711,338 +287,421 @@ impl<'a> Mutator<'a> {
         b_first: VesselIndex,
         b_last: VesselIndex,
     ) {
-        debug_assert!(a_first.index() < self.graph.num_vessels());
-        debug_assert!(a_last.index() < self.graph.num_vessels());
-        debug_assert!(b_first.index() < self.graph.num_vessels());
-        debug_assert!(b_last.index() < self.graph.num_vessels());
-
+        debug_assert!(
+            a_first.index() < self.graph.num_vessels()
+                && a_last.index() < self.graph.num_vessels()
+                && b_first.index() < self.graph.num_vessels()
+                && b_last.index() < self.graph.num_vessels(),
+            "called `Mutator::swap_segments_unchecked` with {a_first} or {a_last} or {b_first} or {b_last}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
         if a_first == b_first {
             return;
         }
-
-        let a_first_node = self.graph.vessel_node(a_first);
-        let a_last_node = self.graph.vessel_node(a_last);
-        let b_first_node = self.graph.vessel_node(b_first);
-        let b_last_node = self.graph.vessel_node(b_last);
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(
-            unsafe { self.graph.prev_node_unchecked(a_first_node) },
-            self.graph,
+        let (a_first_node, b_first_node) = (
+            self.graph.vessel_node(a_first),
+            self.graph.vessel_node(b_first),
         );
-        tracker.track(a_last_node, self.graph);
-        tracker.track(
-            unsafe { self.graph.prev_node_unchecked(b_first_node) },
-            self.graph,
+        let (a_last_node, b_last_node) = (
+            self.graph.vessel_node(a_last),
+            self.graph.vessel_node(b_last),
         );
-        tracker.track(b_last_node, self.graph);
-
-        let old_berth_a = unsafe { self.graph.vessel_berth_unchecked(a_first) };
-        let old_berth_b = unsafe { self.graph.vessel_berth_unchecked(b_first) };
-
-        unsafe {
-            self.touched.touch_unchecked(old_berth_a);
-            self.touched.touch_unchecked(old_berth_b);
-        }
-
+        // SAFETY: the four vessels are the graph's, the precondition of this function, so their nodes and the nodes
+        // read before them are the graph's, and so are their berths.
+        let (links, berth_a, berth_b) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(a_first_node),
+                a_last_node,
+                self.graph.prev_node_unchecked(b_first_node),
+                b_last_node,
+            ];
+            let berths = (
+                self.graph.vessel_berth_unchecked(a_first),
+                self.graph.vessel_berth_unchecked(b_first),
+            );
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                berths.0,
+                berths.1,
+            )
+        };
         self.undo
             .push_swap_segments(a_first, a_last, b_first, b_last);
+        // SAFETY: the four vessels and both berths are the graph's, as above.
         unsafe {
+            self.touch_unchecked(berth_a);
+            self.touch_unchecked(berth_b);
             self.graph
-                .swap_segments_unchecked(a_first, a_last, b_first, b_last)
-        };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        unsafe {
-            self.record_segment_reallocation_unchecked(a_first, a_last, old_berth_a, old_berth_b)
-        };
-        unsafe {
-            self.record_segment_reallocation_unchecked(b_first, b_last, old_berth_b, old_berth_a)
-        };
+                .swap_segments_unchecked(a_first, a_last, b_first, b_last);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(a_first, a_last, berth_a);
+            self.record_berth_change_unchecked(b_first, b_last, berth_b);
+        }
     }
 
-    /// Reverses the internal ordering of a contiguous segment of vessels.
+    /// Reverses the order of the segment `first ..= last` on its berth, at a cost of its length; nothing changes
+    /// and nothing is recorded if it is one vessel.
     ///
     /// ```text
-    /// Before:
-    ///   ... <-> Prev <-> [ A <-> B <-> C <-> D ] <-> Next <-> ...
-    ///                      ^                 ^
-    ///                    first              last
-    ///
-    /// After:
-    ///   ... <-> Prev <-> [ D <-> C <-> B <-> A ] <-> Next <-> ...
+    /// before:  ... prev -> [a -> b -> c -> d] -> next ...
+    /// after:   ... prev -> [d -> c -> b -> a] -> next ...
     /// ```
     ///
-    /// Unchecked version of `reverse_segment`. Uses `debug_assert!` only.
+    /// # Preconditions
+    ///
+    /// `last` follows `first` on its berth. Otherwise the order breaks, though no access leaves the graph; a debug
+    /// build checks it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of `first` and `last` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn reverse_segment(&mut self, first: VesselIndex, last: VesselIndex) {
+        self.check(Move::ReverseSegment, [first, last], []);
+        // SAFETY: `first` and `last` are the graph's, as the check above found.
+        unsafe { self.reverse_segment_unchecked(first, last) }
+    }
+
+    /// The move [`reverse_segment`](Self::reverse_segment) makes, for ids the caller knows to be the graph's.
+    ///
+    /// # Preconditions
+    ///
+    /// Those of [`reverse_segment`](Self::reverse_segment).
     ///
     /// # Safety
     ///
-    /// Both vessels must be in bounds and form a valid contiguous segment.
+    /// `first` and `last` must be the graph's, the condition [`reverse_segment`](Self::reverse_segment) checks.
     #[inline]
     pub unsafe fn reverse_segment_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
-        debug_assert!(first.index() < self.graph.num_vessels());
-        debug_assert!(last.index() < self.graph.num_vessels());
-
+        debug_assert!(
+            first.index() < self.graph.num_vessels() && last.index() < self.graph.num_vessels(),
+            "called `Mutator::reverse_segment_unchecked` with {first} or {last}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
         if first == last {
             return;
         }
-
-        let berth = unsafe { self.graph.vessel_berth_unchecked(first) };
-        unsafe { self.touched.touch_unchecked(berth) };
-
-        let first_node = self.graph.vessel_node(first);
-        let last_node = self.graph.vessel_node(last);
-
-        let prev_first = unsafe { self.graph.prev_node_unchecked(first_node) };
-        let next_last = unsafe { self.graph.next_node_unchecked(last_node) };
-
-        self.diff.push_link_broken(prev_first, first_node);
-        self.diff.push_link_broken(last_node, next_last);
-
-        let mut current_node = first_node;
-        while current_node != last_node {
-            let next_node = unsafe { self.graph.next_node_unchecked(current_node) };
-            self.diff.push_link_broken(current_node, next_node);
-            self.diff.push_link_created(next_node, current_node);
-            current_node = next_node;
+        let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
+        // SAFETY: both vessels are the graph's, the precondition of this function, so their nodes and their berth
+        // are the graph's.
+        let (before_first, after_last, berth) = unsafe {
+            (
+                self.graph.prev_node_unchecked(first_node),
+                self.graph.next_node_unchecked(last_node),
+                self.graph.vessel_berth_unchecked(first),
+            )
+        };
+        // SAFETY: `berth` is the graph's, as above.
+        unsafe { self.touch_unchecked(berth) };
+        self.diff.push_link_broken(before_first, first_node);
+        self.diff.push_link_broken(last_node, after_last);
+        // SAFETY: both vessels are the graph's, the precondition of this function.
+        let segment = unsafe { self.graph.segment_unchecked(first, last) };
+        let mut previous = first_node;
+        for vessel in segment.skip(1) {
+            let node = self.graph.vessel_node(vessel);
+            self.diff.push_link_broken(previous, node);
+            self.diff.push_link_created(node, previous);
+            previous = node;
         }
-
-        self.diff.push_link_created(prev_first, last_node);
-        self.diff.push_link_created(first_node, next_last);
-
+        self.diff.push_link_created(before_first, last_node);
+        self.diff.push_link_created(first_node, after_last);
         self.undo.push_reverse_segment(first, last);
+        // SAFETY: both vessels are the graph's, the precondition of this function.
         unsafe { self.graph.reverse_segment_unchecked(first, last) };
     }
 
-    /// Relocates a single vessel to immediately follow another vessel.
+    /// Moves `vessel` to directly after `anchor`, on its berth or another; nothing changes and nothing is recorded if
+    /// `vessel` is `anchor` or already follows it.
     ///
     /// ```text
-    /// Before:
-    ///   Source: ... <-> Prev <-> Vessel <-> Next <-> ...
-    ///   Target: ... <-> Anchor <-> Anchor_Next <-> ...
-    ///
-    /// After:
-    ///   Source: ... <-> Prev <------------> Next <-> ...
-    ///   Target: ... <-> Anchor <-> Vessel <-> Anchor_Next <-> ...
+    /// before:  ... prev -> vessel -> next ...      ... anchor -> anchor_next ...
+    /// after:   ... prev -> next ...                ... anchor -> vessel -> anchor_next ...
     /// ```
     ///
-    /// Unchecked version of `relocate_after`. Uses `debug_assert!` only.
+    /// # Panics
+    ///
+    /// Panics if any of `vessel` and `anchor` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn relocate_after(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
+        self.check(Move::RelocateAfter, [vessel, anchor], []);
+        // SAFETY: `vessel` and `anchor` are the graph's, as the check above found.
+        unsafe { self.relocate_after_unchecked(vessel, anchor) }
+    }
+
+    /// The move [`relocate_after`](Self::relocate_after) makes, for ids the caller knows to be the graph's.
     ///
     /// # Safety
     ///
-    /// Both vessels must be in bounds.
+    /// `vessel` and `anchor` must be the graph's, the condition [`relocate_after`](Self::relocate_after) checks.
     #[inline]
     pub unsafe fn relocate_after_unchecked(&mut self, vessel: VesselIndex, anchor: VesselIndex) {
-        debug_assert!(vessel.index() < self.graph.num_vessels());
-        debug_assert!(anchor.index() < self.graph.num_vessels());
-
+        debug_assert!(
+            vessel.index() < self.graph.num_vessels() && anchor.index() < self.graph.num_vessels(),
+            "called `Mutator::relocate_after_unchecked` with {vessel} or {anchor}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
         let vessel_node = self.graph.vessel_node(vessel);
         let anchor_node = self.graph.vessel_node(anchor);
-        let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
-
-        if vessel_node == anchor_node || vessel_prev == anchor_node {
+        // SAFETY: `vessel` is the graph's, the precondition of this function, so its node is.
+        if vessel_node == anchor_node
+            || unsafe { self.graph.prev_node_unchecked(vessel_node) } == anchor_node
+        {
             return;
         }
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(vessel_prev, self.graph);
-        tracker.track(vessel_node, self.graph);
-        tracker.track(anchor_node, self.graph);
-
-        let old_berth = unsafe { self.graph.vessel_berth_unchecked(vessel) };
-        let anchor_berth = unsafe { self.graph.vessel_berth_unchecked(anchor) };
-
+        // SAFETY: the vessels are the graph's, the precondition of this function, so the nodes named here and
+        // the nodes read from the graph are the graph's, and so are the berths.
+        let (links, from, to) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(vessel_node),
+                vessel_node,
+                anchor_node,
+            ];
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                self.graph.vessel_berth_unchecked(vessel),
+                self.graph.vessel_berth_unchecked(anchor),
+            )
+        };
+        // SAFETY: the vessel and both berths are the graph's, as above.
         unsafe {
-            self.touched.touch_unchecked(old_berth);
-            self.touched.touch_unchecked(anchor_berth);
-        }
-
-        unsafe { self.record_relocate_unchecked(vessel) };
-        unsafe { self.graph.relocate_after_unchecked(vessel, anchor) };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        let final_berth = unsafe { self.graph.vessel_berth_unchecked(vessel) };
-        if old_berth != final_berth {
-            self.diff.push_reallocation(vessel, old_berth, final_berth);
+            self.touch_unchecked(from);
+            self.touch_unchecked(to);
+            self.record_position_unchecked(vessel, vessel);
+            self.graph.relocate_after_unchecked(vessel, anchor);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(vessel, vessel, from);
         }
     }
 
-    /// Relocates a single vessel to immediately precede another vessel.
+    /// Moves `vessel` to directly before `reference`, on its berth or another; nothing changes and nothing is recorded
+    /// if `vessel` is `reference` or already precedes it.
     ///
     /// ```text
-    /// Before:
-    ///   Source: ... <-> Prev <-> Vessel <-> Next <-> ...
-    ///   Target: ... <-> Ref_Prev <-> Reference <-> ...
-    ///
-    /// After:
-    ///   Source: ... <-> Prev <------------> Next <-> ...
-    ///   Target: ... <-> Ref_Prev <-> Vessel <-> Reference <-> ...
+    /// before:  ... prev -> vessel -> next ...      ... reference_prev -> reference ...
+    /// after:   ... prev -> next ...                ... reference_prev -> vessel -> reference ...
     /// ```
     ///
-    /// Unchecked version of `relocate_before`. Uses `debug_assert!` only.
+    /// # Panics
+    ///
+    /// Panics if any of `vessel` and `reference` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn relocate_before(&mut self, vessel: VesselIndex, reference: VesselIndex) {
+        self.check(Move::RelocateBefore, [vessel, reference], []);
+        // SAFETY: `vessel` and `reference` are the graph's, as the check above found.
+        unsafe { self.relocate_before_unchecked(vessel, reference) }
+    }
+
+    /// The move [`relocate_before`](Self::relocate_before) makes, for ids the caller knows to be the graph's.
     ///
     /// # Safety
     ///
-    /// Both vessels must be in bounds.
+    /// `vessel` and `reference` must be the graph's, the condition [`relocate_before`](Self::relocate_before) checks.
     #[inline]
     pub unsafe fn relocate_before_unchecked(
         &mut self,
         vessel: VesselIndex,
         reference: VesselIndex,
     ) {
-        debug_assert!(vessel.index() < self.graph.num_vessels());
-        debug_assert!(reference.index() < self.graph.num_vessels());
-
+        debug_assert!(
+            vessel.index() < self.graph.num_vessels()
+                && reference.index() < self.graph.num_vessels(),
+            "called `Mutator::relocate_before_unchecked` with {vessel} or {reference}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
         let vessel_node = self.graph.vessel_node(vessel);
         let reference_node = self.graph.vessel_node(reference);
+        // SAFETY: `reference` is the graph's, the precondition of this function, so its node is.
         let reference_prev = unsafe { self.graph.prev_node_unchecked(reference_node) };
-        let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
-
         if vessel_node == reference_node || vessel_node == reference_prev {
             return;
         }
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(vessel_prev, self.graph);
-        tracker.track(vessel_node, self.graph);
-        tracker.track(reference_prev, self.graph);
-
-        let old_berth = unsafe { self.graph.vessel_berth_unchecked(vessel) };
-        let reference_berth = unsafe { self.graph.vessel_berth_unchecked(reference) };
-
+        // SAFETY: the vessels are the graph's, the precondition of this function, so the nodes named here and
+        // the nodes read from the graph are the graph's, and so are the berths.
+        let (links, from, to) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(vessel_node),
+                vessel_node,
+                reference_prev,
+            ];
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                self.graph.vessel_berth_unchecked(vessel),
+                self.graph.vessel_berth_unchecked(reference),
+            )
+        };
+        // SAFETY: the vessel and both berths are the graph's, as above.
         unsafe {
-            self.touched.touch_unchecked(old_berth);
-            self.touched.touch_unchecked(reference_berth);
-        }
-
-        unsafe { self.record_relocate_unchecked(vessel) };
-        unsafe { self.graph.relocate_before_unchecked(vessel, reference) };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        let final_berth = unsafe { self.graph.vessel_berth_unchecked(vessel) };
-        if old_berth != final_berth {
-            self.diff.push_reallocation(vessel, old_berth, final_berth);
+            self.touch_unchecked(from);
+            self.touch_unchecked(to);
+            self.record_position_unchecked(vessel, vessel);
+            self.graph.relocate_before_unchecked(vessel, reference);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(vessel, vessel, from);
         }
     }
 
-    /// Relocates a single vessel to the head (first position) of a berth.
+    /// Moves `vessel` to the head of `berth`.
     ///
     /// ```text
-    /// Before:
-    ///   Source:  ... <-> Prev <-> Vessel <-> Next <-> ...
-    ///   Target:  Sentinel <-> Old_Head <-> ...
-    ///
-    /// After:
-    ///   Source:  ... <-> Prev <------------> Next <-> ...
-    ///   Target:  Sentinel <-> Vessel <-> Old_Head <-> ...
+    /// before:  ... prev -> vessel -> next ...      sentinel -> old_head ...
+    /// after:   ... prev -> next ...                sentinel -> vessel -> old_head ...
     /// ```
     ///
-    /// Unchecked version of `relocate_to_head`. Uses `debug_assert!` only.
+    /// # Panics
+    ///
+    /// Panics if any of `vessel` and `berth` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn relocate_to_head(&mut self, vessel: VesselIndex, berth: BerthIndex) {
+        self.check(Move::RelocateToHead, [vessel], [berth]);
+        // SAFETY: `vessel` and `berth` are the graph's, as the check above found.
+        unsafe { self.relocate_to_head_unchecked(vessel, berth) }
+    }
+
+    /// The move [`relocate_to_head`](Self::relocate_to_head) makes, for ids the caller knows to be the graph's.
     ///
     /// # Safety
     ///
-    /// Vessel and berth must be in bounds.
+    /// `vessel` and `berth` must be the graph's, the condition [`relocate_to_head`](Self::relocate_to_head) checks.
     #[inline]
     pub unsafe fn relocate_to_head_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        debug_assert!(vessel.index() < self.graph.num_vessels());
-        debug_assert!(berth.index() < self.graph.num_berths());
-
+        debug_assert!(
+            vessel.index() < self.graph.num_vessels() && berth.index() < self.graph.num_berths(),
+            "called `Mutator::relocate_to_head_unchecked` with {vessel} or {berth}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
         let vessel_node = self.graph.vessel_node(vessel);
-        let head_boundary = self.graph.berth_head_boundary_node(berth);
-        let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(vessel_prev, self.graph);
-        tracker.track(vessel_node, self.graph);
-        tracker.track(head_boundary, self.graph);
-
-        let old_berth = unsafe { self.graph.vessel_berth_unchecked(vessel) };
-
+        let sentinel = self.graph.sentinel_of(berth);
+        // SAFETY: the vessel and the berth are the graph's, the precondition of this function, so the nodes named here and
+        // the nodes read from the graph are the graph's, and so are the berths.
+        let (links, from, to) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(vessel_node),
+                vessel_node,
+                sentinel,
+            ];
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                self.graph.vessel_berth_unchecked(vessel),
+                berth,
+            )
+        };
+        // SAFETY: the vessel and both berths are the graph's, as above.
         unsafe {
-            self.touched.touch_unchecked(old_berth);
-            self.touched.touch_unchecked(berth);
-        }
-
-        unsafe { self.record_relocate_unchecked(vessel) };
-        unsafe { self.graph.relocate_to_head_unchecked(vessel, berth) };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        if old_berth != berth {
-            self.diff.push_reallocation(vessel, old_berth, berth);
+            self.touch_unchecked(from);
+            self.touch_unchecked(to);
+            self.record_position_unchecked(vessel, vessel);
+            self.graph.relocate_to_head_unchecked(vessel, berth);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(vessel, vessel, from);
         }
     }
 
-    /// Relocates a single vessel to the tail (last position) of a berth.
+    /// Moves `vessel` to the tail of `berth`.
     ///
     /// ```text
-    /// Before:
-    ///   Source:  ... <-> Prev <-> Vessel <-> Next <-> ...
-    ///   Target:  ... <-> Old_Tail <-> Sentinel
-    ///
-    /// After:
-    ///   Source:  ... <-> Prev <------------> Next <-> ...
-    ///   Target:  ... <-> Old_Tail <-> Vessel <-> Sentinel
+    /// before:  ... prev -> vessel -> next ...      ... old_tail -> sentinel
+    /// after:   ... prev -> next ...                ... old_tail -> vessel -> sentinel
     /// ```
     ///
-    /// Unchecked version of `relocate_to_tail`. Uses `debug_assert!` only.
+    /// # Panics
+    ///
+    /// Panics if any of `vessel` and `berth` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn relocate_to_tail(&mut self, vessel: VesselIndex, berth: BerthIndex) {
+        self.check(Move::RelocateToTail, [vessel], [berth]);
+        // SAFETY: `vessel` and `berth` are the graph's, as the check above found.
+        unsafe { self.relocate_to_tail_unchecked(vessel, berth) }
+    }
+
+    /// The move [`relocate_to_tail`](Self::relocate_to_tail) makes, for ids the caller knows to be the graph's.
     ///
     /// # Safety
     ///
-    /// Vessel and berth must be in bounds.
+    /// `vessel` and `berth` must be the graph's, the condition [`relocate_to_tail`](Self::relocate_to_tail) checks.
     #[inline]
     pub unsafe fn relocate_to_tail_unchecked(&mut self, vessel: VesselIndex, berth: BerthIndex) {
-        debug_assert!(vessel.index() < self.graph.num_vessels());
-        debug_assert!(berth.index() < self.graph.num_berths());
-
+        debug_assert!(
+            vessel.index() < self.graph.num_vessels() && berth.index() < self.graph.num_berths(),
+            "called `Mutator::relocate_to_tail_unchecked` with {vessel} or {berth}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
         let vessel_node = self.graph.vessel_node(vessel);
-        let tail_boundary = self.graph.berth_tail_boundary_node(berth);
-        let vessel_prev = unsafe { self.graph.prev_node_unchecked(vessel_node) };
-        let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(vessel_prev, self.graph);
-        tracker.track(vessel_node, self.graph);
-        tracker.track(old_tail, self.graph);
-
-        let old_berth = unsafe { self.graph.vessel_berth_unchecked(vessel) };
-
+        let sentinel = self.graph.sentinel_of(berth);
+        // SAFETY: the vessel and the berth are the graph's, the precondition of this function, so the nodes named here and
+        // the nodes read from the graph are the graph's, and so are the berths.
+        let (links, from, to) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(vessel_node),
+                vessel_node,
+                self.graph.prev_node_unchecked(sentinel),
+            ];
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                self.graph.vessel_berth_unchecked(vessel),
+                berth,
+            )
+        };
+        // SAFETY: the vessel and both berths are the graph's, as above.
         unsafe {
-            self.touched.touch_unchecked(old_berth);
-            self.touched.touch_unchecked(berth);
-        }
-
-        unsafe { self.record_relocate_unchecked(vessel) };
-        unsafe { self.graph.relocate_to_tail_unchecked(vessel, berth) };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        if old_berth != berth {
-            self.diff.push_reallocation(vessel, old_berth, berth);
+            self.touch_unchecked(from);
+            self.touch_unchecked(to);
+            self.record_position_unchecked(vessel, vessel);
+            self.graph.relocate_to_tail_unchecked(vessel, berth);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(vessel, vessel, from);
         }
     }
 
-    /// Relocates a contiguous segment of vessels to immediately follow
-    /// another vessel.
+    /// Moves the segment `first ..= last` to directly after `anchor`, on its berth or another; nothing changes and
+    /// nothing is recorded if it already follows `anchor`.
     ///
     /// ```text
-    /// Before:
-    ///   Source: ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
-    ///   Target: ... <-> Anchor <-> Anchor_Next <-> ...
-    ///
-    /// After:
-    ///   Source: ... <-> Prev <---------------------> Next <-> ...
-    ///   Target: ... <-> Anchor <-> [ First ... Last ] <-> Anchor_Next <-> ...
+    /// before:  ... prev -> [first ... last] -> next ...      ... anchor -> anchor_next ...
+    /// after:   ... prev -> next ...                          ... anchor -> [first ... last] -> anchor_next ...
     /// ```
     ///
-    /// Unchecked version of `relocate_segment_after`. Uses `debug_assert!` only.
+    /// # Preconditions
+    ///
+    /// `last` follows `first` on its berth, and `anchor` is not a vessel of the segment. Otherwise the order breaks, though no access leaves the
+    /// graph; a debug build checks it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of `first`, `last` and `anchor` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn relocate_segment_after(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        anchor: VesselIndex,
+    ) {
+        self.check(Move::RelocateSegmentAfter, [first, last, anchor], []);
+        // SAFETY: `first`, `last` and `anchor` are the graph's, as the check above found.
+        unsafe { self.relocate_segment_after_unchecked(first, last, anchor) }
+    }
+
+    /// The move [`relocate_segment_after`](Self::relocate_segment_after) makes, for ids the caller knows to be the graph's.
+    ///
+    /// # Preconditions
+    ///
+    /// Those of [`relocate_segment_after`](Self::relocate_segment_after).
     ///
     /// # Safety
     ///
-    /// All vessels must be in bounds.
+    /// `first`, `last` and `anchor` must be the graph's, the condition [`relocate_segment_after`](Self::relocate_segment_after) checks.
     #[inline]
     pub unsafe fn relocate_segment_after_unchecked(
         &mut self,
@@ -1050,62 +709,84 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         anchor: VesselIndex,
     ) {
-        debug_assert!(first.index() < self.graph.num_vessels());
-        debug_assert!(last.index() < self.graph.num_vessels());
-        debug_assert!(anchor.index() < self.graph.num_vessels());
-
-        let first_node = self.graph.vessel_node(first);
-        let last_node = self.graph.vessel_node(last);
+        debug_assert!(
+            first.index() < self.graph.num_vessels()
+                && last.index() < self.graph.num_vessels()
+                && anchor.index() < self.graph.num_vessels(),
+            "called `Mutator::relocate_segment_after_unchecked` with {first} or {last} or {anchor}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
+        let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
         let anchor_node = self.graph.vessel_node(anchor);
-        let first_prev = unsafe { self.graph.prev_node_unchecked(first_node) };
-
-        if first_prev == anchor_node {
+        // SAFETY: `first` is the graph's, the precondition of this function, so its node is.
+        if unsafe { self.graph.prev_node_unchecked(first_node) } == anchor_node {
             return;
         }
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(first_prev, self.graph);
-        tracker.track(last_node, self.graph);
-        tracker.track(anchor_node, self.graph);
-
-        let old_berth = unsafe { self.graph.vessel_berth_unchecked(first) };
-        let anchor_berth = unsafe { self.graph.vessel_berth_unchecked(anchor) };
-
-        unsafe {
-            self.touched.touch_unchecked(old_berth);
-            self.touched.touch_unchecked(anchor_berth);
-        }
-
-        unsafe { self.record_relocate_segment_unchecked(first, last) };
-        unsafe {
-            self.graph
-                .relocate_segment_after_unchecked(first, last, anchor)
+        // SAFETY: the vessels are the graph's, the precondition of this function, so the nodes named here and the
+        // nodes read from the graph are the graph's, and so are the berths.
+        let (links, from, to) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(first_node),
+                last_node,
+                anchor_node,
+            ];
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                self.graph.vessel_berth_unchecked(first),
+                self.graph.vessel_berth_unchecked(anchor),
+            )
         };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        let final_berth = unsafe { self.graph.vessel_berth_unchecked(first) };
-        unsafe { self.record_segment_reallocation_unchecked(first, last, old_berth, final_berth) };
+        // SAFETY: the vessels and both berths are the graph's, as above.
+        unsafe {
+            self.touch_unchecked(from);
+            self.touch_unchecked(to);
+            self.record_position_unchecked(first, last);
+            self.graph
+                .relocate_segment_after_unchecked(first, last, anchor);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(first, last, from);
+        }
     }
 
-    /// Relocates a contiguous segment of vessels to immediately precede
-    /// another vessel.
+    /// Moves the segment `first ..= last` to directly before `reference`, on its berth or another; nothing changes and
+    /// nothing is recorded if it already precedes `reference`.
     ///
     /// ```text
-    /// Before:
-    ///   Source: ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
-    ///   Target: ... <-> Ref_Prev <-> Reference <-> ...
-    ///
-    /// After:
-    ///   Source: ... <-> Prev <---------------------> Next <-> ...
-    ///   Target: ... <-> Ref_Prev <-> [ First ... Last ] <-> Reference <-> ...
+    /// before:  ... prev -> [first ... last] -> next ...      ... reference_prev -> reference ...
+    /// after:   ... prev -> next ...                          ... reference_prev -> [first ... last] -> reference ...
     /// ```
     ///
-    /// Unchecked version of `relocate_segment_before`. Uses `debug_assert!` only.
+    /// # Preconditions
+    ///
+    /// `last` follows `first` on its berth, and `reference` is not a vessel of the segment. Otherwise the order breaks, though no access leaves the
+    /// graph; a debug build checks it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of `first`, `last` and `reference` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn relocate_segment_before(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        reference: VesselIndex,
+    ) {
+        self.check(Move::RelocateSegmentBefore, [first, last, reference], []);
+        // SAFETY: `first`, `last` and `reference` are the graph's, as the check above found.
+        unsafe { self.relocate_segment_before_unchecked(first, last, reference) }
+    }
+
+    /// The move [`relocate_segment_before`](Self::relocate_segment_before) makes, for ids the caller knows to be the graph's.
+    ///
+    /// # Preconditions
+    ///
+    /// Those of [`relocate_segment_before`](Self::relocate_segment_before).
     ///
     /// # Safety
     ///
-    /// All vessels must be in bounds.
+    /// `first`, `last` and `reference` must be the graph's, the condition [`relocate_segment_before`](Self::relocate_segment_before) checks.
     #[inline]
     pub unsafe fn relocate_segment_before_unchecked(
         &mut self,
@@ -1113,63 +794,84 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         reference: VesselIndex,
     ) {
-        debug_assert!(first.index() < self.graph.num_vessels());
-        debug_assert!(last.index() < self.graph.num_vessels());
-        debug_assert!(reference.index() < self.graph.num_vessels());
-
-        let first_node = self.graph.vessel_node(first);
-        let last_node = self.graph.vessel_node(last);
+        debug_assert!(
+            first.index() < self.graph.num_vessels()
+                && last.index() < self.graph.num_vessels()
+                && reference.index() < self.graph.num_vessels(),
+            "called `Mutator::relocate_segment_before_unchecked` with {first} or {last} or {reference}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
+        let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
         let reference_node = self.graph.vessel_node(reference);
+        // SAFETY: `reference` is the graph's, the precondition of this function, so its node is.
         let reference_prev = unsafe { self.graph.prev_node_unchecked(reference_node) };
-        let first_prev = unsafe { self.graph.prev_node_unchecked(first_node) };
-
         if last_node == reference_prev {
             return;
         }
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(first_prev, self.graph);
-        tracker.track(last_node, self.graph);
-        tracker.track(reference_prev, self.graph);
-
-        let old_berth = unsafe { self.graph.vessel_berth_unchecked(first) };
-        let reference_berth = unsafe { self.graph.vessel_berth_unchecked(reference) };
-
-        unsafe {
-            self.touched.touch_unchecked(old_berth);
-            self.touched.touch_unchecked(reference_berth);
-        }
-
-        unsafe { self.record_relocate_segment_unchecked(first, last) };
-        unsafe {
-            self.graph
-                .relocate_segment_before_unchecked(first, last, reference)
+        // SAFETY: the vessels are the graph's, the precondition of this function, so the nodes named here and the
+        // nodes read from the graph are the graph's, and so are the berths.
+        let (links, from, to) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(first_node),
+                last_node,
+                reference_prev,
+            ];
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                self.graph.vessel_berth_unchecked(first),
+                self.graph.vessel_berth_unchecked(reference),
+            )
         };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        let final_berth = unsafe { self.graph.vessel_berth_unchecked(first) };
-        unsafe { self.record_segment_reallocation_unchecked(first, last, old_berth, final_berth) };
+        // SAFETY: the vessels and both berths are the graph's, as above.
+        unsafe {
+            self.touch_unchecked(from);
+            self.touch_unchecked(to);
+            self.record_position_unchecked(first, last);
+            self.graph
+                .relocate_segment_before_unchecked(first, last, reference);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(first, last, from);
+        }
     }
 
-    /// Relocates a contiguous segment of vessels to the head (first
-    /// position) of a berth.
+    /// Moves the segment `first ..= last` to the head of `berth`.
     ///
     /// ```text
-    /// Before:
-    ///   Source:  ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
-    ///   Target:  Sentinel <-> Old_Head <-> ...
-    ///
-    /// After:
-    ///   Source:  ... <-> Prev <---------------------> Next <-> ...
-    ///   Target:  Sentinel <-> [ First ... Last ] <-> Old_Head <-> ...
+    /// before:  ... prev -> [first ... last] -> next ...      sentinel -> old_head ...
+    /// after:   ... prev -> next ...                          sentinel -> [first ... last] -> old_head ...
     /// ```
     ///
-    /// Unchecked version of `relocate_segment_to_head`. Uses `debug_assert!` only.
+    /// # Preconditions
+    ///
+    /// `last` follows `first` on its berth, and `berth` is not the segment's own berth with the segment at its head. Otherwise the order breaks, though no access leaves the
+    /// graph; a debug build checks it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of `first`, `last` and `berth` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn relocate_segment_to_head(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        berth: BerthIndex,
+    ) {
+        self.check(Move::RelocateSegmentToHead, [first, last], [berth]);
+        // SAFETY: `first`, `last` and `berth` are the graph's, as the check above found.
+        unsafe { self.relocate_segment_to_head_unchecked(first, last, berth) }
+    }
+
+    /// The move [`relocate_segment_to_head`](Self::relocate_segment_to_head) makes, for ids the caller knows to be the graph's.
+    ///
+    /// # Preconditions
+    ///
+    /// Those of [`relocate_segment_to_head`](Self::relocate_segment_to_head).
     ///
     /// # Safety
     ///
-    /// All vessels and berth must be in bounds.
+    /// `first`, `last` and `berth` must be the graph's, the condition [`relocate_segment_to_head`](Self::relocate_segment_to_head) checks.
     #[inline]
     pub unsafe fn relocate_segment_to_head_unchecked(
         &mut self,
@@ -1177,56 +879,79 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
-        debug_assert!(first.index() < self.graph.num_vessels());
-        debug_assert!(last.index() < self.graph.num_vessels());
-        debug_assert!(berth.index() < self.graph.num_berths());
-
-        let first_node = self.graph.vessel_node(first);
-        let last_node = self.graph.vessel_node(last);
-        let head_boundary = self.graph.berth_head_boundary_node(berth);
-        let first_prev = unsafe { self.graph.prev_node_unchecked(first_node) };
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(first_prev, self.graph);
-        tracker.track(last_node, self.graph);
-        tracker.track(head_boundary, self.graph);
-
-        let old_berth = unsafe { self.graph.vessel_berth_unchecked(first) };
-
-        unsafe {
-            self.touched.touch_unchecked(old_berth);
-            self.touched.touch_unchecked(berth);
-        }
-
-        unsafe { self.record_relocate_segment_unchecked(first, last) };
-        unsafe {
-            self.graph
-                .relocate_segment_to_head_unchecked(first, last, berth)
+        debug_assert!(
+            first.index() < self.graph.num_vessels()
+                && last.index() < self.graph.num_vessels()
+                && berth.index() < self.graph.num_berths(),
+            "called `Mutator::relocate_segment_to_head_unchecked` with {first} or {last} or {berth}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
+        let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
+        let sentinel = self.graph.sentinel_of(berth);
+        // SAFETY: the vessels and the berth are the graph's, the precondition of this function, so the nodes named here and the
+        // nodes read from the graph are the graph's, and so are the berths.
+        let (links, from, to) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(first_node),
+                last_node,
+                sentinel,
+            ];
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                self.graph.vessel_berth_unchecked(first),
+                berth,
+            )
         };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        unsafe { self.record_segment_reallocation_unchecked(first, last, old_berth, berth) };
+        // SAFETY: the vessels and both berths are the graph's, as above.
+        unsafe {
+            self.touch_unchecked(from);
+            self.touch_unchecked(to);
+            self.record_position_unchecked(first, last);
+            self.graph
+                .relocate_segment_to_head_unchecked(first, last, berth);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(first, last, from);
+        }
     }
 
-    /// Relocates a contiguous segment of vessels to the tail (last
-    /// position) of a berth.
+    /// Moves the segment `first ..= last` to the tail of `berth`.
     ///
     /// ```text
-    /// Before:
-    ///   Source:  ... <-> Prev <-> [ First ... Last ] <-> Next <-> ...
-    ///   Target:  ... <-> Old_Tail <-> Sentinel
-    ///
-    /// After:
-    ///   Source:  ... <-> Prev <---------------------> Next <-> ...
-    ///   Target:  ... <-> Old_Tail <-> [ First ... Last ] <-> Sentinel
+    /// before:  ... prev -> [first ... last] -> next ...      ... old_tail -> sentinel
+    /// after:   ... prev -> next ...                          ... old_tail -> [first ... last] -> sentinel
     /// ```
     ///
-    /// Unchecked version of `relocate_segment_to_tail`. Uses `debug_assert!` only.
+    /// # Preconditions
+    ///
+    /// `last` follows `first` on its berth. Otherwise the order breaks, though no access leaves the
+    /// graph; a debug build checks it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of `first`, `last` and `berth` is not one of the graph's.
+    #[inline]
+    #[track_caller]
+    pub fn relocate_segment_to_tail(
+        &mut self,
+        first: VesselIndex,
+        last: VesselIndex,
+        berth: BerthIndex,
+    ) {
+        self.check(Move::RelocateSegmentToTail, [first, last], [berth]);
+        // SAFETY: `first`, `last` and `berth` are the graph's, as the check above found.
+        unsafe { self.relocate_segment_to_tail_unchecked(first, last, berth) }
+    }
+
+    /// The move [`relocate_segment_to_tail`](Self::relocate_segment_to_tail) makes, for ids the caller knows to be the graph's.
+    ///
+    /// # Preconditions
+    ///
+    /// Those of [`relocate_segment_to_tail`](Self::relocate_segment_to_tail).
     ///
     /// # Safety
     ///
-    /// All vessels and berth must be in bounds.
+    /// `first`, `last` and `berth` must be the graph's, the condition [`relocate_segment_to_tail`](Self::relocate_segment_to_tail) checks.
     #[inline]
     pub unsafe fn relocate_segment_to_tail_unchecked(
         &mut self,
@@ -1234,117 +959,125 @@ impl<'a> Mutator<'a> {
         last: VesselIndex,
         berth: BerthIndex,
     ) {
-        debug_assert!(first.index() < self.graph.num_vessels());
-        debug_assert!(last.index() < self.graph.num_vessels());
-        debug_assert!(berth.index() < self.graph.num_berths());
-
-        let first_node = self.graph.vessel_node(first);
-        let last_node = self.graph.vessel_node(last);
-        let tail_boundary = self.graph.berth_tail_boundary_node(berth);
-        let first_prev = unsafe { self.graph.prev_node_unchecked(first_node) };
-        let old_tail = unsafe { self.graph.prev_node_unchecked(tail_boundary) };
-
-        let mut tracker = EdgeDeltaTracker::new();
-        tracker.track(first_prev, self.graph);
-        tracker.track(last_node, self.graph);
-        tracker.track(old_tail, self.graph);
-
-        let old_berth = unsafe { self.graph.vessel_berth_unchecked(first) };
-
-        unsafe {
-            self.touched.touch_unchecked(old_berth);
-            self.touched.touch_unchecked(berth);
-        }
-
-        unsafe { self.record_relocate_segment_unchecked(first, last) };
-        unsafe {
-            self.graph
-                .relocate_segment_to_tail_unchecked(first, last, berth)
+        debug_assert!(
+            first.index() < self.graph.num_vessels()
+                && last.index() < self.graph.num_vessels()
+                && berth.index() < self.graph.num_berths(),
+            "called `Mutator::relocate_segment_to_tail_unchecked` with {first} or {last} or {berth}, outside a graph of {} vessels and {} berths",
+            self.graph.num_vessels(),
+            self.graph.num_berths()
+        );
+        let (first_node, last_node) = (self.graph.vessel_node(first), self.graph.vessel_node(last));
+        let sentinel = self.graph.sentinel_of(berth);
+        // SAFETY: the vessels and the berth are the graph's, the precondition of this function, so the nodes named here and the
+        // nodes read from the graph are the graph's, and so are the berths.
+        let (links, from, to) = unsafe {
+            let nodes = [
+                self.graph.prev_node_unchecked(first_node),
+                last_node,
+                self.graph.prev_node_unchecked(sentinel),
+            ];
+            (
+                LinkSnapshot::new_unchecked(self.graph, nodes),
+                self.graph.vessel_berth_unchecked(first),
+                berth,
+            )
         };
-
-        tracker.commit(self.graph, &mut self.diff);
-
-        unsafe { self.record_segment_reallocation_unchecked(first, last, old_berth, berth) };
+        // SAFETY: the vessels and both berths are the graph's, as above.
+        unsafe {
+            self.touch_unchecked(from);
+            self.touch_unchecked(to);
+            self.record_position_unchecked(first, last);
+            self.graph
+                .relocate_segment_to_tail_unchecked(first, last, berth);
+            links.commit_unchecked(self.graph, self.diff);
+            self.record_berth_change_unchecked(first, last, from);
+        }
     }
 
-    // ----------------------------------------------------------------
-    // Internal helpers
-    // ----------------------------------------------------------------
-
-    /// Records the original position of a vessel before relocation.
+    /// Marks `berth` touched.
     ///
-    /// Unchecked version — uses only `debug_assert!` for bounds checks.
+    /// # Safety
+    ///
+    /// `berth` must be one of the graph's.
     #[inline(always)]
-    unsafe fn record_relocate_unchecked(&mut self, vessel: VesselIndex) {
-        match unsafe { self.graph.vessel_predecessor_unchecked(vessel) } {
-            Some(pred) => {
-                self.undo.push_relocate_after_vessel(vessel, pred);
-            }
-            None => {
-                let berth = unsafe { self.graph.vessel_berth_unchecked(vessel) };
-                self.undo.push_relocate_to_head(vessel, berth);
-            }
-        }
+    unsafe fn touch_unchecked(&mut self, berth: BerthIndex) {
+        debug_assert!(
+            berth.index() < self.graph.num_berths(),
+            "called `Mutator::touch_unchecked` with {berth}, outside a graph of {} berths",
+            self.graph.num_berths()
+        );
+        // SAFETY: `berth` is the graph's, the precondition of this function, and the touched berths count as many
+        // as the graph by the invariant of `Mutator`.
+        unsafe { self.touched.touch_unchecked(berth) };
     }
 
-    /// Records the original position of a segment before relocation.
+    /// Records in the undo log where the segment `first ..= last` stands before it is moved: after the vessel
+    /// before it, or at the head of its berth.
+    ///
+    /// # Safety
+    ///
+    /// `first` and `last` must be the graph's.
     #[inline(always)]
-    unsafe fn record_relocate_segment_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
-        match unsafe { self.graph.vessel_predecessor_unchecked(first) } {
-            Some(pred) => {
+    unsafe fn record_position_unchecked(&mut self, first: VesselIndex, last: VesselIndex) {
+        debug_assert!(
+            first.index() < self.graph.num_vessels() && last.index() < self.graph.num_vessels(),
+            "called `Mutator::record_position_unchecked` with {first} or {last}, outside a graph of {} vessels",
+            self.graph.num_vessels()
+        );
+        // SAFETY: `first` is the graph's, the precondition of this function.
+        let (predecessor, berth) = unsafe {
+            (
+                self.graph.vessel_predecessor_unchecked(first),
+                self.graph.vessel_berth_unchecked(first),
+            )
+        };
+        match (predecessor, first == last) {
+            (Some(predecessor), true) => self.undo.push_relocate_after_vessel(first, predecessor),
+            (None, true) => self.undo.push_relocate_to_head(first, berth),
+            (Some(predecessor), false) => {
                 self.undo
-                    .push_relocate_segment_after_vessel(first, last, pred);
+                    .push_relocate_segment_after_vessel(first, last, predecessor);
             }
-            None => {
-                let berth = unsafe { self.graph.vessel_berth_unchecked(first) };
-                self.undo.push_relocate_segment_to_head(first, last, berth);
-            }
+            (None, false) => self.undo.push_relocate_segment_to_head(first, last, berth),
         }
     }
 
-    /// Records reallocation diffs for every vessel in a segment that changed berths.
+    /// Records in the diff every vessel of the segment `first ..= last` as moved from `from`, if a move has just
+    /// taken the segment to another berth.
+    ///
+    /// # Preconditions
+    ///
+    /// `last` follows `first` on its berth. Otherwise the wrong vessels are recorded, and a debug build panics; the
+    /// walk ends after at most the graph's count of nodes.
+    ///
+    /// # Safety
+    ///
+    /// `first` and `last` must be the graph's.
     #[inline(always)]
-    unsafe fn record_segment_reallocation_unchecked(
+    unsafe fn record_berth_change_unchecked(
         &mut self,
         first: VesselIndex,
         last: VesselIndex,
-        old_berth: BerthIndex,
-        new_berth: BerthIndex,
+        from: BerthIndex,
     ) {
-        if old_berth == new_berth {
+        debug_assert!(
+            first.index() < self.graph.num_vessels() && last.index() < self.graph.num_vessels(),
+            "called `Mutator::record_berth_change_unchecked` with {first} or {last}, outside a graph of {} vessels",
+            self.graph.num_vessels()
+        );
+        // SAFETY: `first` is the graph's, the precondition of this function.
+        let to = unsafe { self.graph.vessel_berth_unchecked(first) };
+        if from == to {
             return;
         }
-        // SAFETY: `first` and `last` are the graph's, a precondition of this function.
+        // SAFETY: `first` and `last` are the graph's, the precondition of this function.
         let segment = unsafe { self.graph.segment_unchecked(first, last) };
         for vessel in segment {
-            self.diff.push_reallocation(vessel, old_berth, new_berth);
+            self.diff.push_reallocation(vessel, from, to);
         }
     }
-
-    /// The refusal of `step` if one of `vessels` or `berths` is not one of the graph's.
-    fn refusal<const V: usize, const B: usize>(
-        &self,
-        step: Move,
-        vessels: [VesselIndex; V],
-        berths: [BerthIndex; B],
-    ) -> Option<MoveRefusal> {
-        let vessel = vessels
-            .into_iter()
-            .find_map(|vessel| self.graph.vessel_outside(vessel));
-        let berth = || {
-            berths
-                .into_iter()
-                .find_map(|berth| self.graph.berth_outside(berth))
-        };
-        vessel
-            .or_else(berth)
-            .map(|outside| MoveRefusal { step, outside })
-    }
 }
-
-// ----------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

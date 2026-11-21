@@ -19,5 +19,5 @@ mod arena;
 mod ring_lists;
 
 pub(super) use arena::RingArena;
-pub(super) use iter::{RingLinkIter, RingSequenceIter};
+pub(super) use iter::RingSequenceIter;
 pub(super) use node::Node;
